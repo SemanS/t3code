@@ -108,6 +108,7 @@ import {
 } from "../../provider/Layers/codexLaunchArgs.ts";
 import { mergeProviderInstanceEnvironment } from "../../provider/ProviderInstanceEnvironment.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import * as HubPolicy from "../../hotovo/hubPolicy.ts";
 import {
   ProviderAdapterDriverCreateError,
   type ProviderAdapterDriver,
@@ -1207,23 +1208,27 @@ export function codexThreadRuntimeParams(input: {
 } {
   const mcpSession =
     input.threadId === null ? undefined : McpProviderSession.readMcpProviderSession(input.threadId);
+  // Tools of the Hotovo Hub project this thread belongs to, if any.
+  const hubServers = input.threadId === null ? {} : HubPolicy.codexHubMcpServers(input.threadId);
+  const mcpServers = {
+    ...hubServers,
+    ...(mcpSession === undefined
+      ? {}
+      : {
+          "t3-code": {
+            url: mcpSession.endpoint,
+            http_headers: {
+              Authorization: mcpSession.authorizationHeader,
+            },
+          },
+        }),
+  };
   return {
     ...(input.runtimePolicy?.cwd == null ? {} : { cwd: input.runtimePolicy.cwd }),
     ...(input.modelSelection === undefined ? {} : { model: input.modelSelection.model }),
     config: {
       ...CODEX_THREAD_CONFIG,
-      ...(mcpSession === undefined
-        ? {}
-        : {
-            mcp_servers: {
-              "t3-code": {
-                url: mcpSession.endpoint,
-                http_headers: {
-                  Authorization: mcpSession.authorizationHeader,
-                },
-              },
-            },
-          }),
+      ...(Object.keys(mcpServers).length === 0 ? {} : { mcp_servers: mcpServers }),
     },
   };
 }

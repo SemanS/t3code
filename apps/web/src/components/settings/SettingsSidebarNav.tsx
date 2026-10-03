@@ -13,6 +13,7 @@ import {
   ArchiveIcon,
   BlocksIcon,
   BotIcon,
+  Building2Icon,
   createLucideIcon,
   CalendarClockIcon,
   GitBranchIcon,
@@ -77,6 +78,7 @@ const T3ConnectSidebarAvatar = lazy(() =>
 const SETTINGS_SECTION_ICONS: Readonly<
   Record<SettingsPath, ComponentType<{ className?: string }>>
 > = {
+  "/settings/hotovo-hub": Building2Icon,
   "/settings/general": Settings2Icon,
   "/settings/appearance": PaletteIcon,
   "/settings/projects": PanelsTopLeftIcon,

@@ -1,6 +1,7 @@
 import {
   type DeviceListInput,
   AuthAccessReadScope,
+  AuthAccessWriteScope,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   AuthRelayReadScope,
@@ -84,6 +85,15 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.serverReportClientActivity]: AuthOrchestrationReadScope,
   [WS_METHODS.serverReportHostPowerState]: AuthOrchestrationOperateScope,
   [WS_METHODS.serverGetBackgroundPolicy]: AuthOrchestrationReadScope,
+  // Signing in binds this environment to a hub member, and shared capacity
+  // mints company credentials, so those belong to the environment's owner.
+  [WS_METHODS.hotovoHubSubscribe]: AuthOrchestrationReadScope,
+  [WS_METHODS.hotovoHubProjectUsage]: AuthOrchestrationReadScope,
+  [WS_METHODS.hotovoHubSync]: AuthOrchestrationOperateScope,
+  [WS_METHODS.hotovoHubOpenProject]: AuthOrchestrationOperateScope,
+  [WS_METHODS.hotovoHubSignIn]: AuthAccessWriteScope,
+  [WS_METHODS.hotovoHubSignOut]: AuthAccessWriteScope,
+  [WS_METHODS.hotovoHubSetSharedCapacity]: AuthAccessWriteScope,
   [WS_METHODS.scheduledTasksList]: AuthOrchestrationReadScope,
   [WS_METHODS.scheduledTasksSubscribe]: AuthOrchestrationReadScope,
   [WS_METHODS.scheduledTasksUpsert]: AuthOrchestrationOperateScope,

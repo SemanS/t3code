@@ -117,6 +117,7 @@ import * as ThreadLaunchService from "./orchestration-v2/ThreadLaunchService.ts"
 import * as ThreadMessageIntake from "./orchestration-v2/ThreadMessageIntake.ts";
 import * as IdAllocator from "./orchestration-v2/IdAllocator.ts";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
+import * as HotovoHub from "./hotovo/HotovoHub.ts";
 import {
   archivedShellStreamItemFromThreadShell,
   buildActiveShellSnapshot,
@@ -1121,6 +1122,7 @@ const makeWsRpcLayer = (
       const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
       const providerSessionManager = yield* ProviderSessionManager.ProviderSessionManagerV2;
       const scheduledTasks = yield* ScheduledTasks.ScheduledTaskService;
+      const hotovoHub = yield* HotovoHub.HotovoHub;
       const pullRequests = yield* PullRequestService.PullRequestService;
       const pullRequestSync = yield* PullRequestSyncReactor.PullRequestSyncReactor;
       const deviceService = yield* DeviceService.DeviceService;
@@ -1990,6 +1992,38 @@ const makeWsRpcLayer = (
               "orchestration_v2.thread_id": input.threadId,
             },
           ),
+        [WS_METHODS.hotovoHubSubscribe]: (_input) =>
+          observeRpcStream(WS_METHODS.hotovoHubSubscribe, hotovoHub.streamStatus, {
+            "rpc.aggregate": "hotovoHub",
+          }),
+        [WS_METHODS.hotovoHubSignIn]: (input) =>
+          observeRpcEffect(WS_METHODS.hotovoHubSignIn, hotovoHub.signIn(input), {
+            "rpc.aggregate": "hotovoHub",
+          }),
+        [WS_METHODS.hotovoHubSignOut]: (_input) =>
+          observeRpcEffect(WS_METHODS.hotovoHubSignOut, hotovoHub.signOut, {
+            "rpc.aggregate": "hotovoHub",
+          }),
+        [WS_METHODS.hotovoHubSync]: (_input) =>
+          observeRpcEffect(WS_METHODS.hotovoHubSync, hotovoHub.sync, {
+            "rpc.aggregate": "hotovoHub",
+          }),
+        [WS_METHODS.hotovoHubOpenProject]: (input) =>
+          observeRpcEffect(WS_METHODS.hotovoHubOpenProject, hotovoHub.openProject(input), {
+            "rpc.aggregate": "hotovoHub",
+          }),
+        [WS_METHODS.hotovoHubSetSharedCapacity]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.hotovoHubSetSharedCapacity,
+            hotovoHub.setSharedCapacity(input),
+            {
+              "rpc.aggregate": "hotovoHub",
+            },
+          ),
+        [WS_METHODS.hotovoHubProjectUsage]: (input) =>
+          observeRpcEffect(WS_METHODS.hotovoHubProjectUsage, hotovoHub.projectUsage(input), {
+            "rpc.aggregate": "hotovoHub",
+          }),
         [WS_METHODS.scheduledTasksList]: (_input) =>
           observeRpcEffect(WS_METHODS.scheduledTasksList, scheduledTasks.list(), {
             "rpc.aggregate": "scheduledTasks",

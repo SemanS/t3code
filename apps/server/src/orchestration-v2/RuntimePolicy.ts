@@ -11,6 +11,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
+import { capacityRejection, readHubPolicyState } from "../hotovo/hubPolicy.ts";
 import * as ProviderInstanceRegistry from "../provider/Services/ProviderInstanceRegistry.ts";
 import {
   ProviderAdapterV2RuntimePolicy,
@@ -99,10 +100,30 @@ export const layerFromProjectStore: Layer.Layer<
     return RuntimePolicyV2.of({
       resolve: Effect.fn("RuntimePolicyV2.resolve")(function* (input) {
         const instance = yield* providerInstances.getInstance(input.modelSelection.instanceId);
-        const supportedRuntimeModes =
-          instance === undefined
-            ? undefined
-            : (yield* instance.snapshot.getSnapshot).supportedRuntimeModes;
+        const snapshot = instance === undefined ? undefined : yield* instance.snapshot.getSnapshot;
+        const supportedRuntimeModes = snapshot?.supportedRuntimeModes;
+        // Hotovo Hub capacity policy: a project's own rules on personal logins,
+        // and company capacity only for the project it is billed to.
+        const hubPolicy = readHubPolicyState();
+        if (hubPolicy !== null) {
+          const project = yield* projects.get(input.thread.projectId).pipe(Effect.option);
+          const rejection = capacityRejection(hubPolicy, {
+            projectId: input.thread.projectId,
+            workspaceRoot: Option.isSome(project)
+              ? Option.getOrUndefined(project.value)?.workspaceRoot
+              : undefined,
+            instanceId: input.modelSelection.instanceId,
+            driver: snapshot?.driver ?? input.modelSelection.instanceId,
+            auth: snapshot?.auth,
+          });
+          if (rejection !== undefined) {
+            return yield* new RuntimePolicyResolveError({
+              projectId: input.thread.projectId,
+              providerInstanceId: input.modelSelection.instanceId,
+              cause: rejection,
+            });
+          }
+        }
         const cwd =
           input.thread.worktreePath ??
           (yield* projects.get(input.thread.projectId).pipe(

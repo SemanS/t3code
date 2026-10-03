@@ -1071,6 +1071,40 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:server:process-resource-history",
       tag: WS_METHODS.serverGetProcessResourceHistory,
     }),
+    /** Hotovo Hub status: snapshot on subscribe, then every change (sign-in, sync, clones, presence). */
+    hotovoHubLive: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:hotovo-hub:live",
+      tag: WS_METHODS.hotovoHubSubscribe,
+    }),
+    hotovoHubProjectUsage: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:hotovo-hub:project-usage",
+      tag: WS_METHODS.hotovoHubProjectUsage,
+      staleTimeMs: 30_000,
+    }),
+    hotovoHubSignIn: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:hotovo-hub:sign-in",
+      tag: WS_METHODS.hotovoHubSignIn,
+    }),
+    hotovoHubSignOut: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:hotovo-hub:sign-out",
+      tag: WS_METHODS.hotovoHubSignOut,
+    }),
+    hotovoHubSync: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:hotovo-hub:sync",
+      tag: WS_METHODS.hotovoHubSync,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId }) => environmentId,
+      },
+    }),
+    hotovoHubOpenProject: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:hotovo-hub:open-project",
+      tag: WS_METHODS.hotovoHubOpenProject,
+    }),
+    hotovoHubSetSharedCapacity: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:hotovo-hub:shared-capacity",
+      tag: WS_METHODS.hotovoHubSetSharedCapacity,
+    }),
     /** Live scheduled-task list: snapshot on subscribe, fresh list after every server-side change. */
     scheduledTasksLive: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:server:scheduled-tasks:live",

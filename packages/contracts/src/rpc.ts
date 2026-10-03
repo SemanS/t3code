@@ -315,6 +315,14 @@ import {
   ScheduledTaskMutationResult,
 } from "./scheduledTask.ts";
 import {
+  HotovoHubError,
+  HotovoHubProjectInput,
+  HotovoHubProjectUsage,
+  HotovoHubSharedCapacityInput,
+  HotovoHubSignInInput,
+  HotovoHubStatus,
+} from "./hotovoHub.ts";
+import {
   ProjectCloneActionInput,
   ProjectCloneActionResult,
   ProjectCloneListEvent,
@@ -465,6 +473,15 @@ export const WS_METHODS = {
   serverGetBackgroundPolicy: "server.getBackgroundPolicy",
   serverGetUsageSummary: "server.getUsageSummary",
   serverRefreshUsageRates: "server.refreshUsageRates",
+
+  // Hotovo Hub (company registry this environment provisions from)
+  hotovoHubSubscribe: "hotovoHub.subscribe",
+  hotovoHubSignIn: "hotovoHub.signIn",
+  hotovoHubSignOut: "hotovoHub.signOut",
+  hotovoHubSync: "hotovoHub.sync",
+  hotovoHubOpenProject: "hotovoHub.openProject",
+  hotovoHubSetSharedCapacity: "hotovoHub.setSharedCapacity",
+  hotovoHubProjectUsage: "hotovoHub.projectUsage",
 
   // Scheduled tasks
   scheduledTasksList: "scheduledTasks.list",
@@ -1637,6 +1654,49 @@ const WsScheduledTasksSubscribeRpc = Rpc.make(WS_METHODS.scheduledTasksSubscribe
   stream: true,
 });
 
+const WsHotovoHubSubscribeRpc = Rpc.make(WS_METHODS.hotovoHubSubscribe, {
+  payload: Schema.Struct({}),
+  success: HotovoHubStatus,
+  error: Schema.Union([HotovoHubError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
+const WsHotovoHubSignInRpc = Rpc.make(WS_METHODS.hotovoHubSignIn, {
+  payload: HotovoHubSignInInput,
+  success: HotovoHubStatus,
+  error: Schema.Union([HotovoHubError, EnvironmentAuthorizationError]),
+});
+
+const WsHotovoHubSignOutRpc = Rpc.make(WS_METHODS.hotovoHubSignOut, {
+  payload: Schema.Struct({}),
+  success: HotovoHubStatus,
+  error: Schema.Union([HotovoHubError, EnvironmentAuthorizationError]),
+});
+
+const WsHotovoHubSyncRpc = Rpc.make(WS_METHODS.hotovoHubSync, {
+  payload: Schema.Struct({}),
+  success: HotovoHubStatus,
+  error: Schema.Union([HotovoHubError, EnvironmentAuthorizationError]),
+});
+
+const WsHotovoHubOpenProjectRpc = Rpc.make(WS_METHODS.hotovoHubOpenProject, {
+  payload: HotovoHubProjectInput,
+  success: HotovoHubStatus,
+  error: Schema.Union([HotovoHubError, EnvironmentAuthorizationError]),
+});
+
+const WsHotovoHubSetSharedCapacityRpc = Rpc.make(WS_METHODS.hotovoHubSetSharedCapacity, {
+  payload: HotovoHubSharedCapacityInput,
+  success: HotovoHubStatus,
+  error: Schema.Union([HotovoHubError, EnvironmentAuthorizationError]),
+});
+
+const WsHotovoHubProjectUsageRpc = Rpc.make(WS_METHODS.hotovoHubProjectUsage, {
+  payload: HotovoHubProjectInput,
+  success: HotovoHubProjectUsage,
+  error: Schema.Union([HotovoHubError, EnvironmentAuthorizationError]),
+});
+
 const WsScheduledTasksUpsertRpc = Rpc.make(WS_METHODS.scheduledTasksUpsert, {
   payload: ScheduledTaskUpsertInput,
   success: ScheduledTaskMutationResult,
@@ -1730,6 +1790,13 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetUsageSummaryRpc,
   WsServerRefreshUsageRatesRpc,
   WsServerSignalProcessRpc,
+  WsHotovoHubSubscribeRpc,
+  WsHotovoHubSignInRpc,
+  WsHotovoHubSignOutRpc,
+  WsHotovoHubSyncRpc,
+  WsHotovoHubOpenProjectRpc,
+  WsHotovoHubSetSharedCapacityRpc,
+  WsHotovoHubProjectUsageRpc,
   WsScheduledTasksListRpc,
   WsScheduledTasksSubscribeRpc,
   WsScheduledTasksUpsertRpc,

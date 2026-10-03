@@ -117,6 +117,7 @@ import { mergeProviderInstanceEnvironment } from "../../provider/ProviderInstanc
 import { T3_CODE_ORCHESTRATION_INSTRUCTIONS } from "../../provider/T3OrchestrationInstructions.ts";
 import { buildRuntimeInstructions } from "../../provider/RuntimeInstructions.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import * as HubPolicy from "../../hotovo/hubPolicy.ts";
 import * as IdAllocator from "../IdAllocator.ts";
 import { makeProviderFailure, makeProviderRetryTurnItem } from "../ProviderFailure.ts";
 import { turnScopedSelectionTransition } from "../ProviderSelectionTransition.ts";
@@ -790,6 +791,8 @@ export function makeClaudeQueryOptions(input: {
   readonly sdkSettings?: string | ClaudeSdkSettings;
   readonly environment?: NodeJS.ProcessEnv;
   readonly mcpServers?: ClaudeQueryOptions["mcpServers"];
+  /** Appended after T3's own instructions, e.g. the Hotovo Hub project brief. */
+  readonly appendSystemPrompt?: string;
   readonly tools?: ClaudeAgentSdkQueryTools;
   readonly allowedTools?: ReadonlyArray<string>;
   readonly disallowedTools?: ReadonlyArray<string>;
@@ -882,7 +885,8 @@ export function makeClaudeQueryOptions(input: {
       preset: "claude_code" as const,
       append:
         buildRuntimeInstructions({ harness: "Claude Code" }) +
-        (input.mcpServers === undefined ? "" : T3_CODE_ORCHESTRATION_INSTRUCTIONS),
+        (input.mcpServers?.["t3-code"] === undefined ? "" : T3_CODE_ORCHESTRATION_INSTRUCTIONS) +
+        (input.appendSystemPrompt ?? ""),
     },
     ...(Object.keys(extraArgs).length === 0 ? {} : { extraArgs }),
   };
@@ -939,17 +943,28 @@ export function claudeMcpQueryOverrides(input: {
 }): {
   readonly allowedTools?: ReadonlyArray<string>;
   readonly mcpServers?: ClaudeQueryOptions["mcpServers"];
+  readonly appendSystemPrompt?: string;
 } {
   const session = McpProviderSession.readMcpProviderSession(input.threadId);
+  // Tools and instructions of the Hotovo Hub project this thread belongs to, if any.
+  const hubServers = HubPolicy.claudeHubMcpServers(input.threadId);
+  const hubInstructions = HubPolicy.hubInstructionsForThread(input.threadId);
+  const hub = hubInstructions === "" ? {} : { appendSystemPrompt: hubInstructions };
   if (session === undefined) {
-    return input.allowedTools === undefined ? {} : { allowedTools: input.allowedTools };
+    return {
+      ...(input.allowedTools === undefined ? {} : { allowedTools: input.allowedTools }),
+      ...(Object.keys(hubServers).length === 0 ? {} : { mcpServers: hubServers }),
+      ...hub,
+    };
   }
   const mcpAllowedTools = input.readOnlySandbox
     ? CLAUDE_READ_ONLY_T3_MCP_ALLOWED_TOOLS
     : [CLAUDE_T3_MCP_TOOL_WILDCARD];
   return {
+    ...hub,
     allowedTools: Array.from(new Set([...(input.allowedTools ?? []), ...mcpAllowedTools])),
     mcpServers: {
+      ...hubServers,
       "t3-code": {
         type: "http",
         url: session.endpoint,
