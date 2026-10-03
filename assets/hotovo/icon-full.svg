@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- Hotovo Peer mark, full bleed for favicons and touch icons. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2E342C"/>
+      <stop offset="1" stop-color="#131611"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="220" fill="url(#bg)"/>
+  <g transform="translate(512 512) scale(1.18) translate(-522 -510)">
+    <path fill="#FFFFFF" d="M235,270 h110 v190 c40,-50 95,-75 160,-75 c110,0 165,65 165,180 v185 h-110 v-220 c0,-60 -25,-90 -80,-90 c-60,0 -135,45 -135,110 v200 h-110 z"/>
+    <circle cx="755" cy="695" r="55" fill="#FF6400"/>
+  </g>
+</svg>

@@ -16,7 +16,8 @@ export function resolveDesktopBaseDir(input: {
   readonly t3Home: Option.Option<string>;
 }): string {
   return Option.getOrElse(normalizeConfiguredBaseDir(input.t3Home), () =>
-    input.joinPath(input.homeDirectory, ".t3"),
+    // Hotovo Peer keeps its own home, never the T3 Code install's ~/.t3.
+    input.joinPath(input.homeDirectory, ".hotovo"),
   );
 }
 

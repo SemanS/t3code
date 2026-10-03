@@ -54,7 +54,8 @@ import { Command, Flag } from "effect/unstable/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
-const DESKTOP_APP_ID = "com.t3tools.t3code";
+// Hotovo Peer: its own bundle id, so it installs next to T3 Code instead of replacing it.
+const DESKTOP_APP_ID = "sk.hotovo.peer";
 const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
@@ -1789,9 +1790,11 @@ export const preflightMacDesktopBuild = Effect.fn("preflightMacDesktopBuild")(fu
   arch: typeof BuildArch.Type,
 ) {
   const rustTargets = resolveResourceMonitorRustTargets("mac", arch);
-  const reuseResourceMonitor = yield* Config.Boolean("T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR").pipe(
-    Config.withDefault(false),
-  );
+  const reuseResourceMonitor =
+    (yield* Config.Boolean("T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR").pipe(
+      Config.withDefault(false),
+    )) ||
+    (yield* Config.Boolean("T3CODE_DESKTOP_SKIP_RESOURCE_MONITOR").pipe(Config.withDefault(false)));
   const checks = yield* Effect.all(
     {
       rust: reuseResourceMonitor
@@ -2230,6 +2233,18 @@ export const stageResourceMonitor = Effect.fn("stageResourceMonitor")(function* 
   const reuseResourceMonitor = yield* Config.Boolean("T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR").pipe(
     Config.withDefault(false),
   );
+  // The collector is optional at runtime; skipping it lets a machine without Rust build the app.
+  if (
+    yield* Config.Boolean("T3CODE_DESKTOP_SKIP_RESOURCE_MONITOR").pipe(Config.withDefault(false))
+  ) {
+    yield* fs.makeDirectory(path.join(input.stageResourcesDir, "resource-monitor"), {
+      recursive: true,
+    });
+    yield* Effect.log(
+      "[desktop-artifact] Skipping the resource monitor (T3CODE_DESKTOP_SKIP_RESOURCE_MONITOR).",
+    );
+    return;
+  }
   const builtBinaries: string[] = [];
 
   for (const rustTarget of rustTargets) {
@@ -2644,8 +2659,8 @@ export function resolvePackageManagerUserAgent(packageManager: string): string {
 
 export function resolveDesktopProductName(version: string): string {
   return resolveDesktopUpdateChannel(version) === "nightly"
-    ? "T3 Code (Nightly)"
-    : (desktopPackageJson.productName ?? "T3 Code");
+    ? "Hotovo Peer (Nightly)"
+    : (desktopPackageJson.productName ?? "Hotovo Peer");
 }
 
 export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
@@ -2670,7 +2685,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   const buildConfig: Record<string, unknown> = {
     appId: DESKTOP_APP_ID,
     productName: resolveDesktopProductName(version),
-    artifactName: "T3-Code-${version}-${arch}.${ext}",
+    artifactName: "Hotovo-Peer-${version}-${arch}.${ext}",
     electronLanguages: [...DESKTOP_ELECTRON_LANGUAGES],
     files: [
       ...DESKTOP_FILE_EXCLUSIONS,
@@ -2721,12 +2736,12 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       category: "public.app-category.developer-tools",
       extendInfo: {
         NSScreenCaptureUsageDescription:
-          "T3 Code captures the active window when you use the window capture shortcut.",
+          "Hotovo Peer captures the active window when you use the window capture shortcut.",
       },
       protocols: [
         {
-          name: "T3 Code",
-          schemes: ["t3code", "t3code-dev"],
+          name: "Hotovo Peer",
+          schemes: ["hotovo-peer"],
         },
       ],
       ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
@@ -2779,8 +2794,8 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       // t3code:// OAuth callbacks to the app.
       protocols: [
         {
-          name: "T3 Code",
-          schemes: ["t3code", "t3code-dev"],
+          name: "Hotovo Peer",
+          schemes: ["hotovo-peer"],
         },
       ],
       desktop: {
@@ -3692,16 +3707,16 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       ? path.join(stageAppDir, WINDOWS_SERVER_RESOURCE_SOURCE_DIR, WINDOWS_SERVER_ASAR_RESOURCE)
       : undefined;
   const stagePackageJson: StagePackageJson = {
-    name: "t3code",
+    name: "hotovo-peer",
     version: appVersion,
     buildVersion: appVersion,
     t3codeCommitHash: commitHash,
     private: true,
     packageManager: rootPackageJson.packageManager,
-    description: "T3 Code desktop build",
+    description: "Hotovo Peer desktop build (a T3 Code fork)",
     // Required by the .deb control file.
-    homepage: "https://t3.codes",
-    author: "T3 Tools",
+    homepage: "https://github.com/SemanS/t3code",
+    author: "Hotovo",
     main: "apps/desktop/dist-electron/boot.cjs",
     build: yield* createBuildConfig(
       options.platform,
