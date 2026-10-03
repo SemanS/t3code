@@ -1,24 +1,25 @@
-// Renders the Hotovo Peer icons from assets/hotovo/*.svg into the paths the
+// Renders the Peer icons from assets/peer/*.svg into the paths the
 // desktop build and the web favicons read (assets/prod). Run from the repo root:
-//   node scripts/export-hotovo-icons.mjs
-import { readFile, writeFile } from "node:fs/promises";
-import path from "node:path";
-import { createRequire } from "node:module";
+//   node scripts/export-peer-icons.mjs
+import * as NodeFS from "node:fs";
+import * as NodeFSP from "node:fs/promises";
+import * as NodeModule from "node:module";
+import * as NodePath from "node:path";
 
-const root = path.resolve(import.meta.dirname, "..");
-const require = createRequire(path.join(root, "apps/desktop/package.json"));
+const root = NodePath.resolve(import.meta.dirname, "..");
+const require = NodeModule.createRequire(NodePath.join(root, "apps/desktop/package.json"));
 let sharp;
 try {
   sharp = require("sharp");
 } catch {
-  const pnpmDir = path.join(root, "node_modules/.pnpm");
-  const { readdirSync } = await import("node:fs");
-  const entry = readdirSync(pnpmDir).find((name) => name.startsWith("sharp@"));
-  sharp = (await import(path.join(pnpmDir, entry, "node_modules/sharp/dist/index.mjs"))).default;
+  const pnpmDir = NodePath.join(root, "node_modules/.pnpm");
+  const entry = NodeFS.readdirSync(pnpmDir).find((name) => name.startsWith("sharp@"));
+  sharp = (await import(NodePath.join(pnpmDir, entry, "node_modules/sharp/dist/index.mjs")))
+    .default;
 }
 
-const macSvg = await readFile(path.join(root, "assets/hotovo/icon-macos.svg"));
-const fullSvg = await readFile(path.join(root, "assets/hotovo/icon-full.svg"));
+const macSvg = await NodeFSP.readFile(NodePath.join(root, "assets/peer/icon-macos.svg"));
+const fullSvg = await NodeFSP.readFile(NodePath.join(root, "assets/peer/icon-full.svg"));
 const png = (svg, size) => sharp(svg, { density: 384 }).resize(size, size).png().toBuffer();
 
 const outputs = [
@@ -30,7 +31,7 @@ const outputs = [
   ["assets/prod/t3-black-web-favicon-16x16.png", fullSvg, 16],
 ];
 for (const [file, svg, size] of outputs) {
-  await writeFile(path.join(root, file), await png(svg, size));
+  await NodeFSP.writeFile(NodePath.join(root, file), await png(svg, size));
   console.log(`wrote ${file}`);
 }
 
@@ -52,8 +53,8 @@ sizes.forEach((size, i) => {
   header.writeUInt32LE(offset, entry + 12);
   offset += images[i].length;
 });
-await writeFile(
-  path.join(root, "assets/prod/t3-black-web-favicon.ico"),
+await NodeFSP.writeFile(
+  NodePath.join(root, "assets/prod/t3-black-web-favicon.ico"),
   Buffer.concat([header, ...images]),
 );
 console.log("wrote assets/prod/t3-black-web-favicon.ico");

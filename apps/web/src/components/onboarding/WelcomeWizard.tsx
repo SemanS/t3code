@@ -73,7 +73,6 @@ import { buildProviderInstanceUpdatePatch } from "../settings/SettingsPanels.log
 import { TerminalViewport } from "../ThreadTerminalDrawer";
 import { CloudEnvironmentConnectRows } from "../cloud/CloudEnvironmentConnectList";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
-import { T3Wordmark } from "../T3Wordmark";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
 import { Checkbox } from "../ui/checkbox";
@@ -87,21 +86,28 @@ import { Dialog } from "../ui/dialog";
 import { toastManager } from "../ui/toast";
 import { cn } from "../../lib/utils";
 import { formatRelativeTime } from "../../timestampFormat";
+import { WorkspaceStep } from "./WorkspaceStep";
 
 /**
  * First-run welcome wizard. Rendered over the workspace at `/welcome` on a
- * fresh install (no completed-onboarding flag, empty workspace). Flow per the
- * onboarding overhaul spec: connection choice → sign-in/pair (remote paths) →
- * managed Codex setup or an inline CLI terminal → project import → main screen.
- * Every step past the connection gate is skippable; the whole wizard is
- * re-runnable by clearing the flag.
+ * fresh install (no completed-onboarding flag, empty workspace). Flow: join
+ * the team's workspace (email sign-in; skippable, local server only) →
+ * connection choice → sign-in/pair (remote paths) → managed Codex setup or an
+ * inline CLI terminal → project import → main screen. Every step past the
+ * connection gate is skippable; the whole wizard is re-runnable by clearing
+ * the flag.
  */
 
-type WizardStep = "connection" | "agents" | "import";
+type WizardStep = "workspace" | "connection" | "agents" | "import";
 const NO_ENVIRONMENTS: readonly EnvironmentId[] = [];
 
 const AGENT_ONBOARDING_THREAD_ID = ThreadId.make("onboarding-agent-setup");
-const ONBOARDING_STAGES = ["Connect", "Agents", "Projects"] as const;
+const STAGE_LABELS: Readonly<Record<WizardStep, string>> = {
+  workspace: "Workspace",
+  connection: "Connect",
+  agents: "Agents",
+  import: "Projects",
+};
 const SCAN_LIMIT_MESSAGE = "Scan limit reached. Some projects or conversations may be missing.";
 
 export function WelcomeWizard({
@@ -115,7 +121,13 @@ export function WelcomeWizard({
   readonly onDone: (projectRef?: ScopedProjectRef) => void | Promise<void>;
 }) {
   const completeOnboarding = useCompleteOnboarding();
-  const [step, setStep] = useState<WizardStep>(resumeEnvironmentId ? "agents" : "connection");
+  // Workspaces live on this machine's server, so the step needs one.
+  const stages: readonly WizardStep[] = localAvailable
+    ? ["workspace", "connection", "agents", "import"]
+    : ["connection", "agents", "import"];
+  const [step, setStep] = useState<WizardStep>(
+    resumeEnvironmentId ? "agents" : (stages[0] ?? "connection"),
+  );
   const { environments } = useEnvironments();
   const [selection, setSelection] = useState<ReadonlySet<EnvironmentId> | null>(null);
   const autoSelectedComputers = useRef(new Set<EnvironmentId>());
@@ -154,7 +166,7 @@ export function WelcomeWizard({
     setSetupIds(ids);
     setStep("agents");
   };
-  const stageIndex = step === "agents" ? 1 : step === "import" ? 2 : 0;
+  const stageIndex = Math.max(0, stages.indexOf(step));
   const finish = useCallback(
     (projectRef?: ScopedProjectRef, importWarning?: string, importedThreadCount = 0) => {
       if (finishingPromiseRef.current !== null) return finishingPromiseRef.current;
@@ -218,29 +230,29 @@ export function WelcomeWizard({
         initialFocus={() => document.getElementById("onboarding-pairing-url") ?? true}
       >
         <WizardHeader
-          title="Set up T3 Code"
+          title="Set up Peer"
           identity={
-            <div className="flex items-baseline gap-1.5" role="img" aria-label="T3 Code">
-              <T3Wordmark className="h-4 w-auto shrink-0" aria-hidden />
-              <span className="text-2xl font-medium tracking-tight text-muted-foreground">
-                Code
-              </span>
+            <div className="flex items-baseline gap-1.5" role="img" aria-label="Peer">
+              <span className="text-2xl font-semibold tracking-tight text-foreground">Peer</span>
             </div>
           }
         >
           <WizardSteps
-            steps={ONBOARDING_STAGES}
+            steps={stages.map((stage) => STAGE_LABELS[stage])}
             currentStep={stageIndex}
             isStepDisabled={(index) => isImporting || index >= stageIndex}
             onStepChange={(index) => {
               if (isImporting || index > stageIndex) return;
-              setStep(index === 0 ? "connection" : "agents");
+              const target = stages[index] ?? "connection";
+              setStep(target === "import" ? "agents" : target);
             }}
           />
         </WizardHeader>
 
         <WizardPanel holdHeight={isLoadingProjects}>
-          {step === "connection" ? (
+          {step === "workspace" ? (
+            <WorkspaceStep onContinue={() => setStep("connection")} />
+          ) : step === "connection" ? (
             <ConnectionStep
               expandPairingInitially={!localAvailable && !hasCloudPublicConfig()}
               selectedIds={selectedIds}

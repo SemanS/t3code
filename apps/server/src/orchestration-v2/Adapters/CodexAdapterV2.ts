@@ -108,7 +108,7 @@ import {
 } from "../../provider/Layers/codexLaunchArgs.ts";
 import { mergeProviderInstanceEnvironment } from "../../provider/ProviderInstanceEnvironment.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
-import * as HubPolicy from "../../hotovo/hubPolicy.ts";
+import * as HubPolicy from "../../peerHub/hubPolicy.ts";
 import {
   ProviderAdapterDriverCreateError,
   type ProviderAdapterDriver,
@@ -1208,7 +1208,7 @@ export function codexThreadRuntimeParams(input: {
 } {
   const mcpSession =
     input.threadId === null ? undefined : McpProviderSession.readMcpProviderSession(input.threadId);
-  // Tools of the Hotovo Hub project this thread belongs to, if any.
+  // Tools of the Peer workspace project this thread belongs to, if any.
   const hubServers = input.threadId === null ? {} : HubPolicy.codexHubMcpServers(input.threadId);
   const mcpServers = {
     ...hubServers,

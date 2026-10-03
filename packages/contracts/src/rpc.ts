@@ -315,13 +315,17 @@ import {
   ScheduledTaskMutationResult,
 } from "./scheduledTask.ts";
 import {
-  HotovoHubError,
-  HotovoHubProjectInput,
-  HotovoHubProjectUsage,
-  HotovoHubSharedCapacityInput,
-  HotovoHubSignInInput,
-  HotovoHubStatus,
-} from "./hotovoHub.ts";
+  PeerHubCreateWorkspaceInput,
+  PeerHubError,
+  PeerHubFinishSignInInput,
+  PeerHubInviteInput,
+  PeerHubProjectInput,
+  PeerHubProjectUsage,
+  PeerHubSharedCapacityInput,
+  PeerHubStartSignInInput,
+  PeerHubStatus,
+  PeerHubWorkspaceInput,
+} from "./peerHub.ts";
 import {
   ProjectCloneActionInput,
   ProjectCloneActionResult,
@@ -474,14 +478,19 @@ export const WS_METHODS = {
   serverGetUsageSummary: "server.getUsageSummary",
   serverRefreshUsageRates: "server.refreshUsageRates",
 
-  // Hotovo Hub (company registry this environment provisions from)
-  hotovoHubSubscribe: "hotovoHub.subscribe",
-  hotovoHubSignIn: "hotovoHub.signIn",
-  hotovoHubSignOut: "hotovoHub.signOut",
-  hotovoHubSync: "hotovoHub.sync",
-  hotovoHubOpenProject: "hotovoHub.openProject",
-  hotovoHubSetSharedCapacity: "hotovoHub.setSharedCapacity",
-  hotovoHubProjectUsage: "hotovoHub.projectUsage",
+  // Peer Hub (the workspaces this environment signs in to and provisions from)
+  peerHubSubscribe: "peerHub.subscribe",
+  peerHubStartSignIn: "peerHub.startSignIn",
+  peerHubFinishSignIn: "peerHub.finishSignIn",
+  peerHubSignOut: "peerHub.signOut",
+  peerHubSync: "peerHub.sync",
+  peerHubCreateWorkspace: "peerHub.createWorkspace",
+  peerHubJoinWorkspace: "peerHub.joinWorkspace",
+  peerHubLeaveWorkspace: "peerHub.leaveWorkspace",
+  peerHubInvite: "peerHub.invite",
+  peerHubOpenProject: "peerHub.openProject",
+  peerHubSetSharedCapacity: "peerHub.setSharedCapacity",
+  peerHubProjectUsage: "peerHub.projectUsage",
 
   // Scheduled tasks
   scheduledTasksList: "scheduledTasks.list",
@@ -1654,47 +1663,77 @@ const WsScheduledTasksSubscribeRpc = Rpc.make(WS_METHODS.scheduledTasksSubscribe
   stream: true,
 });
 
-const WsHotovoHubSubscribeRpc = Rpc.make(WS_METHODS.hotovoHubSubscribe, {
+const WsPeerHubSubscribeRpc = Rpc.make(WS_METHODS.peerHubSubscribe, {
   payload: Schema.Struct({}),
-  success: HotovoHubStatus,
-  error: Schema.Union([HotovoHubError, EnvironmentAuthorizationError]),
+  success: PeerHubStatus,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
   stream: true,
 });
 
-const WsHotovoHubSignInRpc = Rpc.make(WS_METHODS.hotovoHubSignIn, {
-  payload: HotovoHubSignInInput,
-  success: HotovoHubStatus,
-  error: Schema.Union([HotovoHubError, EnvironmentAuthorizationError]),
+const WsPeerHubStartSignInRpc = Rpc.make(WS_METHODS.peerHubStartSignIn, {
+  payload: PeerHubStartSignInInput,
+  success: PeerHubStatus,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
 });
 
-const WsHotovoHubSignOutRpc = Rpc.make(WS_METHODS.hotovoHubSignOut, {
+const WsPeerHubFinishSignInRpc = Rpc.make(WS_METHODS.peerHubFinishSignIn, {
+  payload: PeerHubFinishSignInInput,
+  success: PeerHubStatus,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
+const WsPeerHubSignOutRpc = Rpc.make(WS_METHODS.peerHubSignOut, {
   payload: Schema.Struct({}),
-  success: HotovoHubStatus,
-  error: Schema.Union([HotovoHubError, EnvironmentAuthorizationError]),
+  success: PeerHubStatus,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
 });
 
-const WsHotovoHubSyncRpc = Rpc.make(WS_METHODS.hotovoHubSync, {
+const WsPeerHubSyncRpc = Rpc.make(WS_METHODS.peerHubSync, {
   payload: Schema.Struct({}),
-  success: HotovoHubStatus,
-  error: Schema.Union([HotovoHubError, EnvironmentAuthorizationError]),
+  success: PeerHubStatus,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
 });
 
-const WsHotovoHubOpenProjectRpc = Rpc.make(WS_METHODS.hotovoHubOpenProject, {
-  payload: HotovoHubProjectInput,
-  success: HotovoHubStatus,
-  error: Schema.Union([HotovoHubError, EnvironmentAuthorizationError]),
+const WsPeerHubCreateWorkspaceRpc = Rpc.make(WS_METHODS.peerHubCreateWorkspace, {
+  payload: PeerHubCreateWorkspaceInput,
+  success: PeerHubStatus,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
 });
 
-const WsHotovoHubSetSharedCapacityRpc = Rpc.make(WS_METHODS.hotovoHubSetSharedCapacity, {
-  payload: HotovoHubSharedCapacityInput,
-  success: HotovoHubStatus,
-  error: Schema.Union([HotovoHubError, EnvironmentAuthorizationError]),
+const WsPeerHubJoinWorkspaceRpc = Rpc.make(WS_METHODS.peerHubJoinWorkspace, {
+  payload: PeerHubWorkspaceInput,
+  success: PeerHubStatus,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
 });
 
-const WsHotovoHubProjectUsageRpc = Rpc.make(WS_METHODS.hotovoHubProjectUsage, {
-  payload: HotovoHubProjectInput,
-  success: HotovoHubProjectUsage,
-  error: Schema.Union([HotovoHubError, EnvironmentAuthorizationError]),
+const WsPeerHubLeaveWorkspaceRpc = Rpc.make(WS_METHODS.peerHubLeaveWorkspace, {
+  payload: PeerHubWorkspaceInput,
+  success: PeerHubStatus,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
+const WsPeerHubInviteRpc = Rpc.make(WS_METHODS.peerHubInvite, {
+  payload: PeerHubInviteInput,
+  success: PeerHubStatus,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
+const WsPeerHubOpenProjectRpc = Rpc.make(WS_METHODS.peerHubOpenProject, {
+  payload: PeerHubProjectInput,
+  success: PeerHubStatus,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
+const WsPeerHubSetSharedCapacityRpc = Rpc.make(WS_METHODS.peerHubSetSharedCapacity, {
+  payload: PeerHubSharedCapacityInput,
+  success: PeerHubStatus,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
+const WsPeerHubProjectUsageRpc = Rpc.make(WS_METHODS.peerHubProjectUsage, {
+  payload: PeerHubProjectInput,
+  success: PeerHubProjectUsage,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
 });
 
 const WsScheduledTasksUpsertRpc = Rpc.make(WS_METHODS.scheduledTasksUpsert, {
@@ -1790,13 +1829,18 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetUsageSummaryRpc,
   WsServerRefreshUsageRatesRpc,
   WsServerSignalProcessRpc,
-  WsHotovoHubSubscribeRpc,
-  WsHotovoHubSignInRpc,
-  WsHotovoHubSignOutRpc,
-  WsHotovoHubSyncRpc,
-  WsHotovoHubOpenProjectRpc,
-  WsHotovoHubSetSharedCapacityRpc,
-  WsHotovoHubProjectUsageRpc,
+  WsPeerHubSubscribeRpc,
+  WsPeerHubStartSignInRpc,
+  WsPeerHubFinishSignInRpc,
+  WsPeerHubSignOutRpc,
+  WsPeerHubSyncRpc,
+  WsPeerHubCreateWorkspaceRpc,
+  WsPeerHubJoinWorkspaceRpc,
+  WsPeerHubLeaveWorkspaceRpc,
+  WsPeerHubInviteRpc,
+  WsPeerHubOpenProjectRpc,
+  WsPeerHubSetSharedCapacityRpc,
+  WsPeerHubProjectUsageRpc,
   WsScheduledTasksListRpc,
   WsScheduledTasksSubscribeRpc,
   WsScheduledTasksUpsertRpc,

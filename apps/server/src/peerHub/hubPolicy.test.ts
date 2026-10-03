@@ -1,4 +1,4 @@
-import { type HotovoHubProject, ProjectId, ThreadId } from "@t3tools/contracts";
+import { type PeerProject, ProjectId, ThreadId } from "@t3tools/contracts";
 import { afterEach, assert, describe, it } from "@effect/vitest";
 
 import {
@@ -12,15 +12,17 @@ import {
   type HubPolicyState,
 } from "./hubPolicy.ts";
 
+const ACME = { slug: "acme", name: "Acme" };
+
 function project(
-  overrides: Partial<HotovoHubProject["capacity"]> & { readonly id?: string } = {},
-): HotovoHubProject {
+  overrides: Partial<PeerProject["capacity"]> & { readonly id?: string } = {},
+): PeerProject {
   const { id = "kirkwood", ...capacity } = overrides;
   return {
     id,
     name: id === "kirkwood" ? "Kirkwood" : "PitchPlace",
     role: "member",
-    members: [{ id: "slavo", name: "Slavo" }],
+    members: [{ email: "ana@acme.test", name: "Ana" }],
     repositories: [{ id: "app", url: "git@example.test:app.git", branch: "main" }],
     knowledge: { kontext: true, company: true },
     tools: [
@@ -32,7 +34,7 @@ function project(
       },
       {
         id: "company-knowledge",
-        name: "Hotovo knowledge",
+        name: "Acme knowledge",
         mcp: {
           transport: "stdio",
           command: "kontext",
@@ -63,7 +65,7 @@ function project(
 }
 
 function state(
-  projects: ReadonlyArray<readonly [string, HotovoHubProject]>,
+  projects: ReadonlyArray<readonly [string, PeerProject]>,
   options: {
     readonly shared?: ReadonlyArray<readonly [string, string]>;
     readonly knowledge?: string | null;
@@ -72,22 +74,27 @@ function state(
   const bound = new Map(
     projects.map(([projectId, p]) => [
       projectId,
-      { project: p, repositoryPath: `/work/${p.id}/app` },
+      { workspace: ACME, project: p, repositoryPath: `/work/acme/${p.id}/app` },
     ]),
   );
+  const knowledge = options.knowledge === undefined ? "/hub/acme/knowledge" : options.knowledge;
   return {
-    hubName: "Hotovo",
     projects: bound,
     roots: new Map([...bound.values()].map((entry) => [entry.repositoryPath, entry])),
-    sharedInstances: new Map(options.shared ?? []),
-    companyKnowledgePath: options.knowledge === undefined ? "/hub/knowledge" : options.knowledge,
+    sharedInstances: new Map(
+      (options.shared ?? []).map(([instanceId, projectId]) => [
+        instanceId,
+        { workspace: ACME, projectId },
+      ]),
+    ),
+    knowledgePaths: new Map(knowledge === null ? [] : [["acme", knowledge]]),
   };
 }
 
 afterEach(() => setHubPolicyState(null));
 
 describe("capacityRejection", () => {
-  it("lets anything run outside hub projects and before sign-in", () => {
+  it("lets anything run outside workspace projects and before sign-in", () => {
     assert.isUndefined(
       capacityRejection(null, { projectId: "p", instanceId: "claudeAgent", driver: "claudeAgent" }),
     );
@@ -101,15 +108,15 @@ describe("capacityRejection", () => {
     );
   });
 
-  it("keeps company capacity on the project it is billed to", () => {
+  it("keeps shared capacity on the project it is billed to", () => {
     const hub = state(
       [
         ["t3-kw", project()],
         ["t3-pp", project({ id: "pitchplace" })],
       ],
-      { shared: [["hotovo-kirkwood-claude", "kirkwood"]] },
+      { shared: [["peer-acme-kirkwood-claude", "kirkwood"]] },
     );
-    const shared = { instanceId: "hotovo-kirkwood-claude", driver: "claudeAgent" };
+    const shared = { instanceId: "peer-acme-kirkwood-claude", driver: "claudeAgent" };
     assert.isUndefined(capacityRejection(hub, { projectId: "t3-kw", ...shared }));
     assert.match(
       capacityRejection(hub, { projectId: "t3-pp", ...shared }) ?? "",
@@ -121,18 +128,38 @@ describe("capacityRejection", () => {
     );
   });
 
+  it("tells apart same-named projects of different workspaces", () => {
+    const hub: HubPolicyState = {
+      ...state([["t3-kw", project()]]),
+      sharedInstances: new Map([
+        [
+          "peer-globex-kirkwood-claude",
+          { workspace: { slug: "globex", name: "Globex" }, projectId: "kirkwood" },
+        ],
+      ]),
+    };
+    assert.match(
+      capacityRejection(hub, {
+        projectId: "t3-kw",
+        instanceId: "peer-globex-kirkwood-claude",
+        driver: "claudeAgent",
+      }) ?? "",
+      /Globex capacity billed to "kirkwood"/,
+    );
+  });
+
   it("matches a hand-added project by its checkout path", () => {
     const hub = state([["t3-kw", project({ personal: "none" })]]);
     const rejection = capacityRejection(hub, {
       projectId: "added-by-hand",
-      workspaceRoot: "/work/kirkwood/app",
+      workspaceRoot: "/work/acme/kirkwood/app",
       instanceId: "claudeAgent",
       driver: "claudeAgent",
     });
-    assert.match(rejection ?? "", /company capacity only/);
+    assert.match(rejection ?? "", /shared capacity only/);
   });
 
-  it("refuses personal logins in a company-capacity-only project", () => {
+  it("refuses personal logins in a shared-capacity-only project", () => {
     const hub = state([["t3-kw", project({ personal: "none" })]]);
     assert.match(
       capacityRejection(hub, {
@@ -140,7 +167,7 @@ describe("capacityRejection", () => {
         instanceId: "claudeAgent",
         driver: "claudeAgent",
       }) ?? "",
-      /Kirkwood runs on company capacity only/,
+      /Kirkwood runs on Acme's shared capacity only/,
     );
   });
 
@@ -194,11 +221,11 @@ describe("agent tools", () => {
   it("resolves project, knowledge and secret placeholders", () => {
     const context = {
       projectRoot: "/work/kw",
-      companyKnowledge: "/hub/knowledge",
+      companyKnowledge: "/hub/acme/knowledge",
       env: { TOKEN: "s3cret" },
     };
     assert.equal(resolveToolValue("${project.root}/x", context), "/work/kw/x");
-    assert.equal(resolveToolValue("${company.knowledge}", context), "/hub/knowledge");
+    assert.equal(resolveToolValue("${company.knowledge}", context), "/hub/acme/knowledge");
     assert.equal(resolveToolValue("Bearer ${secret:TOKEN}", context), "Bearer s3cret");
     assert.equal(resolveToolValue("${secret:MISSING}", context), "");
     assert.equal(resolveToolValue("${unknown}", context), "${unknown}");
@@ -221,7 +248,7 @@ describe("agent tools", () => {
         type: "stdio",
         command: "kontext",
         args: ["mcp"],
-        env: { KONTEXT_DIR: "/hub/knowledge" },
+        env: { KONTEXT_DIR: "/hub/acme/knowledge" },
       });
       assert.deepEqual(claude.tracker, {
         type: "http",
@@ -234,7 +261,7 @@ describe("agent tools", () => {
         "company-knowledge",
         "tracker",
       ]);
-      assert.match(hubInstructionsForThread(threadId), /hub project "Kirkwood"[\s\S]*ctx_brief/);
+      assert.match(hubInstructionsForThread(threadId), /Acme project "Kirkwood"[\s\S]*ctx_brief/);
     } finally {
       delete process.env.TRACKER_TOKEN;
     }
@@ -247,7 +274,7 @@ describe("agent tools", () => {
     assert.notInclude(Object.keys(claudeHubMcpServers(threadId)), "company-knowledge");
   });
 
-  it("gives threads outside hub projects nothing", () => {
+  it("gives threads outside workspace projects nothing", () => {
     const threadId = ThreadId.make("thread-3");
     setHubPolicyState(state([["t3-kw", project()]]));
     bindThreadProject(threadId, ProjectId.make("somewhere-else"));

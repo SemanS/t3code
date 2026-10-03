@@ -1071,39 +1071,59 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:server:process-resource-history",
       tag: WS_METHODS.serverGetProcessResourceHistory,
     }),
-    /** Hotovo Hub status: snapshot on subscribe, then every change (sign-in, sync, clones, presence). */
-    hotovoHubLive: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
-      label: "environment-data:hotovo-hub:live",
-      tag: WS_METHODS.hotovoHubSubscribe,
+    /** Peer workspaces: snapshot on subscribe, then every change (sign-in, sync, clones, presence). */
+    peerHubLive: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:peer-hub:live",
+      tag: WS_METHODS.peerHubSubscribe,
     }),
-    hotovoHubProjectUsage: createEnvironmentRpcQueryAtomFamily(runtime, {
-      label: "environment-data:hotovo-hub:project-usage",
-      tag: WS_METHODS.hotovoHubProjectUsage,
+    peerHubProjectUsage: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:peer-hub:project-usage",
+      tag: WS_METHODS.peerHubProjectUsage,
       staleTimeMs: 30_000,
     }),
-    hotovoHubSignIn: createEnvironmentRpcCommand(runtime, {
-      label: "environment-data:hotovo-hub:sign-in",
-      tag: WS_METHODS.hotovoHubSignIn,
+    peerHubStartSignIn: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:start-sign-in",
+      tag: WS_METHODS.peerHubStartSignIn,
     }),
-    hotovoHubSignOut: createEnvironmentRpcCommand(runtime, {
-      label: "environment-data:hotovo-hub:sign-out",
-      tag: WS_METHODS.hotovoHubSignOut,
+    peerHubFinishSignIn: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:finish-sign-in",
+      tag: WS_METHODS.peerHubFinishSignIn,
     }),
-    hotovoHubSync: createEnvironmentRpcCommand(runtime, {
-      label: "environment-data:hotovo-hub:sync",
-      tag: WS_METHODS.hotovoHubSync,
+    peerHubSignOut: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:sign-out",
+      tag: WS_METHODS.peerHubSignOut,
+    }),
+    peerHubSync: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:sync",
+      tag: WS_METHODS.peerHubSync,
       concurrency: {
         mode: "singleFlight",
         key: ({ environmentId }) => environmentId,
       },
     }),
-    hotovoHubOpenProject: createEnvironmentRpcCommand(runtime, {
-      label: "environment-data:hotovo-hub:open-project",
-      tag: WS_METHODS.hotovoHubOpenProject,
+    peerHubCreateWorkspace: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:create-workspace",
+      tag: WS_METHODS.peerHubCreateWorkspace,
     }),
-    hotovoHubSetSharedCapacity: createEnvironmentRpcCommand(runtime, {
-      label: "environment-data:hotovo-hub:shared-capacity",
-      tag: WS_METHODS.hotovoHubSetSharedCapacity,
+    peerHubJoinWorkspace: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:join-workspace",
+      tag: WS_METHODS.peerHubJoinWorkspace,
+    }),
+    peerHubLeaveWorkspace: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:leave-workspace",
+      tag: WS_METHODS.peerHubLeaveWorkspace,
+    }),
+    peerHubInvite: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:invite",
+      tag: WS_METHODS.peerHubInvite,
+    }),
+    peerHubOpenProject: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:open-project",
+      tag: WS_METHODS.peerHubOpenProject,
+    }),
+    peerHubSetSharedCapacity: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:shared-capacity",
+      tag: WS_METHODS.peerHubSetSharedCapacity,
     }),
     /** Live scheduled-task list: snapshot on subscribe, fresh list after every server-side change. */
     scheduledTasksLive: createEnvironmentRpcSubscriptionAtomFamily(runtime, {

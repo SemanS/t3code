@@ -264,8 +264,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
   });
 
   it("switches desktop packaging product names to nightly for nightly builds", () => {
-    assert.equal(resolveDesktopProductName("0.0.17"), "Hotovo Peer");
-    assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "Hotovo Peer (Nightly)");
+    assert.equal(resolveDesktopProductName("0.0.17"), "Peer");
+    assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "Peer (Nightly)");
   });
 
   it("switches desktop packaging icons to the nightly artwork for nightly versions", () => {
@@ -667,7 +667,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         "**/*.map",
       ]);
       assert.deepStrictEqual(mac.dmg, {
-        title: "Hotovo Peer 1.2.3 Installer",
+        title: "Peer 1.2.3 Installer",
         background: "dmg/dmg-background-latest.png",
         window: { width: 640, height: 432 },
         contents: [
@@ -679,10 +679,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       });
       // A Linux AppImage build also emits the .deb from the same run.
       assert.deepStrictEqual((linux.linux as Record<string, unknown>).target, ["AppImage", "deb"]);
-      // Hotovo Peer registers only its own scheme, so it never takes over
+      // Peer registers only its own scheme, so it never takes over
       // T3 Code's t3code:// deep links when both apps are installed.
       assert.deepStrictEqual((linux.linux as Record<string, unknown>).protocols, [
-        { name: "Hotovo Peer", schemes: ["hotovo-peer"] },
+        { name: "Peer", schemes: ["peer-desktop"] },
       ]);
       assert.deepStrictEqual(mac.files, [...DESKTOP_FILE_EXCLUSIONS, ...MAC_FILE_EXCLUSIONS]);
       assert.deepStrictEqual(linux.files, [...DESKTOP_FILE_EXCLUSIONS, ...LINUX_FILE_EXCLUSIONS]);
@@ -1869,7 +1869,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     });
 
     assert.deepStrictEqual(configuration, {
-      appId: "sk.hotovo.peer",
+      appId: "io.github.semans.peer",
       teamId: "ABC1234567",
       rpDomains: ["example.clerk.accounts.dev"],
       provisioningProfilePath: "/tmp/t3code.provisionprofile",
@@ -1889,7 +1889,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       "clerk.example.com",
       "example.clerk.accounts.dev",
     ]);
-    assert.include(entitlements, "<string>ABC1234567.sk.hotovo.peer</string>");
+    assert.include(entitlements, "<string>ABC1234567.io.github.semans.peer</string>");
     assert.include(entitlements, "<string>webcredentials:clerk.example.com</string>");
     assert.include(entitlements, "<string>webcredentials:example.clerk.accounts.dev</string>");
     assert.include(entitlements, "<key>com.apple.security.cs.allow-jit</key>");
@@ -1984,11 +1984,11 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       });
 
       const mac = config.mac as Record<string, unknown>;
-      assert.equal(config.appId, "sk.hotovo.peer");
+      assert.equal(config.appId, "io.github.semans.peer");
       assert.equal(mac.entitlements, "/tmp/entitlements.mac.plist");
       assert.equal(mac.provisioningProfile, "/tmp/t3code.provisionprofile");
       assert.match(String(mac.sign), /[\\/]scripts[\\/]sign-macos\.ts$/);
-      assert.deepStrictEqual(mac.protocols, [{ name: "Hotovo Peer", schemes: ["hotovo-peer"] }]);
+      assert.deepStrictEqual(mac.protocols, [{ name: "Peer", schemes: ["peer-desktop"] }]);
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
   );
 

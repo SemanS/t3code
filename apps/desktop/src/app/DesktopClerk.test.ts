@@ -110,7 +110,7 @@ describe("DesktopClerk", () => {
       // the lock both lives in and creates the userData directory — so the
       // real path must be set before the bridge exists.
       assert.deepEqual(events, [
-        "setPath:userData:/tmp/app-data/hotovo-peer-dev",
+        "setPath:userData:/tmp/app-data/peer-desktop-dev",
         "createClerkBridge",
       ]);
       storageMock.mockClear();
@@ -123,13 +123,13 @@ describe("DesktopClerk", () => {
       name: "packaged Windows",
       isDevelopment: false,
       platform: "win32" as const,
-      userData: "/tmp/app-data/hotovo-peer",
+      userData: "/tmp/app-data/peer-desktop",
     },
     {
       name: "development",
       isDevelopment: true,
       platform: "win32" as const,
-      userData: "/tmp/app-data/hotovo-peer-dev",
+      userData: "/tmp/app-data/peer-desktop-dev",
     },
   ])(
     "creates the bridge before startup can yield to the event loop ($name)",

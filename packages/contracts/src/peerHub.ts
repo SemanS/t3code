@@ -1,0 +1,320 @@
+import * as Schema from "effect/Schema";
+
+import { ProjectId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+
+/**
+ * Peer Hub: the workspace service a Peer environment signs in to.
+ *
+ * People sign in with their email address (a one-time code), then join the
+ * workspaces their address qualifies for — by its domain or by an invite —
+ * or create one. A workspace declares projects, their repositories, agent
+ * tools, knowledge and AI capacity; this environment provisions them
+ * locally. The manifest mirrors the hub's
+ * `GET /v1/workspaces/{slug}/manifest` (version 2). Unknown fields from a
+ * newer hub are ignored on decode.
+ */
+
+/** Agent runtime families a workspace project may allow, named as the hub names them. */
+export const PeerHarness = Schema.Literals([
+  "claude",
+  "codex",
+  "cursor",
+  "grok",
+  "opencode",
+  "antigravity",
+]);
+export type PeerHarness = typeof PeerHarness.Type;
+
+export const PeerMcpServer = Schema.Union([
+  Schema.Struct({
+    transport: Schema.Literal("stdio"),
+    command: Schema.String,
+    args: Schema.Array(Schema.String),
+    env: Schema.Record(Schema.String, Schema.String),
+  }),
+  Schema.Struct({
+    transport: Schema.Literals(["http", "sse"]),
+    url: Schema.String,
+    headers: Schema.Record(Schema.String, Schema.String),
+  }),
+]);
+export type PeerMcpServer = typeof PeerMcpServer.Type;
+
+export const PeerTool = Schema.Struct({
+  id: Schema.String,
+  name: Schema.String,
+  description: Schema.optional(Schema.String),
+  mcp: PeerMcpServer,
+  requires: Schema.Array(
+    Schema.Struct({
+      command: Schema.String,
+      install: Schema.optional(Schema.String),
+      docs: Schema.optional(Schema.String),
+    }),
+  ),
+});
+export type PeerTool = typeof PeerTool.Type;
+
+export const PeerPersonalCapacityPolicy = Schema.Literals(["any", "commercial", "none"]);
+export type PeerPersonalCapacityPolicy = typeof PeerPersonalCapacityPolicy.Type;
+
+export const PeerCurrency = Schema.Literals(["EUR", "USD"]);
+export type PeerCurrency = typeof PeerCurrency.Type;
+
+export const PeerWorkspaceRole = Schema.Literals(["owner", "admin", "member"]);
+export type PeerWorkspaceRole = typeof PeerWorkspaceRole.Type;
+
+const BudgetPeriod = Schema.Literals(["day", "week", "month"]);
+
+export const PeerProject = Schema.Struct({
+  id: Schema.String,
+  name: Schema.String,
+  description: Schema.optional(Schema.String),
+  client: Schema.optional(Schema.String),
+  role: Schema.Literals(["lead", "member"]),
+  members: Schema.Array(Schema.Struct({ email: Schema.String, name: Schema.String })),
+  repositories: Schema.Array(
+    Schema.Struct({ id: Schema.String, url: Schema.String, branch: Schema.String }),
+  ),
+  knowledge: Schema.Struct({ kontext: Schema.Boolean, company: Schema.Boolean }),
+  tools: Schema.Array(PeerTool),
+  capacity: Schema.Struct({
+    personal: PeerPersonalCapacityPolicy,
+    /** Harnesses the member declared a qualifying seat for (informational for "commercial"). */
+    personalHarnesses: Schema.Array(PeerHarness),
+    shared: Schema.optional(
+      Schema.Struct({
+        pool: Schema.String,
+        gatewayUrl: Schema.String,
+        models: Schema.Array(
+          Schema.Struct({ id: Schema.String, harness: Schema.Array(PeerHarness) }),
+        ),
+        budget: Schema.Struct({
+          amount: Schema.Number,
+          period: BudgetPeriod,
+          currency: PeerCurrency,
+        }),
+        allocation: Schema.optional(Schema.Number),
+        use: Schema.Array(Schema.Literals(["on-demand", "overflow", "automation"])),
+      }),
+    ),
+  }),
+});
+export type PeerProject = typeof PeerProject.Type;
+
+export const PeerManifest = Schema.Struct({
+  version: Schema.Literal(2),
+  workspace: Schema.Struct({
+    slug: Schema.String,
+    name: Schema.String,
+    currency: PeerCurrency,
+    revision: Schema.optional(Schema.String),
+  }),
+  member: Schema.Struct({
+    email: Schema.String,
+    name: Schema.String,
+    role: PeerWorkspaceRole,
+  }),
+  knowledge: Schema.Struct({
+    company: Schema.optional(
+      Schema.Struct({ repository: Schema.String, branch: Schema.String, store: Schema.String }),
+    ),
+  }),
+  projects: Schema.Array(PeerProject),
+});
+export type PeerManifest = typeof PeerManifest.Type;
+
+export const PeerCheckoutState = Schema.Literals(["missing", "cloning", "ready", "error"]);
+export type PeerCheckoutState = typeof PeerCheckoutState.Type;
+
+export const PeerPresenceThread = Schema.Struct({
+  title: Schema.String,
+  status: Schema.String,
+  branch: Schema.optional(Schema.String),
+  harness: Schema.optional(Schema.String),
+  capacity: Schema.optional(Schema.Literals(["personal", "shared"])),
+});
+export type PeerPresenceThread = typeof PeerPresenceThread.Type;
+
+/** One workspace project as provisioned on this environment. */
+export const PeerProjectState = Schema.Struct({
+  project: PeerProject,
+  repositories: Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      url: Schema.String,
+      branch: Schema.String,
+      path: Schema.String,
+      state: PeerCheckoutState,
+      error: Schema.optional(Schema.String),
+      projectId: Schema.optional(ProjectId),
+    }),
+  ),
+  tools: Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      name: Schema.String,
+      /** Required commands not found on this environment's PATH, with how to install them. */
+      missing: Schema.Array(
+        Schema.Struct({ command: Schema.String, install: Schema.optional(Schema.String) }),
+      ),
+    }),
+  ),
+  sharedCapacity: Schema.Struct({
+    enabled: Schema.Boolean,
+    instanceIds: Schema.Array(Schema.String),
+    error: Schema.optional(Schema.String),
+  }),
+  /** Colleagues' environments working on this project right now. */
+  peers: Schema.Array(
+    Schema.Struct({
+      email: Schema.String,
+      name: Schema.String,
+      environment: Schema.String,
+      threads: Schema.Array(PeerPresenceThread),
+      seenAt: Schema.String,
+    }),
+  ),
+});
+export type PeerProjectState = typeof PeerProjectState.Type;
+
+/** A workspace this member belongs to, with what it provisions here. */
+export const PeerWorkspaceState = Schema.Struct({
+  slug: Schema.String,
+  name: Schema.String,
+  role: PeerWorkspaceRole,
+  /** Addresses in these domains may join without an invite. */
+  allowedDomains: Schema.Array(Schema.String),
+  currency: PeerCurrency,
+  /** Where the applied configuration came from, e.g. a registry commit. */
+  revision: Schema.optional(Schema.String),
+  memberName: Schema.String,
+  companyKnowledge: Schema.NullOr(
+    Schema.Struct({
+      repository: Schema.String,
+      path: Schema.String,
+      state: PeerCheckoutState,
+      error: Schema.optional(Schema.String),
+    }),
+  ),
+  projects: Schema.Array(PeerProjectState),
+  lastSyncAt: Schema.NullOr(Schema.String),
+  error: Schema.NullOr(Schema.String),
+});
+export type PeerWorkspaceState = typeof PeerWorkspaceState.Type;
+
+/** A workspace this member may join: their address is in its domains, or they were invited. */
+export const PeerJoinableWorkspace = Schema.Struct({
+  slug: Schema.String,
+  name: Schema.String,
+  allowedDomains: Schema.Array(Schema.String),
+  reason: Schema.Literals(["domain", "invite"]),
+});
+export type PeerJoinableWorkspace = typeof PeerJoinableWorkspace.Type;
+
+export const PeerHubStatus = Schema.Struct({
+  /** The hub this environment signs in to (the default one until changed). */
+  hubUrl: Schema.String,
+  signedIn: Schema.Boolean,
+  /** The verified address of the signed-in person. */
+  email: Schema.NullOr(Schema.String),
+  /** A code was mailed to this address and waits to be entered. */
+  pendingSignIn: Schema.NullOr(
+    Schema.Struct({
+      email: Schema.String,
+      sentAt: Schema.String,
+      /** Only from a hub that echoes codes (local development and tests). */
+      echoedCode: Schema.optional(Schema.String),
+    }),
+  ),
+  workspaces: Schema.Array(PeerWorkspaceState),
+  joinable: Schema.Array(PeerJoinableWorkspace),
+  /** Directory workspace projects are checked out under, e.g. ~/Peer */
+  workspaceRoot: Schema.String,
+  syncing: Schema.Boolean,
+  lastSyncAt: Schema.NullOr(Schema.String),
+  error: Schema.NullOr(Schema.String),
+});
+export type PeerHubStatus = typeof PeerHubStatus.Type;
+
+export const PeerHubStartSignInInput = Schema.Struct({
+  email: TrimmedNonEmptyString,
+  /** Another hub than the current one, e.g. a company's own. */
+  hubUrl: Schema.optional(TrimmedNonEmptyString),
+});
+export type PeerHubStartSignInInput = typeof PeerHubStartSignInInput.Type;
+
+export const PeerHubFinishSignInInput = Schema.Struct({ code: TrimmedNonEmptyString });
+export type PeerHubFinishSignInInput = typeof PeerHubFinishSignInInput.Type;
+
+export const PeerHubCreateWorkspaceInput = Schema.Struct({
+  slug: TrimmedNonEmptyString,
+  name: TrimmedNonEmptyString,
+  /** Email domains whose people may join without an invite; the creator must have an address there. */
+  allowedDomains: Schema.Array(TrimmedNonEmptyString),
+});
+export type PeerHubCreateWorkspaceInput = typeof PeerHubCreateWorkspaceInput.Type;
+
+export const PeerHubWorkspaceInput = Schema.Struct({ workspace: TrimmedNonEmptyString });
+export type PeerHubWorkspaceInput = typeof PeerHubWorkspaceInput.Type;
+
+export const PeerHubInviteInput = Schema.Struct({
+  workspace: TrimmedNonEmptyString,
+  email: TrimmedNonEmptyString,
+  role: Schema.optional(Schema.Literals(["admin", "member"])),
+});
+export type PeerHubInviteInput = typeof PeerHubInviteInput.Type;
+
+export const PeerHubProjectInput = Schema.Struct({
+  workspace: TrimmedNonEmptyString,
+  projectId: TrimmedNonEmptyString,
+});
+export type PeerHubProjectInput = typeof PeerHubProjectInput.Type;
+
+export const PeerHubSharedCapacityInput = Schema.Struct({
+  workspace: TrimmedNonEmptyString,
+  projectId: TrimmedNonEmptyString,
+  enabled: Schema.Boolean,
+});
+export type PeerHubSharedCapacityInput = typeof PeerHubSharedCapacityInput.Type;
+
+export const PeerHubProjectUsage = Schema.Struct({
+  project: Schema.String,
+  currency: PeerCurrency,
+  shared: Schema.NullOr(
+    Schema.Struct({
+      budget: Schema.Number,
+      period: BudgetPeriod,
+      spent: Schema.Number,
+      members: Schema.Array(
+        Schema.Struct({
+          id: Schema.String,
+          name: Schema.String,
+          allocation: Schema.NullOr(Schema.Number),
+          spent: Schema.Number,
+        }),
+      ),
+    }),
+  ),
+  /** Token totals peers reported for this period, personal and shared. */
+  reported: Schema.Array(
+    Schema.Struct({
+      member: Schema.String,
+      harness: Schema.String,
+      capacity: Schema.Literals(["personal", "shared"]),
+      inputTokens: Schema.Number,
+      outputTokens: Schema.Number,
+      cachedInputTokens: Schema.Number,
+      costUsd: Schema.NullOr(Schema.Number),
+    }),
+  ),
+});
+export type PeerHubProjectUsage = typeof PeerHubProjectUsage.Type;
+
+export class PeerHubError extends Schema.TaggedError<PeerHubError>()("PeerHubError", {
+  detail: Schema.String,
+}) {
+  override get message(): string {
+    return this.detail;
+  }
+}

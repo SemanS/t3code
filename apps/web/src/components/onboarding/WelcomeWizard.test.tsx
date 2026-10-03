@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { EnvironmentId, ProjectId } from "@t3tools/contracts";
+import { EnvironmentId, ProjectId, type PeerHubStatus } from "@t3tools/contracts";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 
 const mocks = vi.hoisted(() => ({
@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   refresh: vi.fn(),
   toast: vi.fn(),
   projects: [] as Array<{ id: string; environmentId: string; workspaceRoot: string }>,
+  peerHubStatus: null as PeerHubStatus | null,
 }));
 vi.mock("../../state/agentSessions", () => ({ agentSessionImport: "import" }));
 vi.mock("../../state/projects", () => ({ projectEnvironment: { create: "create" } }));
@@ -32,6 +33,7 @@ vi.mock("../../state/environments", () => {
     environmentId: "test-env",
     label: "Computer",
     connection: { phase: "connected" },
+    serverConfig: {},
   };
   return {
     useEnvironments: () => ({ environments: [environment] }),
@@ -82,6 +84,10 @@ vi.mock("../settings/CodexSetupSection", () => ({
 vi.mock("../cloud/CloudEnvironmentConnectList", () => ({
   CloudEnvironmentConnectRows: () => null,
 }));
+vi.mock("../workspaces/WorkspaceAccess", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../workspaces/WorkspaceAccess")>()),
+  usePeerHubStatus: () => mocks.peerHubStatus,
+}));
 vi.mock("../ui/toast", () => ({
   toastManager: { add: mocks.toast, close: vi.fn(), update: vi.fn() },
 }));
@@ -106,6 +112,7 @@ beforeEach(() => {
     value: () => [],
   });
   mocks.projects = [{ id: "test-project", environmentId: "test-env", workspaceRoot: "/project" }];
+  mocks.peerHubStatus = null;
   mocks.complete.mockResolvedValue(undefined);
   mocks.refresh.mockResolvedValue(undefined);
   mocks.importThreads.mockResolvedValue({
@@ -137,6 +144,7 @@ it("enters the workspace after a partial import and warns after navigation finis
   });
   const onDone = vi.fn(() => navigation);
   await act(async () => root.render(<WelcomeWizard localAvailable onDone={onDone} />));
+  await click("Skip for now");
   await click("Continue");
   await click("Continue");
   await click("Import 1 project");
@@ -172,6 +180,7 @@ it.each([
     });
     const onDone = vi.fn();
     await act(async () => root.render(<WelcomeWizard localAvailable onDone={onDone} />));
+    await click("Skip for now");
     await click("Continue");
     await click("Continue");
     await click("Import 1 project");
@@ -195,6 +204,7 @@ it("keeps setup open when saving completion fails and preserves the import warni
   mocks.complete.mockRejectedValueOnce(new Error("settings unavailable"));
   const onDone = vi.fn();
   await act(async () => root.render(<WelcomeWizard localAvailable onDone={onDone} />));
+  await click("Skip for now");
   await click("Continue");
   await click("Continue");
   await click("Import 1 project");
@@ -211,4 +221,42 @@ it("keeps setup open when saving completion fails and preserves the import warni
       description: "Imported 28 threads. 1 thread could not be imported.",
     }),
   );
+});
+
+const SIGNED_OUT: PeerHubStatus = {
+  hubUrl: "https://hub.example.test",
+  signedIn: false,
+  email: null,
+  pendingSignIn: null,
+  workspaces: [],
+  joinable: [],
+  workspaceRoot: "/home/ana/Peer",
+  syncing: false,
+  lastSyncAt: null,
+  error: null,
+};
+
+it("asks for a work email first, then offers the workspaces that address may join", async () => {
+  mocks.peerHubStatus = SIGNED_OUT;
+  await act(async () => root.render(<WelcomeWizard localAvailable onDone={vi.fn()} />));
+  expect(document.querySelector("h1")?.textContent).toBe("Join your team");
+  expect(document.querySelector("#peer-sign-in-email")).not.toBeNull();
+
+  mocks.peerHubStatus = {
+    ...SIGNED_OUT,
+    signedIn: true,
+    email: "ana@acme.test",
+    joinable: [{ slug: "acme", name: "Acme", allowedDomains: ["acme.test"], reason: "domain" }],
+  };
+  await act(async () => root.render(<WelcomeWizard localAvailable onDone={vi.fn()} />));
+  expect(document.querySelector("h1")?.textContent).toBe("Choose a workspace");
+  expect(document.body.textContent).toContain("Anyone with an @acme.test address can join.");
+
+  await click("Skip for now");
+  expect(document.querySelector("h1")?.textContent).toBe("Connect your computers");
+});
+
+it("leaves the workspace step out without a local server", async () => {
+  await act(async () => root.render(<WelcomeWizard localAvailable={false} onDone={vi.fn()} />));
+  expect(document.querySelector("h1")?.textContent).toBe("Connect your computers");
 });

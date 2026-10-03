@@ -22,15 +22,12 @@ it.layer(NodeServices.layer)("DesktopPreReadyFileSystem", (it) => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-pre-ready-fs-" });
-      yield* fileSystem.makeDirectory(path.join(root, "Hotovo Peer (Alpha)"));
-      yield* fileSystem.writeFileString(
-        path.join(root, "Hotovo Peer (Alpha)", "Local State"),
-        "keys",
-      );
+      yield* fileSystem.makeDirectory(path.join(root, "Peer (Alpha)"));
+      yield* fileSystem.writeFileString(path.join(root, "Peer (Alpha)", "Local State"), "keys");
 
       const userData = yield* resolveWindowsUserData(root);
 
-      assert.equal(userData, path.join(root, "hotovo-peer"));
+      assert.equal(userData, path.join(root, "peer-desktop"));
       assert.equal(yield* fileSystem.readFileString(path.join(userData, "Local State")), "keys");
     }),
   );

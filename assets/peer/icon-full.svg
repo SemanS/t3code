@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- Peer mark, full bleed for favicons and touch icons: a "p" and the peer beside it. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#232A35"/>
+      <stop offset="1" stop-color="#0E1218"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="220" fill="url(#bg)"/>
+  <g transform="translate(512 512) scale(1.1) translate(-604 -544)">
+    <circle cx="548" cy="450" r="150" fill="none" stroke="#FFFFFF" stroke-width="104"/>
+    <path d="M346 300 A52 52 0 0 1 398 248 H548 V300 H450 V788 A52 52 0 0 1 346 788 Z" fill="#FFFFFF"/>
+    <circle cx="800" cy="778" r="62" fill="#2DD4BF"/>
+  </g>
+</svg>

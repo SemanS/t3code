@@ -117,7 +117,7 @@ import * as ThreadLaunchService from "./orchestration-v2/ThreadLaunchService.ts"
 import * as ThreadMessageIntake from "./orchestration-v2/ThreadMessageIntake.ts";
 import * as IdAllocator from "./orchestration-v2/IdAllocator.ts";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
-import * as HotovoHub from "./hotovo/HotovoHub.ts";
+import * as PeerHub from "./peerHub/PeerHub.ts";
 import {
   archivedShellStreamItemFromThreadShell,
   buildActiveShellSnapshot,
@@ -1122,7 +1122,7 @@ const makeWsRpcLayer = (
       const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
       const providerSessionManager = yield* ProviderSessionManager.ProviderSessionManagerV2;
       const scheduledTasks = yield* ScheduledTasks.ScheduledTaskService;
-      const hotovoHub = yield* HotovoHub.HotovoHub;
+      const peerHub = yield* PeerHub.PeerHub;
       const pullRequests = yield* PullRequestService.PullRequestService;
       const pullRequestSync = yield* PullRequestSyncReactor.PullRequestSyncReactor;
       const deviceService = yield* DeviceService.DeviceService;
@@ -1992,37 +1992,53 @@ const makeWsRpcLayer = (
               "orchestration_v2.thread_id": input.threadId,
             },
           ),
-        [WS_METHODS.hotovoHubSubscribe]: (_input) =>
-          observeRpcStream(WS_METHODS.hotovoHubSubscribe, hotovoHub.streamStatus, {
-            "rpc.aggregate": "hotovoHub",
+        [WS_METHODS.peerHubSubscribe]: (_input) =>
+          observeRpcStream(WS_METHODS.peerHubSubscribe, peerHub.streamStatus, {
+            "rpc.aggregate": "peerHub",
           }),
-        [WS_METHODS.hotovoHubSignIn]: (input) =>
-          observeRpcEffect(WS_METHODS.hotovoHubSignIn, hotovoHub.signIn(input), {
-            "rpc.aggregate": "hotovoHub",
+        [WS_METHODS.peerHubStartSignIn]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubStartSignIn, peerHub.startSignIn(input), {
+            "rpc.aggregate": "peerHub",
           }),
-        [WS_METHODS.hotovoHubSignOut]: (_input) =>
-          observeRpcEffect(WS_METHODS.hotovoHubSignOut, hotovoHub.signOut, {
-            "rpc.aggregate": "hotovoHub",
+        [WS_METHODS.peerHubFinishSignIn]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubFinishSignIn, peerHub.finishSignIn(input), {
+            "rpc.aggregate": "peerHub",
           }),
-        [WS_METHODS.hotovoHubSync]: (_input) =>
-          observeRpcEffect(WS_METHODS.hotovoHubSync, hotovoHub.sync, {
-            "rpc.aggregate": "hotovoHub",
+        [WS_METHODS.peerHubSignOut]: (_input) =>
+          observeRpcEffect(WS_METHODS.peerHubSignOut, peerHub.signOut, {
+            "rpc.aggregate": "peerHub",
           }),
-        [WS_METHODS.hotovoHubOpenProject]: (input) =>
-          observeRpcEffect(WS_METHODS.hotovoHubOpenProject, hotovoHub.openProject(input), {
-            "rpc.aggregate": "hotovoHub",
+        [WS_METHODS.peerHubSync]: (_input) =>
+          observeRpcEffect(WS_METHODS.peerHubSync, peerHub.sync, {
+            "rpc.aggregate": "peerHub",
           }),
-        [WS_METHODS.hotovoHubSetSharedCapacity]: (input) =>
-          observeRpcEffect(
-            WS_METHODS.hotovoHubSetSharedCapacity,
-            hotovoHub.setSharedCapacity(input),
-            {
-              "rpc.aggregate": "hotovoHub",
-            },
-          ),
-        [WS_METHODS.hotovoHubProjectUsage]: (input) =>
-          observeRpcEffect(WS_METHODS.hotovoHubProjectUsage, hotovoHub.projectUsage(input), {
-            "rpc.aggregate": "hotovoHub",
+        [WS_METHODS.peerHubCreateWorkspace]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubCreateWorkspace, peerHub.createWorkspace(input), {
+            "rpc.aggregate": "peerHub",
+          }),
+        [WS_METHODS.peerHubJoinWorkspace]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubJoinWorkspace, peerHub.joinWorkspace(input), {
+            "rpc.aggregate": "peerHub",
+          }),
+        [WS_METHODS.peerHubLeaveWorkspace]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubLeaveWorkspace, peerHub.leaveWorkspace(input), {
+            "rpc.aggregate": "peerHub",
+          }),
+        [WS_METHODS.peerHubInvite]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubInvite, peerHub.invite(input), {
+            "rpc.aggregate": "peerHub",
+          }),
+        [WS_METHODS.peerHubOpenProject]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubOpenProject, peerHub.openProject(input), {
+            "rpc.aggregate": "peerHub",
+          }),
+        [WS_METHODS.peerHubSetSharedCapacity]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubSetSharedCapacity, peerHub.setSharedCapacity(input), {
+            "rpc.aggregate": "peerHub",
+          }),
+        [WS_METHODS.peerHubProjectUsage]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubProjectUsage, peerHub.projectUsage(input), {
+            "rpc.aggregate": "peerHub",
           }),
         [WS_METHODS.scheduledTasksList]: (_input) =>
           observeRpcEffect(WS_METHODS.scheduledTasksList, scheduledTasks.list(), {

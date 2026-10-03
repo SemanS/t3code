@@ -11,7 +11,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
-import { capacityRejection, readHubPolicyState } from "../hotovo/hubPolicy.ts";
+import { capacityRejection, readHubPolicyState } from "../peerHub/hubPolicy.ts";
 import * as ProviderInstanceRegistry from "../provider/Services/ProviderInstanceRegistry.ts";
 import {
   ProviderAdapterV2RuntimePolicy,
@@ -102,8 +102,8 @@ export const layerFromProjectStore: Layer.Layer<
         const instance = yield* providerInstances.getInstance(input.modelSelection.instanceId);
         const snapshot = instance === undefined ? undefined : yield* instance.snapshot.getSnapshot;
         const supportedRuntimeModes = snapshot?.supportedRuntimeModes;
-        // Hotovo Hub capacity policy: a project's own rules on personal logins,
-        // and company capacity only for the project it is billed to.
+        // Peer workspace capacity policy: a project's own rules on personal logins,
+        // and shared capacity only for the project it is billed to.
         const hubPolicy = readHubPolicyState();
         if (hubPolicy !== null) {
           const project = yield* projects.get(input.thread.projectId).pipe(Effect.option);

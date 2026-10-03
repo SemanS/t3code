@@ -117,7 +117,7 @@ import { mergeProviderInstanceEnvironment } from "../../provider/ProviderInstanc
 import { T3_CODE_ORCHESTRATION_INSTRUCTIONS } from "../../provider/T3OrchestrationInstructions.ts";
 import { buildRuntimeInstructions } from "../../provider/RuntimeInstructions.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
-import * as HubPolicy from "../../hotovo/hubPolicy.ts";
+import * as HubPolicy from "../../peerHub/hubPolicy.ts";
 import * as IdAllocator from "../IdAllocator.ts";
 import { makeProviderFailure, makeProviderRetryTurnItem } from "../ProviderFailure.ts";
 import { turnScopedSelectionTransition } from "../ProviderSelectionTransition.ts";
@@ -791,7 +791,7 @@ export function makeClaudeQueryOptions(input: {
   readonly sdkSettings?: string | ClaudeSdkSettings;
   readonly environment?: NodeJS.ProcessEnv;
   readonly mcpServers?: ClaudeQueryOptions["mcpServers"];
-  /** Appended after T3's own instructions, e.g. the Hotovo Hub project brief. */
+  /** Appended after T3's own instructions, e.g. a Peer workspace project brief. */
   readonly appendSystemPrompt?: string;
   readonly tools?: ClaudeAgentSdkQueryTools;
   readonly allowedTools?: ReadonlyArray<string>;
@@ -946,7 +946,7 @@ export function claudeMcpQueryOverrides(input: {
   readonly appendSystemPrompt?: string;
 } {
   const session = McpProviderSession.readMcpProviderSession(input.threadId);
-  // Tools and instructions of the Hotovo Hub project this thread belongs to, if any.
+  // Tools and instructions of the Peer workspace project this thread belongs to, if any.
   const hubServers = HubPolicy.claudeHubMcpServers(input.threadId);
   const hubInstructions = HubPolicy.hubInstructionsForThread(input.threadId);
   const hub = hubInstructions === "" ? {} : { appendSystemPrompt: hubInstructions };

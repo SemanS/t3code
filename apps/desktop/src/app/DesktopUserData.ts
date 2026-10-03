@@ -41,8 +41,8 @@ export const resolveUserDataPath = Effect.fn("desktop.userData.resolveUserDataPa
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const names = input.isDevelopment
-      ? { current: "hotovo-peer-dev", legacy: "Hotovo Peer (Dev)" }
-      : { current: "hotovo-peer", legacy: "Hotovo Peer (Alpha)" };
+      ? { current: "peer-desktop-dev", legacy: "Peer (Dev)" }
+      : { current: "peer-desktop", legacy: "Peer (Alpha)" };
     const destinationPath = path.join(input.appDataDirectory, names.current);
     const legacyPath = path.join(input.appDataDirectory, names.legacy);
     const inspect = (resourcePath: string) =>

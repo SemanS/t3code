@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- Peer app icon (macOS grid: 824px squircle centred on a 1024px canvas). -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#232A35"/>
+      <stop offset="1" stop-color="#0E1218"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#000000" flood-opacity="0.32"/>
+    </filter>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)" filter="url(#shadow)"/>
+  <g transform="translate(512 512) scale(0.86) translate(-604 -544)">
+    <circle cx="548" cy="450" r="150" fill="none" stroke="#FFFFFF" stroke-width="104"/>
+    <path d="M346 300 A52 52 0 0 1 398 248 H548 V300 H450 V788 A52 52 0 0 1 346 788 Z" fill="#FFFFFF"/>
+    <circle cx="800" cy="778" r="62" fill="#2DD4BF"/>
+  </g>
+</svg>

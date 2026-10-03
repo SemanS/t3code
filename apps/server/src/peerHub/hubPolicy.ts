@@ -1,45 +1,57 @@
 /**
- * hubPolicy — what the Hotovo Hub decides for one thread: which agent tools
+ * hubPolicy — what a Peer workspace decides for one thread: which agent tools
  * it gets and which provider instances may run it.
  *
- * The HotovoHub service publishes the provisioned state here; adapters and
- * the runtime policy read it synchronously, the way they read
+ * The PeerHub service publishes the provisioned state here; adapters and the
+ * runtime policy read it synchronously, the way they read
  * `McpProviderSession`. Everything below is pure apart from that one slot,
  * so the rules are testable without a server.
  *
- * Capacity rules (see the hub's docs/architecture.md):
+ * Capacity rules:
  * - Personal capacity (any instance the hub did not provision: the owner's
  *   own Claude/Codex login) runs only in its owner's environment, and only in
  *   projects whose policy accepts it. "commercial" accepts seats under
  *   commercial terms (Team, Enterprise, API keys); "none" accepts none.
  * - Shared capacity (an instance the hub provisioned with a gateway key) is
- *   billed to one project, so it runs that project's threads and nothing else.
+ *   billed to one workspace project, so it runs that project's threads and
+ *   nothing else.
  *
- * @module hotovo/hubPolicy
+ * @module peerHub/hubPolicy
  */
 import type {
-  HotovoHarness,
-  HotovoHubMcpServer,
-  HotovoHubProject,
+  PeerHarness,
+  PeerMcpServer,
+  PeerProject,
   ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
 
+export interface HubWorkspaceRef {
+  readonly slug: string;
+  readonly name: string;
+}
+
 export interface HubBoundProject {
-  readonly project: HotovoHubProject;
+  readonly workspace: HubWorkspaceRef;
+  readonly project: PeerProject;
   /** Local checkout of the repository this T3 project is rooted at. */
   readonly repositoryPath: string;
 }
 
+export interface HubSharedInstance {
+  readonly workspace: HubWorkspaceRef;
+  readonly projectId: string;
+}
+
 export interface HubPolicyState {
-  readonly hubName: string;
-  /** T3 project id → the hub project and repository it was provisioned for. */
+  /** T3 project id → the workspace project and repository it was provisioned for. */
   readonly projects: ReadonlyMap<string, HubBoundProject>;
   /** Realpath of a checkout → the same, for projects added by hand. */
   readonly roots: ReadonlyMap<string, HubBoundProject>;
-  /** Provider instance id → hub project id it is billed to. */
-  readonly sharedInstances: ReadonlyMap<string, string>;
-  readonly companyKnowledgePath: string | null;
+  /** Provider instance id → the workspace project it is billed to. */
+  readonly sharedInstances: ReadonlyMap<string, HubSharedInstance>;
+  /** Workspace slug → its company knowledge checkout, once cloned. */
+  readonly knowledgePaths: ReadonlyMap<string, string>;
 }
 
 let current: HubPolicyState | null = null;
@@ -68,7 +80,7 @@ function hubProjectFor(
   );
 }
 
-const HARNESS_BY_DRIVER: Readonly<Record<string, HotovoHarness>> = {
+const HARNESS_BY_DRIVER: Readonly<Record<string, PeerHarness>> = {
   claudeAgent: "claude",
   codex: "codex",
   cursor: "cursor",
@@ -77,7 +89,7 @@ const HARNESS_BY_DRIVER: Readonly<Record<string, HotovoHarness>> = {
   antigravity: "antigravity",
 };
 
-export function harnessForDriver(driver: string): HotovoHarness | undefined {
+export function harnessForDriver(driver: string): PeerHarness | undefined {
   return HARNESS_BY_DRIVER[driver];
 }
 
@@ -126,10 +138,13 @@ export function capacityRejection(
 
   if (sharedFor !== undefined) {
     if (bound === undefined) {
-      return `This provider is ${state.hubName} company capacity billed to project "${sharedFor}". It only runs that project's threads.`;
+      return `This provider is ${sharedFor.workspace.name} capacity billed to project "${sharedFor.projectId}". It only runs that project's threads.`;
     }
-    if (bound.project.id !== sharedFor) {
-      return `This provider is company capacity billed to "${sharedFor}", not "${bound.project.name}". Pick ${bound.project.name}'s company capacity or your own subscription.`;
+    if (
+      bound.workspace.slug !== sharedFor.workspace.slug ||
+      bound.project.id !== sharedFor.projectId
+    ) {
+      return `This provider is ${sharedFor.workspace.name} capacity billed to "${sharedFor.projectId}", not "${bound.project.name}". Pick ${bound.project.name}'s shared capacity or your own subscription.`;
     }
     return undefined;
   }
@@ -141,7 +156,7 @@ export function capacityRejection(
     case "any":
       return undefined;
     case "none":
-      return `${project.name} runs on company capacity only. Turn on its company capacity in Settings → Hotovo Hub and pick that provider.`;
+      return `${project.name} runs on ${bound.workspace.name}'s shared capacity only. Turn it on in Settings → Workspaces and pick that provider.`;
     case "commercial": {
       const commercial =
         input.auth !== undefined &&
@@ -150,7 +165,7 @@ export function capacityRejection(
           : harness !== undefined && project.capacity.personalHarnesses.includes(harness);
       if (commercial) return undefined;
       const login = input.auth?.label ?? "this login";
-      return `${project.name} is client work under commercial terms: use a Team, Enterprise or API login, or the project's company capacity. ${login} is a personal plan.`;
+      return `${project.name} is client work under commercial terms: use a Team, Enterprise or API login, or the project's shared capacity. ${login} is a personal plan.`;
     }
   }
 }
@@ -176,13 +191,13 @@ function resolvedToolServers(
   state: HubPolicyState,
   bound: HubBoundProject,
   env: Readonly<Record<string, string | undefined>> = process.env,
-): Record<string, HotovoHubMcpServer> {
+): Record<string, PeerMcpServer> {
   const context = {
     projectRoot: bound.repositoryPath,
-    companyKnowledge: state.companyKnowledgePath,
+    companyKnowledge: state.knowledgePaths.get(bound.workspace.slug) ?? null,
     env,
   };
-  const servers: Record<string, HotovoHubMcpServer> = {};
+  const servers: Record<string, PeerMcpServer> = {};
   for (const tool of bound.project.tools) {
     const mcp = tool.mcp;
     if (mcp.transport === "stdio") {
@@ -227,7 +242,7 @@ type ClaudeMcpServer =
   | { type: "stdio"; command: string; args: string[]; env: Record<string, string> }
   | { type: "http" | "sse"; url: string; headers: Record<string, string> };
 
-/** The hub project's tools as Claude Agent SDK `mcpServers` entries. */
+/** The workspace project's tools as Claude Agent SDK `mcpServers` entries. */
 export function claudeHubMcpServers(threadId: ThreadId): Record<string, ClaudeMcpServer> {
   const found = boundProjectForThread(threadId);
   if (found === undefined) return {};
@@ -242,8 +257,8 @@ export function claudeHubMcpServers(threadId: ThreadId): Record<string, ClaudeMc
 }
 
 /**
- * The hub project's tools as Codex `mcp_servers` entries. Codex speaks stdio
- * and streamable HTTP; SSE-only servers are left out.
+ * The workspace project's tools as Codex `mcp_servers` entries. Codex speaks
+ * stdio and streamable HTTP; SSE-only servers are left out.
  */
 export function codexHubMcpServers(threadId: ThreadId): Record<string, Record<string, unknown>> {
   const found = boundProjectForThread(threadId);
@@ -263,12 +278,12 @@ export function codexHubMcpServers(threadId: ThreadId): Record<string, Record<st
 export function hubInstructionsForThread(threadId: ThreadId): string {
   const found = boundProjectForThread(threadId);
   if (found === undefined) return "";
-  const { project } = found.bound;
+  const { project, workspace } = found.bound;
   const tools = new Set(project.tools.map((tool) => tool.id));
   const lines = [
     "",
-    `## ${found.state.hubName} project: ${project.name}`,
-    `This workspace belongs to the ${found.state.hubName} hub project "${project.name}".`,
+    `## ${workspace.name} project: ${project.name}`,
+    `This workspace belongs to the ${workspace.name} project "${project.name}".`,
   ];
   if (tools.has("kontext")) {
     lines.push(
@@ -277,7 +292,7 @@ export function hubInstructionsForThread(threadId: ThreadId): string {
   }
   if (tools.has("company-knowledge")) {
     lines.push(
-      "Company-wide conventions are on the company-knowledge MCP server (the same kontext tools, answering from the company store).",
+      `${workspace.name}-wide conventions are on the company-knowledge MCP server (the same kontext tools, answering from the shared store).`,
     );
   }
   return `${lines.join("\n")}\n`;

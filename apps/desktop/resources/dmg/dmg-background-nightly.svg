@@ -22,9 +22,9 @@
   <path d="M-60 293C95 220 214 304 362 256S559 191 707 257" stroke="url(#veil)" stroke-width="146" fill="none" opacity="1" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="M-60 306C113 252 223 298 367 272S553 242 707 280" stroke="url(#silk)" stroke-width="86" fill="none" opacity="1" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="M-60 266C113 212 223 258 367 232S553 202 707 240" stroke="#C7F2F1" stroke-width="0.8" fill="none" opacity="0.42" stroke-linecap="round" stroke-linejoin="round"/>
-  <text x="32" y="44" fill="#edf0ff" font-family="Helvetica" font-size="24" font-weight="700">hotovo<tspan fill="#FF6400">.</tspan></text>
+  <text x="32" y="44" fill="#edf0ff" font-family="Helvetica" font-size="24" font-weight="700">peer<tspan fill="#2DD4BF">.</tspan></text>
   <text x="608" y="38" fill="#C3C8E5" font-family="Helvetica" font-size="9" font-weight="400" text-anchor="end">NIGHTLY</text>
-  <text x="320" y="104" fill="#edf0ff" font-family="Helvetica" font-size="23" font-weight="700" text-anchor="middle">Drag Hotovo Peer into Applications.</text>
+  <text x="320" y="104" fill="#edf0ff" font-family="Helvetica" font-size="23" font-weight="700" text-anchor="middle">Drag Peer into Applications.</text>
   <path d="M270 204Q320 179 370 204M358 190L370 204L351 209" stroke="#ECEDFF" stroke-width="2.2" fill="none" opacity="1" stroke-linecap="round" stroke-linejoin="round"/>
   <text x="320" y="367" fill="#D0CFE6" font-family="Helvetica" font-size="12" font-weight="400" text-anchor="middle">Once copied, open it from Applications.</text>
 </svg>

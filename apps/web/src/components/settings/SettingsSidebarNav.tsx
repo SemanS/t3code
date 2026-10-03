@@ -13,7 +13,6 @@ import {
   ArchiveIcon,
   BlocksIcon,
   BotIcon,
-  Building2Icon,
   createLucideIcon,
   CalendarClockIcon,
   GitBranchIcon,
@@ -24,6 +23,7 @@ import {
   PaletteIcon,
   SearchIcon,
   Settings2Icon,
+  UsersIcon,
   XIcon,
 } from "lucide-react";
 import { useLocation, useNavigate } from "@tanstack/react-router";
@@ -78,7 +78,7 @@ const T3ConnectSidebarAvatar = lazy(() =>
 const SETTINGS_SECTION_ICONS: Readonly<
   Record<SettingsPath, ComponentType<{ className?: string }>>
 > = {
-  "/settings/hotovo-hub": Building2Icon,
+  "/settings/workspaces": UsersIcon,
   "/settings/general": Settings2Icon,
   "/settings/appearance": PaletteIcon,
   "/settings/projects": PanelsTopLeftIcon,

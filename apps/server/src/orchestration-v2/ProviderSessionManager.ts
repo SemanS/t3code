@@ -32,7 +32,7 @@ import * as Stream from "effect/Stream";
 import { ProviderWorkspaceMissingError } from "../provider/Errors.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as McpProviderSession from "../mcp/McpProviderSession.ts";
-import * as HubPolicy from "../hotovo/hubPolicy.ts";
+import * as HubPolicy from "../peerHub/hubPolicy.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
 import * as EventSink from "./EventSink.ts";
@@ -428,7 +428,7 @@ export const layerWithOptions = (
           : mcpPrepareLock.withLock(
               threadId,
               Effect.gen(function* () {
-                // Hotovo Hub tools resolve a thread's hub project through this binding.
+                // Peer workspace tools resolve a thread's project through this binding.
                 yield* projectionStore.getThread(threadId).pipe(
                   Effect.tap((thread) =>
                     Effect.sync(() => HubPolicy.bindThreadProject(threadId, thread.projectId)),
