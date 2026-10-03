@@ -1812,9 +1812,10 @@ export const preflightMacDesktopBuild = Effect.fn("preflightMacDesktopBuild")(fu
         ChildProcess.make("xcrun", ["--find", "iconutil"]),
         "iconutil",
       ),
+      // Xcode 26's lipo knows no version flag; ask the toolchain for it like iconutil.
       lipo:
         arch === "universal"
-          ? desktopBuildProbeSucceeds(ChildProcess.make("lipo", ["-version"]), "lipo")
+          ? desktopBuildProbeSucceeds(ChildProcess.make("xcrun", ["--find", "lipo"]), "lipo")
           : Effect.succeed(true),
     },
     { concurrency: "unbounded" },
