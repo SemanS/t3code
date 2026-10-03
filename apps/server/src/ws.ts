@@ -2024,6 +2024,34 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.peerHubLeaveWorkspace, peerHub.leaveWorkspace(input), {
             "rpc.aggregate": "peerHub",
           }),
+        [WS_METHODS.peerHubCreateTask]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubCreateTask, peerHub.createTask(input), {
+            "rpc.aggregate": "peerHub",
+          }),
+        [WS_METHODS.peerHubUpdateTask]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubUpdateTask, peerHub.updateTask(input), {
+            "rpc.aggregate": "peerHub",
+          }),
+        [WS_METHODS.peerHubDeleteTask]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubDeleteTask, peerHub.deleteTask(input), {
+            "rpc.aggregate": "peerHub",
+          }),
+        [WS_METHODS.peerHubAssignThread]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubAssignThread, peerHub.assignThread(input), {
+            "rpc.aggregate": "peerHub",
+          }),
+        [WS_METHODS.peerHubFocusAgent]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubFocusAgent, peerHub.focusAgent(input), {
+            "rpc.aggregate": "peerHub",
+          }),
+        [WS_METHODS.peerHubShareProject]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubShareProject, peerHub.shareProject(input), {
+            "rpc.aggregate": "peerHub",
+          }),
+        [WS_METHODS.peerHubUnshareProject]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubUnshareProject, peerHub.unshareProject(input), {
+            "rpc.aggregate": "peerHub",
+          }),
         [WS_METHODS.peerHubFindWorkspace]: (input) =>
           observeRpcEffect(WS_METHODS.peerHubFindWorkspace, peerHub.findWorkspace(input), {
             "rpc.aggregate": "peerHub",

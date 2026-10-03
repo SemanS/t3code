@@ -318,7 +318,13 @@ import {
   PeerHubCreateWorkspaceInput,
   PeerHubError,
   PeerFoundWorkspace,
+  PeerHubAssignThreadInput,
+  PeerHubCreateTaskInput,
   PeerHubFindWorkspaceInput,
+  PeerHubFocusAgentInput,
+  PeerHubShareProjectInput,
+  PeerHubTaskInput,
+  PeerHubUpdateTaskInput,
   PeerHubFinishSignInInput,
   PeerHubInviteInput,
   PeerHubProjectInput,
@@ -490,6 +496,13 @@ export const WS_METHODS = {
   peerHubJoinWorkspace: "peerHub.joinWorkspace",
   peerHubLeaveWorkspace: "peerHub.leaveWorkspace",
   peerHubFindWorkspace: "peerHub.findWorkspace",
+  peerHubCreateTask: "peerHub.createTask",
+  peerHubUpdateTask: "peerHub.updateTask",
+  peerHubDeleteTask: "peerHub.deleteTask",
+  peerHubAssignThread: "peerHub.assignThread",
+  peerHubFocusAgent: "peerHub.focusAgent",
+  peerHubShareProject: "peerHub.shareProject",
+  peerHubUnshareProject: "peerHub.unshareProject",
   peerHubInvite: "peerHub.invite",
   peerHubOpenProject: "peerHub.openProject",
   peerHubSetSharedCapacity: "peerHub.setSharedCapacity",
@@ -1733,6 +1746,48 @@ const WsPeerHubSetSharedCapacityRpc = Rpc.make(WS_METHODS.peerHubSetSharedCapaci
   error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
 });
 
+const WsPeerHubCreateTaskRpc = Rpc.make(WS_METHODS.peerHubCreateTask, {
+  payload: PeerHubCreateTaskInput,
+  success: PeerHubStatus,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
+const WsPeerHubUpdateTaskRpc = Rpc.make(WS_METHODS.peerHubUpdateTask, {
+  payload: PeerHubUpdateTaskInput,
+  success: PeerHubStatus,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
+const WsPeerHubDeleteTaskRpc = Rpc.make(WS_METHODS.peerHubDeleteTask, {
+  payload: PeerHubTaskInput,
+  success: PeerHubStatus,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
+const WsPeerHubAssignThreadRpc = Rpc.make(WS_METHODS.peerHubAssignThread, {
+  payload: PeerHubAssignThreadInput,
+  success: PeerHubStatus,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
+const WsPeerHubFocusAgentRpc = Rpc.make(WS_METHODS.peerHubFocusAgent, {
+  payload: PeerHubFocusAgentInput,
+  success: PeerHubStatus,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
+const WsPeerHubShareProjectRpc = Rpc.make(WS_METHODS.peerHubShareProject, {
+  payload: PeerHubShareProjectInput,
+  success: PeerHubStatus,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
+const WsPeerHubUnshareProjectRpc = Rpc.make(WS_METHODS.peerHubUnshareProject, {
+  payload: PeerHubProjectInput,
+  success: PeerHubStatus,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
 const WsPeerHubFindWorkspaceRpc = Rpc.make(WS_METHODS.peerHubFindWorkspace, {
   payload: PeerHubFindWorkspaceInput,
   success: Schema.NullOr(PeerFoundWorkspace),
@@ -1847,6 +1902,13 @@ export const WsRpcGroup = RpcGroup.make(
   WsPeerHubJoinWorkspaceRpc,
   WsPeerHubLeaveWorkspaceRpc,
   WsPeerHubFindWorkspaceRpc,
+  WsPeerHubCreateTaskRpc,
+  WsPeerHubUpdateTaskRpc,
+  WsPeerHubDeleteTaskRpc,
+  WsPeerHubAssignThreadRpc,
+  WsPeerHubFocusAgentRpc,
+  WsPeerHubShareProjectRpc,
+  WsPeerHubUnshareProjectRpc,
   WsPeerHubInviteRpc,
   WsPeerHubOpenProjectRpc,
   WsPeerHubSetSharedCapacityRpc,

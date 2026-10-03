@@ -9,8 +9,10 @@ import {
   PeerHubError,
   PeerHubProjectUsage,
   PeerManifest,
-  PeerPresenceThread,
+  PeerTask,
+  PeerWorkThread,
   PeerWorkspaceRole,
+  type PeerWorkStatus,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -55,18 +57,28 @@ const CredentialsResponse = Schema.Struct({
   models: Schema.Array(Schema.Struct({ id: Schema.String, harness: Schema.Array(Schema.String) })),
 });
 
-const PresenceResponse = Schema.Struct({
-  project: Schema.String,
-  peers: Schema.Array(
+const WorkResponse = Schema.Struct({
+  projects: Schema.Record(
+    Schema.String,
     Schema.Struct({
-      email: Schema.String,
-      environment: Schema.String,
-      threads: Schema.Array(PeerPresenceThread),
-      seenAt: Schema.String,
+      areas: Schema.Array(Schema.String),
+      tasks: Schema.Array(PeerTask),
+      threads: Schema.Array(PeerWorkThread),
     }),
   ),
 });
-export type HubPresence = typeof PresenceResponse.Type;
+export type HubWork = typeof WorkResponse.Type;
+
+export interface ReportedThread {
+  readonly id: string;
+  readonly project: string;
+  readonly task?: string;
+  readonly title: string;
+  readonly status: PeerWorkStatus;
+  readonly harness?: string;
+  readonly branch?: string;
+  readonly source: "peer" | "herdr";
+}
 
 const Ok = Schema.Struct({});
 const ErrorBody = Schema.Struct({
@@ -89,7 +101,7 @@ export const make = Effect.gen(function* () {
     input: {
       readonly hubUrl: string;
       readonly path: string;
-      readonly method?: "GET" | "POST" | "DELETE";
+      readonly method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
       readonly session?: string | undefined;
       readonly body?: unknown;
       /** What a 404 means instead of an error, e.g. "no such workspace". */
@@ -101,9 +113,13 @@ export const make = Effect.gen(function* () {
       const base =
         input.method === "POST"
           ? HttpClientRequest.post(url)
-          : input.method === "DELETE"
-            ? HttpClientRequest.delete(url)
-            : HttpClientRequest.get(url);
+          : input.method === "PUT"
+            ? HttpClientRequest.put(url)
+            : input.method === "PATCH"
+              ? HttpClientRequest.patch(url)
+              : input.method === "DELETE"
+                ? HttpClientRequest.delete(url)
+                : HttpClientRequest.get(url);
       const withAuth =
         input.session === undefined
           ? base
@@ -280,31 +296,104 @@ export const make = Effect.gen(function* () {
         session,
       }),
 
-    projectPresence: (hubUrl: string, session: string, slug: string, projectId: string) =>
-      request(PresenceResponse, {
+    /** Every project of the workspace the caller is on: areas, tasks and recent threads. */
+    work: (hubUrl: string, session: string, slug: string) =>
+      request(WorkResponse, { hubUrl, path: workspacePath(slug, "/work"), session }),
+
+    /** This environment's threads, replacing what it reported before. */
+    reportThreads: (
+      hubUrl: string,
+      session: string,
+      slug: string,
+      body: { readonly environment: string; readonly threads: ReadonlyArray<ReportedThread> },
+    ) =>
+      request(Ok, {
         hubUrl,
-        path: projectPath(slug, projectId, "/presence"),
+        path: workspacePath(slug, "/threads"),
+        method: "PUT",
+        session,
+        body,
+      }),
+
+    createTask: (
+      hubUrl: string,
+      session: string,
+      slug: string,
+      projectId: string,
+      body: { readonly title: string; readonly key?: string; readonly area?: string },
+    ) =>
+      request(PeerTask, {
+        hubUrl,
+        path: projectPath(slug, projectId, "/tasks"),
+        method: "POST",
+        session,
+        body,
+      }),
+
+    updateTask: (
+      hubUrl: string,
+      session: string,
+      slug: string,
+      projectId: string,
+      taskId: string,
+      body: {
+        readonly title?: string;
+        readonly area?: string;
+        readonly status?: "open" | "done";
+      },
+    ) =>
+      request(PeerTask, {
+        hubUrl,
+        path: projectPath(slug, projectId, `/tasks/${segment(taskId)}`),
+        method: "PATCH",
+        session,
+        body,
+      }),
+
+    deleteTask: (
+      hubUrl: string,
+      session: string,
+      slug: string,
+      projectId: string,
+      taskId: string,
+    ) =>
+      request(Ok, {
+        hubUrl,
+        path: projectPath(slug, projectId, `/tasks/${segment(taskId)}`),
+        method: "DELETE",
         session,
       }),
 
-    reportPresence: (
+    /** Shares a repository with the whole workspace as a project. */
+    shareProject: (
       hubUrl: string,
       session: string,
       slug: string,
       body: {
-        readonly environment: string;
-        readonly projects: ReadonlyArray<{
+        readonly id: string;
+        readonly name: string;
+        readonly repositories: ReadonlyArray<{
           readonly id: string;
-          readonly threads: ReadonlyArray<PeerPresenceThread>;
+          readonly url: string;
+          readonly branch: string;
         }>;
+        readonly areas: ReadonlyArray<string>;
       },
     ) =>
       request(Ok, {
         hubUrl,
-        path: workspacePath(slug, "/presence"),
+        path: workspacePath(slug, "/projects"),
         method: "POST",
         session,
         body,
+      }),
+
+    unshareProject: (hubUrl: string, session: string, slug: string, projectId: string) =>
+      request(Ok, {
+        hubUrl,
+        path: workspacePath(slug, `/projects/${segment(projectId)}`),
+        method: "DELETE",
+        session,
       }),
   };
 });

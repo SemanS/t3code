@@ -260,6 +260,8 @@ import {
 } from "./ui/combobox";
 import { SidebarContent, SidebarGroup, useSidebar } from "./ui/sidebar";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
+import { SidebarViewSwitch, useSidebarView } from "./workspaces/SidebarViewSwitch";
+import { WorkPanel } from "./workspaces/WorkPanel";
 import { SidebarHeaderIconButton, SidebarThreadHeader } from "./sidebar/SidebarThreadHeader";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuShortcut, MenuTrigger } from "./ui/menu";
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
@@ -4608,6 +4610,8 @@ export default function Sidebar() {
   // match a thread-jump binding. Adding Shift (screenshots) or Alt no
   // longer matches ⌘1..9, so the overlay hides for chords like ⌘⇧4.
   const shortcutModifiers = useShortcutModifierState();
+  // Peer: the team's work (Project → Area → Task → Threads) or this computer's threads.
+  const [sidebarView, setSidebarView] = useSidebarView();
   const terminalFocused = useTerminalFocus();
   const shouldShowJumpHintsNow = shouldShowThreadJumpHintsForModifiers(
     shortcutModifiers,
@@ -4674,6 +4678,9 @@ export default function Sidebar() {
           // Lifted above the stage backdrop, whose fade bleeds below the
           // header and would otherwise paint across the search row's outline.
           <SidebarGroup className="z-[1]">
+            <div className="pb-1.5">
+              <SidebarViewSwitch view={sidebarView} onChange={setSidebarView} />
+            </div>
             <SidebarThreadHeader
               searchFieldRef={headerSearchRef}
               hasProjects={projectGroups.length > 0}
@@ -4898,7 +4905,8 @@ export default function Sidebar() {
               </p>
             )
           ) : null}
-          {!isSearchingThreads ? (
+          {!isSearchingThreads && sidebarView === "work" ? <WorkPanel /> : null}
+          {!isSearchingThreads && sidebarView === "threads" ? (
             <TooltipProvider
               key="sidebar-thread-tooltips-150"
               delay={150}

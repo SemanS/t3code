@@ -1113,6 +1113,34 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:peer-hub:leave-workspace",
       tag: WS_METHODS.peerHubLeaveWorkspace,
     }),
+    peerHubCreateTask: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:create-task",
+      tag: WS_METHODS.peerHubCreateTask,
+    }),
+    peerHubUpdateTask: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:update-task",
+      tag: WS_METHODS.peerHubUpdateTask,
+    }),
+    peerHubDeleteTask: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:delete-task",
+      tag: WS_METHODS.peerHubDeleteTask,
+    }),
+    peerHubAssignThread: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:assign-thread",
+      tag: WS_METHODS.peerHubAssignThread,
+    }),
+    peerHubFocusAgent: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:focus-agent",
+      tag: WS_METHODS.peerHubFocusAgent,
+    }),
+    peerHubShareProject: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:share-project",
+      tag: WS_METHODS.peerHubShareProject,
+    }),
+    peerHubUnshareProject: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:unshare-project",
+      tag: WS_METHODS.peerHubUnshareProject,
+    }),
     peerHubFindWorkspace: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:peer-hub:find-workspace",
       tag: WS_METHODS.peerHubFindWorkspace,

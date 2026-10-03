@@ -231,6 +231,8 @@ const SIGNED_OUT: PeerHubStatus = {
   workspaces: [],
   joinable: [],
   workspaceRoot: "/home/ana/Peer",
+  environmentId: "test-env",
+  agents: { herdr: "not-running", list: [] },
   syncing: false,
   lastSyncAt: null,
   error: null,

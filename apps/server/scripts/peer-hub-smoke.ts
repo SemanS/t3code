@@ -4,12 +4,16 @@
 // gateway) and `apps/server/dist/bin.mjs` in throwaway homes, sets up a
 // workspace the way an admin would, then drives the app's own WebSocket RPC
 // client through email sign-in → join by domain → shared capacity → clone →
-// capacity policy → create → leave → sign-out.
+// capacity policy → the work (tasks, colleagues' threads, a herdr agent placed
+// on a task, sharing a project) → create → leave → sign-out.
 //
-//   PEERHUB_BIN=../server/target/debug/peerhub node apps/server/scripts/peer-hub-smoke.ts
+//   PEERHUB_BIN=../server/target/debug/peerhub HERDR_BIN=herdr node apps/server/scripts/peer-hub-smoke.ts
+//
+// HERDR_BIN is optional: with it, a real herdr server runs in the throwaway home.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
+import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
@@ -21,6 +25,7 @@ import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
 
 import {
   CommandId,
+  ProjectId,
   ORCHESTRATION_PROTOCOL_VERSION,
   ORCHESTRATION_V2_WS_METHODS,
   ProviderInstanceId,
@@ -115,8 +120,11 @@ function makeRepository(): string {
   return path;
 }
 
+let anaSession = "";
+
 async function setUpWorkspace() {
   const admin = await hubSignIn("ana@acme.test");
+  anaSession = admin;
   await hubCall("/v1/workspaces", {
     method: "POST",
     session: admin,
@@ -168,12 +176,48 @@ async function setUpWorkspace() {
   log("workspace acme set up", `revision ${String(applied.revision)}`);
 }
 
+// ---- herdr, isolated in the throwaway home ----
+
+const herdrBin = process.env.HERDR_BIN;
+const herdrEnv = {
+  ...process.env,
+  XDG_CONFIG_HOME: NodePath.join(home, "herdr", "config"),
+  XDG_STATE_HOME: NodePath.join(home, "herdr", "state"),
+};
+const herdrSocket = NodePath.join(home, "herdr", "config", "herdr", "herdr.sock");
+const herdr = herdrBin === undefined ? null : spawnLogged(herdrBin, ["server"], herdrEnv);
+
+function herdrCli(...args: string[]): Record<string, unknown> {
+  const output = NodeChildProcess.execFileSync(herdrBin!, args, {
+    env: herdrEnv,
+    encoding: "utf8",
+  });
+  return JSON.parse(output.trim().split("\n").at(-1) ?? "{}") as Record<string, unknown>;
+}
+
+function herdrRequest(method: string, params: object): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const socket = NodeNet.createConnection(herdrSocket);
+    socket.setEncoding("utf8");
+    socket.on("connect", () =>
+      socket.write(`${JSON.stringify({ id: "smoke", method, params })}\n`),
+    );
+    socket.on("data", (chunk: string) => {
+      socket.destroy();
+      resolve(JSON.parse(chunk.trim().split("\n")[0] ?? "{}"));
+    });
+    socket.on("error", reject);
+  });
+}
+
 // ---- the app's server ----
 
 const env = {
   ...process.env,
   PEER_HUB_URL: hubUrl,
   PEER_WORKSPACE: workspaceRoot,
+  // Only the throwaway herdr, never one this machine runs.
+  HERDR_SOCKET_PATH: herdrSocket,
   T3CODE_TELEMETRY_ENABLED: "false",
 };
 let server: ReturnType<typeof spawnLogged> | null = null;
@@ -414,6 +458,141 @@ const program = Effect.gen(function* () {
   });
   log("usage", JSON.stringify(usage.shared));
 
+  // ---- The work: Project → Area → Task → Threads; people are metadata ----
+  const demoOf = (s: PeerHubStatus) =>
+    s.workspaces.find((w) => w.slug === "acme")?.projects.find((p) => p.project.id === "demo");
+  const withTask = yield* client[WS_METHODS.peerHubCreateTask]({
+    workspace: "acme",
+    projectId: "demo",
+    title: "Split Payments",
+    key: "demo-1",
+    area: "Core",
+  });
+  const task = demoOf(withTask)?.work.tasks.find((t) => t.key === "DEMO-1");
+  log("task", JSON.stringify(task));
+  if (task === undefined || task.area !== "Core") throw new Error("the task did not land");
+
+  // Ana works on it from her computer; her branch names the task.
+  yield* Effect.promise(() =>
+    hubCall("/v1/workspaces/acme/threads", {
+      method: "PUT",
+      session: anaSession,
+      body: {
+        environment: "ana-laptop",
+        threads: [
+          {
+            id: "peer:a1",
+            project: "demo",
+            title: "Backend implementation",
+            status: "working",
+            branch: "demo-1-backend",
+            harness: "claude",
+          },
+        ],
+      },
+    }),
+  );
+
+  if (herdr !== null) {
+    // An agent herdr runs in Bob's demo checkout shows up in Peer, and Bob puts it on the task.
+    const demoPath = demoOf(withTask)?.repositories[0]?.path ?? "";
+    const created = herdrCli("workspace", "create", "--cwd", demoPath, "--label", "demo") as {
+      result?: { root_pane?: { pane_id?: string } };
+    };
+    const paneId = created.result?.root_pane?.pane_id ?? "";
+    yield* Effect.promise(() =>
+      herdrRequest("pane.report_agent", {
+        pane_id: paneId,
+        source: "custom:peer-smoke",
+        agent: "codex",
+        state: "blocked",
+      }),
+    );
+    const seen = yield* waitForStatus("the herdr agent", (s) =>
+      s.agents.list.some((a) => a.paneId === paneId && a.projectId === "demo"),
+    );
+    const agent = seen.agents.list.find((a) => a.paneId === paneId)!;
+    log("herdr agent", JSON.stringify(agent));
+    const placed = yield* client[WS_METHODS.peerHubAssignThread]({
+      workspace: "acme",
+      projectId: "demo",
+      thread: agent.id,
+      taskId: task.id,
+    });
+    const work = demoOf(placed)!.work;
+    log("demo work", JSON.stringify({ assignments: work.assignments, threads: work.threads }));
+    if (work.assignments[agent.id] !== task.id) throw new Error("the agent is not on the task");
+    const anas = work.threads.find((t) => t.id === "peer:a1");
+    if (anas?.task !== task.id) throw new Error("Ana's branch did not put her thread on the task");
+    // Ana's Peer sees Bob's herdr agent under the task.
+    const anaView = (yield* Effect.promise(() =>
+      hubCall("/v1/workspaces/acme/work", { session: anaSession }),
+    )) as { projects: Record<string, { threads: Array<Record<string, unknown>> }> };
+    const bobs = anaView.projects.demo?.threads.find((t) => t.id === agent.id);
+    log("as Ana sees it", JSON.stringify(bobs));
+    if (bobs?.task !== task.id || bobs.source !== "herdr" || bobs.status !== "blocked") {
+      throw new Error("Ana does not see Bob's herdr agent on the task");
+    }
+    const lockedThreads = anaView.projects.locked?.threads ?? [];
+    if (!lockedThreads.some((t) => t.email === "bob@acme.test" && t.source === "peer")) {
+      throw new Error("Bob's Peer thread is not reported");
+    }
+  } else {
+    log("herdr", "skipped (set HERDR_BIN to run a real herdr server)");
+  }
+
+  const closed = yield* client[WS_METHODS.peerHubUpdateTask]({
+    workspace: "acme",
+    projectId: "demo",
+    taskId: task.id,
+    status: "done",
+  });
+  if (demoOf(closed)?.work.tasks.find((t) => t.id === task.id)?.status !== "done") {
+    throw new Error("the task did not close");
+  }
+
+  // Any member shares a project from this computer; the whole workspace gets it.
+  const shareRoot = NodePath.join(home, "side-app");
+  const bare = NodePath.join(home, "origin", "side-app.git");
+  NodeChildProcess.execFileSync("git", ["init", "--quiet", "--bare", bare]);
+  NodeFS.mkdirSync(shareRoot, { recursive: true });
+  NodeChildProcess.execFileSync("git", ["init", "--quiet", "--initial-branch", "main"], {
+    cwd: shareRoot,
+  });
+  NodeChildProcess.execFileSync("git", ["remote", "add", "origin", bare], { cwd: shareRoot });
+  const sideProjectId = ProjectId.make(`smoke-side-${Date.now()}`);
+  yield* client[WS_METHODS.projectsMutate]({
+    type: "project.create",
+    commandId: CommandId.make(`smoke-create-${Date.now()}`),
+    projectId: sideProjectId,
+    title: "Side App",
+    workspaceRoot: shareRoot,
+  });
+  const afterShare = yield* client[WS_METHODS.peerHubShareProject]({
+    workspace: "acme",
+    projectId: sideProjectId,
+  });
+  const side = afterShare.workspaces
+    .find((w) => w.slug === "acme")
+    ?.projects.find((p) => p.project.id === "side-app");
+  log(
+    "shared",
+    JSON.stringify({ addedBy: side?.project.addedBy, repositories: side?.repositories }),
+  );
+  if (
+    side?.project.addedBy !== "bob@acme.test" ||
+    side.repositories[0]?.projectId !== sideProjectId
+  ) {
+    throw new Error("the shared project is not the workspace's, bound to this checkout");
+  }
+  const unshared = yield* client[WS_METHODS.peerHubUnshareProject]({
+    workspace: "acme",
+    projectId: "side-app",
+  });
+  if (unshared.workspaces.some((w) => w.projects.some((p) => p.project.id === "side-app"))) {
+    throw new Error("the project stayed shared");
+  }
+
   // Workspaces can be looked up by their short name.
   const found = yield* client[WS_METHODS.peerHubFindWorkspace]({ slug: "acme" });
   const missing = yield* client[WS_METHODS.peerHubFindWorkspace]({ slug: "no-such-space" });
@@ -498,5 +677,13 @@ try {
   const spawned = server as ReturnType<typeof spawnLogged> | null;
   if (spawned !== null) await stop(spawned.child);
   await stop(hub.child);
+  if (herdr !== null) {
+    try {
+      herdrCli("server", "stop");
+    } catch {
+      // Already gone.
+    }
+    await stop(herdr.child);
+  }
   if (process.env.KEEP_SMOKE_HOME !== "1") NodeFS.rmSync(home, { recursive: true, force: true });
 }

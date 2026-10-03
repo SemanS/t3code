@@ -73,6 +73,10 @@ export const PeerProject = Schema.Struct({
   client: Schema.optional(Schema.String),
   role: Schema.Literals(["lead", "member"]),
   members: Schema.Array(Schema.Struct({ email: Schema.String, name: Schema.String })),
+  /** The product's areas in order; tasks sit under them. */
+  areas: Schema.optional(Schema.Array(Schema.String)),
+  /** Who shared the project from Peer, when it is not in the workspace configuration. */
+  addedBy: Schema.optional(Schema.String),
   repositories: Schema.Array(
     Schema.Struct({ id: Schema.String, url: Schema.String, branch: Schema.String }),
   ),
@@ -136,6 +140,55 @@ export const PeerPresenceThread = Schema.Struct({
 });
 export type PeerPresenceThread = typeof PeerPresenceThread.Type;
 
+/** What an agent thread is doing: ● working, ◐ blocked (needs an answer), ✓ done, ○ idle. */
+export const PeerWorkStatus = Schema.Literals(["working", "blocked", "done", "idle", "unknown"]);
+export type PeerWorkStatus = typeof PeerWorkStatus.Type;
+
+/** A piece of the product being built, e.g. `KRK-812 · Split Payments` under "Groups & Events". */
+export const PeerTask = Schema.Struct({
+  id: Schema.String,
+  /** The tracker's key; a branch or title naming it attaches the thread. */
+  key: Schema.optional(Schema.String),
+  title: Schema.String,
+  area: Schema.optional(Schema.String),
+  status: Schema.Literals(["open", "done"]),
+  createdBy: Schema.String,
+  createdAt: Schema.String,
+  updatedAt: Schema.String,
+});
+export type PeerTask = typeof PeerTask.Type;
+
+/** A colleague's (or another computer's) agent thread; the person is metadata, not a level. */
+export const PeerWorkThread = Schema.Struct({
+  id: Schema.String,
+  task: Schema.optional(Schema.String),
+  title: Schema.String,
+  email: Schema.String,
+  status: PeerWorkStatus,
+  harness: Schema.optional(Schema.String),
+  branch: Schema.optional(Schema.String),
+  source: Schema.Literals(["peer", "herdr"]),
+  environment: Schema.String,
+  seenAt: Schema.String,
+});
+export type PeerWorkThread = typeof PeerWorkThread.Type;
+
+/** An agent herdr runs on this computer (https://herdr.dev), whatever started it. */
+export const PeerLocalAgent = Schema.Struct({
+  /** `herdr:<terminal id>`, stable while the terminal lives. */
+  id: Schema.String,
+  paneId: Schema.String,
+  agent: Schema.optional(Schema.String),
+  title: Schema.String,
+  status: PeerWorkStatus,
+  cwd: Schema.optional(Schema.String),
+  branch: Schema.optional(Schema.String),
+  /** The workspace project whose checkout it runs in. */
+  workspace: Schema.optional(Schema.String),
+  projectId: Schema.optional(Schema.String),
+});
+export type PeerLocalAgent = typeof PeerLocalAgent.Type;
+
 /** One workspace project as provisioned on this environment. */
 export const PeerProjectState = Schema.Struct({
   project: PeerProject,
@@ -164,6 +217,17 @@ export const PeerProjectState = Schema.Struct({
     enabled: Schema.Boolean,
     instanceIds: Schema.Array(Schema.String),
     error: Schema.optional(Schema.String),
+  }),
+  /**
+   * The project's work: areas in order, tasks, and the threads other people and computers
+   * report. This computer's own threads come live from its thread list.
+   */
+  work: Schema.Struct({
+    areas: Schema.Array(Schema.String),
+    tasks: Schema.Array(PeerTask),
+    threads: Schema.Array(PeerWorkThread),
+    /** This computer's threads (`peer:<thread id>`, `herdr:<terminal id>`) → task id. */
+    assignments: Schema.Record(Schema.String, Schema.String),
   }),
   /** Colleagues' environments working on this project right now. */
   peers: Schema.Array(
@@ -231,6 +295,13 @@ export const PeerHubStatus = Schema.Struct({
   joinable: Schema.Array(PeerJoinableWorkspace),
   /** Directory workspace projects are checked out under, e.g. ~/Peer */
   workspaceRoot: Schema.String,
+  /** This environment's server, so a client tells its own threads from everyone else's. */
+  environmentId: Schema.String,
+  /** Agents herdr runs on this computer, whether or not herdr is running. */
+  agents: Schema.Struct({
+    herdr: Schema.Literals(["running", "not-running"]),
+    list: Schema.Array(PeerLocalAgent),
+  }),
   syncing: Schema.Boolean,
   lastSyncAt: Schema.NullOr(Schema.String),
   error: Schema.NullOr(Schema.String),
@@ -293,6 +364,54 @@ export const PeerHubSharedCapacityInput = Schema.Struct({
   enabled: Schema.Boolean,
 });
 export type PeerHubSharedCapacityInput = typeof PeerHubSharedCapacityInput.Type;
+
+export const PeerHubCreateTaskInput = Schema.Struct({
+  workspace: TrimmedNonEmptyString,
+  projectId: TrimmedNonEmptyString,
+  title: TrimmedNonEmptyString,
+  key: Schema.optional(Schema.String),
+  area: Schema.optional(Schema.String),
+});
+export type PeerHubCreateTaskInput = typeof PeerHubCreateTaskInput.Type;
+
+export const PeerHubUpdateTaskInput = Schema.Struct({
+  workspace: TrimmedNonEmptyString,
+  projectId: TrimmedNonEmptyString,
+  taskId: TrimmedNonEmptyString,
+  title: Schema.optional(TrimmedNonEmptyString),
+  /** An empty string clears it. */
+  area: Schema.optional(Schema.String),
+  status: Schema.optional(Schema.Literals(["open", "done"])),
+});
+export type PeerHubUpdateTaskInput = typeof PeerHubUpdateTaskInput.Type;
+
+export const PeerHubTaskInput = Schema.Struct({
+  workspace: TrimmedNonEmptyString,
+  projectId: TrimmedNonEmptyString,
+  taskId: TrimmedNonEmptyString,
+});
+export type PeerHubTaskInput = typeof PeerHubTaskInput.Type;
+
+export const PeerHubAssignThreadInput = Schema.Struct({
+  workspace: TrimmedNonEmptyString,
+  projectId: TrimmedNonEmptyString,
+  /** `peer:<thread id>` or `herdr:<terminal id>`. */
+  thread: TrimmedNonEmptyString,
+  taskId: Schema.NullOr(TrimmedNonEmptyString),
+});
+export type PeerHubAssignThreadInput = typeof PeerHubAssignThreadInput.Type;
+
+export const PeerHubFocusAgentInput = Schema.Struct({ paneId: TrimmedNonEmptyString });
+export type PeerHubFocusAgentInput = typeof PeerHubFocusAgentInput.Type;
+
+export const PeerHubShareProjectInput = Schema.Struct({
+  workspace: TrimmedNonEmptyString,
+  /** The local project whose repository the workspace gets. */
+  projectId: ProjectId,
+  name: Schema.optional(TrimmedNonEmptyString),
+  areas: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+});
+export type PeerHubShareProjectInput = typeof PeerHubShareProjectInput.Type;
 
 export const PeerHubProjectUsage = Schema.Struct({
   project: Schema.String,
