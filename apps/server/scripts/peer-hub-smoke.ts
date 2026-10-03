@@ -153,7 +153,15 @@ async function setUpWorkspace() {
         currency: "EUR",
         gateway: { kind: "litellm", url: "https://ai.acme.test", usdPerUnit: 1.2 },
         people: { "bob@acme.test": { name: "Bob" } },
-        projects: { demo: project("Demo", "any"), locked: project("Locked", "none") },
+        projects: {
+          demo: project("Demo", "any"),
+          locked: project("Locked", "none"),
+          // A branch nobody pushed: opening it fails, and says why.
+          unpushed: {
+            name: "Unpushed",
+            repositories: [{ id: "app", url: repository, branch: "not-pushed" }],
+          },
+        },
         tools: {
           kontext: {
             name: "kontext",
@@ -374,9 +382,24 @@ const program = Effect.gen(function* () {
     `${instance.displayName} driver=${instance.driver} env=${(instance.environment ?? []).map((v) => `${v.name}${v.sensitive ? "(secret)" : ""}`).join(",")}`,
   );
 
-  // Clone and open both projects.
+  // Clone and open both projects; each answer comes once its clone is done.
+  const repositoriesOf = (s: PeerHubStatus, projectId: string) =>
+    s.workspaces.find((w) => w.slug === "acme")?.projects.find((p) => p.project.id === projectId)
+      ?.repositories ?? [];
   for (const projectId of ["demo", "locked"]) {
-    yield* client[WS_METHODS.peerHubOpenProject]({ workspace: "acme", projectId });
+    const answer = yield* client[WS_METHODS.peerHubOpenProject]({ workspace: "acme", projectId });
+    const repos = repositoriesOf(answer, projectId);
+    if (repos.length === 0 || repos.some((r) => r.state !== "ready" || !r.projectId)) {
+      throw new Error(`opening ${projectId} answered before it was checked out and opened`);
+    }
+  }
+  const unpushed = repositoriesOf(
+    yield* client[WS_METHODS.peerHubOpenProject]({ workspace: "acme", projectId: "unpushed" }),
+    "unpushed",
+  )[0];
+  log("unpushed branch", `${unpushed?.state ?? "-"}: ${unpushed?.error ?? "-"}`);
+  if (unpushed?.state !== "error" || !unpushed.error?.includes('no branch "not-pushed"')) {
+    throw new Error("a failed clone does not say why");
   }
   const opened = yield* waitForStatus("both projects checked out and registered", (s) => {
     const projects = s.workspaces.find((w) => w.slug === "acme")?.projects ?? [];
@@ -390,7 +413,9 @@ const program = Effect.gen(function* () {
       );
     });
   });
-  const projectsAfter = opened.workspaces.find((w) => w.slug === "acme")!.projects;
+  const projectsAfter = opened.workspaces
+    .find((w) => w.slug === "acme")!
+    .projects.filter((p) => p.project.id !== "unpushed");
   for (const project of projectsAfter) {
     for (const repo of project.repositories) {
       log(

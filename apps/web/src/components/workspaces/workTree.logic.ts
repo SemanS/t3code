@@ -70,8 +70,6 @@ export interface WorkProjectNode {
   /** Threads on no task yet. */
   readonly unsorted: ReadonlyArray<WorkThreadNode>;
   readonly tasks: ReadonlyArray<PeerTask>;
-  /** This computer has none of its repositories checked out. */
-  readonly checkedOut: boolean;
 }
 
 /** A local thread's state: ◐ waiting on an answer, ● working, ✓ settled, ○ idle. */
@@ -254,7 +252,6 @@ function projectTree(input: {
       .map((entry) => entry.node)
       .toSorted(byActivity),
     tasks: work.tasks,
-    checkedOut: state.repositories.some((repo) => repo.state === "ready"),
   };
 }
 

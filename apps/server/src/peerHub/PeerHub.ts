@@ -61,6 +61,7 @@ import {
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -76,6 +77,7 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as Settings from "../serverSettings.ts";
+import { explainCloneFailure } from "./cloneFailure.ts";
 import { GIT_ALLOWED_PROTOCOLS, isSafeGitRef, isSafeGitRemote } from "./gitSafety.ts";
 import * as Herdr from "./herdr.ts";
 import * as HubApi from "./hubApi.ts";
@@ -388,12 +390,22 @@ function run(
         },
       },
       (error, stdout, stderr) => {
-        if (error)
-          reject(new Error((stderr || error.message).trim().split("\n").slice(-3).join(" ")));
-        else resolve(stdout.trim());
+        if (error) {
+          // The message is the last lines; the cause keeps all of it for explaining the failure.
+          const output = (stderr || error.message).trim();
+          reject(new Error(output.split("\n").slice(-3).join(" "), { cause: output }));
+        } else {
+          resolve(stdout.trim());
+        }
       },
     );
   });
+}
+
+/** Everything a rejected `run` printed. */
+function runOutput(failure: unknown): string {
+  if (!(failure instanceof Error)) return String(failure);
+  return typeof failure.cause === "string" ? failure.cause : failure.message;
 }
 
 function normalizeHubUrl(raw: string): string | null {
@@ -726,29 +738,38 @@ const make = Effect.gen(function* () {
       }
       if (!exists) yield* setKnowledge({ state: "cloning" });
       yield* publish;
-      const result = yield* Effect.tryPromise(async () => {
-        if (exists) {
-          await run("git", ["-C", path, "pull", "--ff-only", "--quiet"], {
-            timeoutMs: GIT_TIMEOUT_MS,
-          });
-        } else {
-          await NodeFSP.mkdir(NodePath.dirname(path), { recursive: true });
-          await run(
-            "git",
-            ["clone", "--quiet", "--branch", repository.branch, "--", repository.repository, path],
-            { timeoutMs: GIT_TIMEOUT_MS },
-          );
-        }
+      const result = yield* Effect.tryPromise({
+        try: async () => {
+          if (exists) {
+            await run("git", ["-C", path, "pull", "--ff-only", "--quiet"], {
+              timeoutMs: GIT_TIMEOUT_MS,
+            });
+          } else {
+            await NodeFSP.mkdir(NodePath.dirname(path), { recursive: true });
+            await run(
+              "git",
+              [
+                "clone",
+                "--quiet",
+                "--branch",
+                repository.branch,
+                "--",
+                repository.repository,
+                path,
+              ],
+              { timeoutMs: GIT_TIMEOUT_MS },
+            );
+          }
+        },
+        catch: (failure) =>
+          explainCloneFailure(runOutput(failure), {
+            url: repository.repository,
+            branch: repository.branch,
+          }),
       }).pipe(Effect.result);
       // A failed pull keeps the last good checkout usable.
       yield* setKnowledge(
-        result._tag === "Success" || exists
-          ? null
-          : {
-              state: "error",
-              error:
-                result.failure instanceof Error ? result.failure.message : String(result.failure),
-            },
+        result._tag === "Success" || exists ? null : { state: "error", error: result.failure },
       );
     });
 
@@ -1180,6 +1201,12 @@ const make = Effect.gen(function* () {
 
   const cloneAndRegister = (workspace: PersistedWorkspace, project: PeerProject) =>
     Effect.gen(function* () {
+      const settled = (path: string) =>
+        updateRuntime((s) => {
+          const checkouts = new Map(s.checkouts);
+          checkouts.delete(path);
+          return { ...s, checkouts };
+        });
       for (const repo of project.repositories) {
         if (!safeId(repo.id)) continue;
         const path = checkoutPath(
@@ -1204,21 +1231,32 @@ const make = Effect.gen(function* () {
             checkouts: new Map(s.checkouts).set(path, { state: "cloning" }),
           }));
           yield* publish;
-          const cloned = yield* Effect.tryPromise(async () => {
-            await NodeFSP.mkdir(NodePath.dirname(path), { recursive: true });
-            await run("git", ["clone", "--quiet", "--branch", repo.branch, "--", repo.url, path], {
-              timeoutMs: GIT_TIMEOUT_MS,
-            });
+          const cloned = yield* Effect.tryPromise({
+            try: async () => {
+              await NodeFSP.mkdir(NodePath.dirname(path), { recursive: true });
+              await run(
+                "git",
+                ["clone", "--quiet", "--branch", repo.branch, "--", repo.url, path],
+                { timeoutMs: GIT_TIMEOUT_MS },
+              );
+            },
+            catch: (failure) => explainCloneFailure(runOutput(failure), repo),
           }).pipe(Effect.result);
           if (cloned._tag === "Failure") {
-            const error =
-              cloned.failure instanceof Error ? cloned.failure.message : String(cloned.failure);
             yield* updateRuntime((s) => ({
               ...s,
-              checkouts: new Map(s.checkouts).set(path, { state: "error", error }),
+              checkouts: new Map(s.checkouts).set(path, { state: "error", error: cloned.failure }),
             }));
             continue;
           }
+        }
+        // A checkout already open as a project is not opened a second time.
+        const registered = yield* projects
+          .getByWorkspaceRoot(path)
+          .pipe(Effect.orElseSucceed(() => Option.none()));
+        if (Option.isSome(registered)) {
+          yield* settled(path);
+          continue;
         }
         yield* projects
           .bootstrap({
@@ -1231,13 +1269,7 @@ const make = Effect.gen(function* () {
             workspaceRoot: path,
           })
           .pipe(
-            Effect.tap(() =>
-              updateRuntime((s) => {
-                const checkouts = new Map(s.checkouts);
-                checkouts.delete(path);
-                return { ...s, checkouts };
-              }),
-            ),
+            Effect.tap(() => settled(path)),
             Effect.catch((cause) =>
               updateRuntime((s) => ({
                 ...s,
@@ -1248,14 +1280,34 @@ const make = Effect.gen(function* () {
       }
     });
 
+  // Projects being opened here; a second request for one waits for the first.
+  const openings = new Map<string, Deferred.Deferred<void>>();
+
   const openProject: PeerHub["Service"]["openProject"] = Effect.fn("PeerHub.openProject")(
     function* (input) {
       const { workspace, project } = yield* findProject(input.workspace, input.projectId);
       if (project.repositories.length === 0) {
         return yield* hubError(`${project.name} declares no repositories yet.`);
       }
-      // Clones can take minutes; the status stream reports progress.
-      yield* background(cloneAndRegister(workspace, project));
+      // The answer waits for the clone, so the app can open the project or say why it could not.
+      // The clone runs in the layer's scope: a request that goes away leaves it running.
+      const key = sharedKey(workspace.slug, project.id);
+      let opened = openings.get(key);
+      if (opened === undefined) {
+        const created = Deferred.makeUnsafe<void>();
+        openings.set(key, created);
+        opened = created;
+        yield* background(
+          cloneAndRegister(workspace, project).pipe(
+            Effect.ensuring(
+              Effect.sync(() => openings.delete(key)).pipe(
+                Effect.andThen(Deferred.succeed(created, undefined)),
+              ),
+            ),
+          ),
+        );
+      }
+      yield* Deferred.await(opened);
       return yield* publish;
     },
   );

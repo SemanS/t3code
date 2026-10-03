@@ -28,6 +28,7 @@ import {
   failureMessage,
   usePeerHubStatus,
 } from "../workspaces/WorkspaceAccess";
+import { useOpenWorkspaceProject } from "../workspaces/useOpenWorkspaceProject";
 import { useSettingsScope } from "./SettingsScopeContext";
 import {
   SettingsPageContainer,
@@ -370,8 +371,11 @@ function WorkspaceProject({
 }) {
   const { project } = state;
   const currency = workspace.currency;
-  const openProject = useAtomCommand(serverEnvironment.peerHubOpenProject, {
-    reportFailure: false,
+  const opener = useOpenWorkspaceProject({
+    environmentId,
+    workspace: workspace.slug,
+    projectId: project.id,
+    name: project.name,
   });
   const setShared = useAtomCommand(serverEnvironment.peerHubSetSharedCapacity, {
     reportFailure: false,
@@ -396,14 +400,6 @@ function WorkspaceProject({
   const shared = project.capacity.shared;
   const input = { workspace: workspace.slug, projectId: project.id };
 
-  const open = async () => {
-    setBusy(true);
-    try {
-      reportFailure(`Could not open ${project.name}`, await openProject({ environmentId, input }));
-    } finally {
-      setBusy(false);
-    }
-  };
   const toggleShared = async (enabled: boolean) => {
     setBusy(true);
     try {
@@ -434,8 +430,18 @@ function WorkspaceProject({
           project.repositories.length === 0 ? (
             <Badge variant="outline">no repositories yet</Badge>
           ) : missingRepos.length > 0 || unregistered.length > 0 ? (
-            <Button size="sm" disabled={busy || cloning} onClick={() => void open()}>
-              {cloning ? "Cloning…" : missingRepos.length > 0 ? "Clone & open" : "Open"}
+            <Button
+              size="sm"
+              disabled={busy || cloning || opener.opening}
+              onClick={() => void opener.open()}
+            >
+              {cloning || opener.opening
+                ? missingRepos.length > 0
+                  ? "Cloning…"
+                  : "Opening…"
+                : missingRepos.length > 0
+                  ? "Clone & open"
+                  : "Open"}
             </Button>
           ) : (
             <Badge variant="success">in sidebar</Badge>

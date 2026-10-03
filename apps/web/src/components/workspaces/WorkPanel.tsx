@@ -32,6 +32,11 @@ import { Input } from "../ui/input";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { stackedThreadToast, toastManager } from "../ui/toast";
+import {
+  projectCheckout,
+  useOpenWorkspaceProject,
+  type ProjectCheckout,
+} from "./useOpenWorkspaceProject";
 import { failureMessage, usePeerHubStatus } from "./WorkspaceAccess";
 import {
   activeAgents,
@@ -251,15 +256,13 @@ function ProjectSection({
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const [adding, setAdding] = useState(false);
-  const openProject = useAtomCommand(serverEnvironment.peerHubOpenProject, {
-    reportFailure: false,
-  });
   const state = status.workspaces
     .find((w) => w.slug === project.workspace)
     ?.projects.find((p) => p.project.id === project.projectId);
-  const t3ProjectId = state?.repositories.find((r) => r.projectId !== undefined)?.projectId;
-  const cloning = state?.repositories.some((r) => r.state === "cloning") ?? false;
+  const checkout = state === undefined ? undefined : projectCheckout(state);
+  const t3ProjectId = checkout?.projectId;
   const scope = { workspace: project.workspace, projectId: project.projectId };
+  const opener = useOpenWorkspaceProject({ environmentId, ...scope, name: project.name });
 
   return (
     <section aria-label={project.name}>
@@ -309,22 +312,12 @@ function ProjectSection({
               onDone={() => setAdding(false)}
             />
           ) : null}
-          {!project.checkedOut ? (
-            <div className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground">
-              <span className="min-w-0 flex-1">Not on this computer yet.</span>
-              <Button
-                size="xs"
-                variant="outline"
-                disabled={cloning}
-                onClick={() =>
-                  void openProject({ environmentId, input: scope }).then((result) =>
-                    reportFailure(`Could not open ${project.name}`, result),
-                  )
-                }
-              >
-                {cloning ? "Cloning…" : "Clone & open"}
-              </Button>
-            </div>
+          {checkout !== undefined && checkout.projectId === undefined ? (
+            <NotOpenHere
+              checkout={checkout}
+              opening={opener.opening}
+              onOpen={() => void opener.open()}
+            />
           ) : null}
           {project.areas.map((area) => (
             <div key={area.name ?? "—"}>
@@ -370,6 +363,42 @@ function ProjectSection({
         </div>
       )}
     </section>
+  );
+}
+
+/** A workspace project not open on this computer: clone and open it, or say why that failed. */
+function NotOpenHere({
+  checkout,
+  opening,
+  onOpen,
+}: {
+  readonly checkout: ProjectCheckout;
+  readonly opening: boolean;
+  readonly onOpen: () => void;
+}) {
+  const busy = opening || checkout.cloning;
+  const failed = !busy && checkout.errors.length > 0;
+  return (
+    <div className="flex items-start gap-2 px-2 py-1 text-xs text-muted-foreground">
+      <span className={cn("min-w-0 flex-1", failed && "text-destructive")}>
+        {failed
+          ? checkout.errors.join(" ")
+          : checkout.missing
+            ? "Not on this computer yet."
+            : "On this computer, not open yet."}
+      </span>
+      <Button size="xs" variant="outline" disabled={busy} onClick={onOpen}>
+        {busy
+          ? checkout.missing
+            ? "Cloning…"
+            : "Opening…"
+          : failed
+            ? "Try again"
+            : checkout.missing
+              ? "Clone & open"
+              : "Open"}
+      </Button>
+    </div>
   );
 }
 
