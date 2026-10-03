@@ -274,6 +274,7 @@ const program = Effect.gen(function* () {
     throw new Error("expected a signed-out app on the configured hub");
 
   // Sign in with an email code, as the welcome screen does.
+  const firstCodeAt = Date.now();
   const pending = yield* client[WS_METHODS.peerHubStartSignIn]({ email: "Bob@Acme.test" });
   log("code requested", summary(pending));
   const code = pending.pendingSignIn?.echoedCode;
@@ -287,15 +288,9 @@ const program = Effect.gen(function* () {
   log("signed in", summary(signedIn));
   if (!signedIn.signedIn || signedIn.email !== "bob@acme.test")
     throw new Error("sign-in did not stick");
-  if (!signedIn.joinable.some((j) => j.slug === "acme" && j.reason === "domain")) {
-    throw new Error("acme is not offered to an @acme.test address");
-  }
-
-  // Join by email domain.
-  const joined = yield* client[WS_METHODS.peerHubJoinWorkspace]({ workspace: "acme" });
-  log("joined", summary(joined));
-  const acme = joined.workspaces.find((w) => w.slug === "acme");
-  if (acme === undefined) throw new Error("acme is not among the workspaces after joining");
+  // An @acme.test address joins Acme on its own when it signs in, as in Slack.
+  const acme = signedIn.workspaces.find((w) => w.slug === "acme");
+  if (acme === undefined) throw new Error("an @acme.test address did not join acme on sign-in");
   log(
     "acme",
     `revision=${acme.revision ?? "-"} member=${acme.memberName} projects=${acme.projects.map((p) => `${p.project.id}[personal=${p.project.capacity.personal}]`).join(",")}`,
@@ -419,6 +414,12 @@ const program = Effect.gen(function* () {
   });
   log("usage", JSON.stringify(usage.shared));
 
+  // Workspaces can be looked up by their short name.
+  const found = yield* client[WS_METHODS.peerHubFindWorkspace]({ slug: "acme" });
+  const missing = yield* client[WS_METHODS.peerHubFindWorkspace]({ slug: "no-such-space" });
+  log("look up acme", JSON.stringify(found));
+  if (found?.role !== "member" || missing !== null) throw new Error("the lookup is wrong");
+
   // Create a workspace of one's own; its creator owns it.
   const created = yield* client[WS_METHODS.peerHubCreateWorkspace]({
     slug: "bob-labs",
@@ -453,6 +454,21 @@ const program = Effect.gen(function* () {
   log("signed out", summary(signedOut));
   if (signedOut.signedIn || signedOut.workspaces.length > 0)
     throw new Error("sign-out did not stick");
+
+  // Signing in again does not rejoin a workspace Bob left here; it is offered instead.
+  yield* Effect.sleep(`${Math.max(0, 31_000 - (Date.now() - firstCodeAt))} millis`);
+  const again = yield* client[WS_METHODS.peerHubStartSignIn]({ email: "bob@acme.test" });
+  const back = yield* client[WS_METHODS.peerHubFinishSignIn]({
+    code: again.pendingSignIn?.echoedCode ?? "",
+  });
+  log("signed in again", summary(back));
+  if (
+    back.workspaces.some((w) => w.slug === "acme") ||
+    !back.joinable.some((j) => j.slug === "acme")
+  ) {
+    throw new Error("a workspace Bob left came back on sign-in");
+  }
+  yield* client[WS_METHODS.peerHubSignOut]({});
 }).pipe(Effect.scoped);
 
 async function stop(child: NodeChildProcess.ChildProcess) {

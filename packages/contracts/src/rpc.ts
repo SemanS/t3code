@@ -317,6 +317,8 @@ import {
 import {
   PeerHubCreateWorkspaceInput,
   PeerHubError,
+  PeerFoundWorkspace,
+  PeerHubFindWorkspaceInput,
   PeerHubFinishSignInInput,
   PeerHubInviteInput,
   PeerHubProjectInput,
@@ -487,6 +489,7 @@ export const WS_METHODS = {
   peerHubCreateWorkspace: "peerHub.createWorkspace",
   peerHubJoinWorkspace: "peerHub.joinWorkspace",
   peerHubLeaveWorkspace: "peerHub.leaveWorkspace",
+  peerHubFindWorkspace: "peerHub.findWorkspace",
   peerHubInvite: "peerHub.invite",
   peerHubOpenProject: "peerHub.openProject",
   peerHubSetSharedCapacity: "peerHub.setSharedCapacity",
@@ -1730,6 +1733,12 @@ const WsPeerHubSetSharedCapacityRpc = Rpc.make(WS_METHODS.peerHubSetSharedCapaci
   error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
 });
 
+const WsPeerHubFindWorkspaceRpc = Rpc.make(WS_METHODS.peerHubFindWorkspace, {
+  payload: PeerHubFindWorkspaceInput,
+  success: Schema.NullOr(PeerFoundWorkspace),
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
 const WsPeerHubProjectUsageRpc = Rpc.make(WS_METHODS.peerHubProjectUsage, {
   payload: PeerHubProjectInput,
   success: PeerHubProjectUsage,
@@ -1837,6 +1846,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsPeerHubCreateWorkspaceRpc,
   WsPeerHubJoinWorkspaceRpc,
   WsPeerHubLeaveWorkspaceRpc,
+  WsPeerHubFindWorkspaceRpc,
   WsPeerHubInviteRpc,
   WsPeerHubOpenProjectRpc,
   WsPeerHubSetSharedCapacityRpc,

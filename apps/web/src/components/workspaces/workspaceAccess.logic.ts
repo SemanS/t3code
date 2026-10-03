@@ -73,3 +73,48 @@ export function isValidWorkspaceSlug(slug: string): boolean {
 export function looksLikeEmail(value: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
 }
+
+/** Labels under a country code that a company name sits beneath, as in acme.co.uk. */
+const SECOND_LEVEL_LABELS = new Set(["co", "com", "org", "net", "ac", "gov", "edu"]);
+
+/** A workspace name from a company's mail domain: "webinson.com" → "Webinson", "acme-labs.co.uk" → "Acme Labs". */
+export function workspaceNameFromDomain(domain: string): string {
+  const labels = domain.toLowerCase().split(".").filter(Boolean);
+  let index = labels.length - 2;
+  const last = labels[labels.length - 1] ?? "";
+  if (index > 0 && last.length === 2 && SECOND_LEVEL_LABELS.has(labels[index] ?? "")) index -= 1;
+  const label = labels[Math.max(index, 0)] ?? domain;
+  return label
+    .split("-")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+interface WorkspaceRef {
+  readonly slug: string;
+  readonly name: string;
+  readonly allowedDomains: ReadonlyArray<string>;
+}
+
+/** Whether a workspace this person is in, or may join, already admits their domain. */
+export function domainHasWorkspace(
+  status: {
+    readonly workspaces: ReadonlyArray<WorkspaceRef>;
+    readonly joinable: ReadonlyArray<WorkspaceRef>;
+  },
+  domain: string,
+): boolean {
+  return [...status.workspaces, ...status.joinable].some((workspace) =>
+    workspace.allowedDomains.includes(domain),
+  );
+}
+
+export function matchesWorkspaceQuery(workspace: WorkspaceRef, query: string): boolean {
+  const needle = query.trim().toLowerCase();
+  return (
+    needle === "" ||
+    workspace.slug.includes(needle) ||
+    workspace.name.toLowerCase().includes(needle)
+  );
+}

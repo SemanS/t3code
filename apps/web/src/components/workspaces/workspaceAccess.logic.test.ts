@@ -2,9 +2,12 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   companyDomainOf,
+  domainHasWorkspace,
   isValidWorkspaceSlug,
   looksLikeEmail,
+  matchesWorkspaceQuery,
   slugFromName,
+  workspaceNameFromDomain,
 } from "./workspaceAccess.logic";
 
 describe("companyDomainOf", () => {
@@ -48,5 +51,32 @@ describe("looksLikeEmail", () => {
     expect(looksLikeEmail("ana@acme.example")).toBe(true);
     expect(looksLikeEmail("ana@acme")).toBe(false);
     expect(looksLikeEmail("ana acme.example")).toBe(false);
+  });
+});
+
+describe("workspaceNameFromDomain", () => {
+  it("names a company after its domain", () => {
+    expect(workspaceNameFromDomain("webinson.com")).toBe("Webinson");
+    expect(workspaceNameFromDomain("acme-labs.co.uk")).toBe("Acme Labs");
+    expect(workspaceNameFromDomain("mail.acme.example")).toBe("Acme");
+  });
+});
+
+describe("domainHasWorkspace", () => {
+  const acme = { slug: "acme", name: "Acme", allowedDomains: ["acme.test"] };
+  it("sees a workspace the domain already has, joined or not", () => {
+    expect(domainHasWorkspace({ workspaces: [acme], joinable: [] }, "acme.test")).toBe(true);
+    expect(domainHasWorkspace({ workspaces: [], joinable: [acme] }, "acme.test")).toBe(true);
+    expect(domainHasWorkspace({ workspaces: [], joinable: [] }, "acme.test")).toBe(false);
+  });
+});
+
+describe("matchesWorkspaceQuery", () => {
+  it("finds a workspace by name or short name", () => {
+    const acme = { slug: "acme-labs", name: "Acme Labs", allowedDomains: [] };
+    expect(matchesWorkspaceQuery(acme, "")).toBe(true);
+    expect(matchesWorkspaceQuery(acme, "labs")).toBe(true);
+    expect(matchesWorkspaceQuery(acme, "ACME")).toBe(true);
+    expect(matchesWorkspaceQuery(acme, "globex")).toBe(false);
   });
 });

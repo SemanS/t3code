@@ -16,6 +16,7 @@ import {
   failureMessage,
   usePeerHubStatus,
 } from "../workspaces/WorkspaceAccess";
+import { companyDomainOf } from "../workspaces/workspaceAccess.logic";
 
 /**
  * First-run step, like Slack's: sign in with a work email, then join the
@@ -64,13 +65,14 @@ export function WorkspaceStep({ onContinue }: { readonly onContinue: () => void 
       <>
         <Heading
           title="Choose a workspace"
-          description={`Signed in as ${status.email ?? "you"}. Join the workspace your address qualifies for, or create one.`}
+          description={`Signed in as ${status.email ?? "you"}. Join your team’s workspace, or create it.`}
         />
         <ScrollArea scrollFade className="mt-5 h-auto max-h-[min(30rem,55dvh)]">
           <div className="pr-3">
             <WorkspacePicker
               environmentId={environmentId}
               status={status}
+              autoFocus
               onJoined={() => setAddingAnother(false)}
             />
           </div>
@@ -125,6 +127,10 @@ function ProjectsToOpen({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const names = status.workspaces.map((workspace) => workspace.name).join(", ");
+  // Workspaces open to the address's domain took the person in at sign-in.
+  const domain = companyDomainOf(status.email);
+  const byDomain =
+    domain !== null && status.workspaces.some((w) => w.allowedDomains.includes(domain));
 
   const open = async () => {
     setBusy(true);
@@ -154,11 +160,14 @@ function ProjectsToOpen({
     <>
       <Heading
         title={`You’re in ${names}`}
-        description={
+        description={[
+          byDomain ? `Your @${domain} address got you in.` : null,
           candidates.length === 0
             ? "Your workspaces list no projects with repositories for you yet. A lead adds you to projects; they appear in Settings → Workspaces."
-            : "Pick the projects to clone to this computer. They open in the sidebar with their tools and knowledge."
-        }
+            : "Pick the projects to clone to this computer. They open in the sidebar with their tools and knowledge.",
+        ]
+          .filter(Boolean)
+          .join(" ")}
       />
       {candidates.length > 0 ? (
         <ScrollArea scrollFade className="mt-5 h-auto max-h-[min(26rem,50dvh)]">

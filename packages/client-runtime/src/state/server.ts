@@ -1113,6 +1113,10 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:peer-hub:leave-workspace",
       tag: WS_METHODS.peerHubLeaveWorkspace,
     }),
+    peerHubFindWorkspace: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:find-workspace",
+      tag: WS_METHODS.peerHubFindWorkspace,
+    }),
     peerHubInvite: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:peer-hub:invite",
       tag: WS_METHODS.peerHubInvite,

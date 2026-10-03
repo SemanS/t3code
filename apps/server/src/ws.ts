@@ -2024,6 +2024,10 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.peerHubLeaveWorkspace, peerHub.leaveWorkspace(input), {
             "rpc.aggregate": "peerHub",
           }),
+        [WS_METHODS.peerHubFindWorkspace]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubFindWorkspace, peerHub.findWorkspace(input), {
+            "rpc.aggregate": "peerHub",
+          }),
         [WS_METHODS.peerHubInvite]: (input) =>
           observeRpcEffect(WS_METHODS.peerHubInvite, peerHub.invite(input), {
             "rpc.aggregate": "peerHub",

@@ -35,6 +35,8 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   type PeerHubCreateWorkspaceInput,
+  type PeerFoundWorkspace,
+  type PeerHubFindWorkspaceInput,
   type PeerHubFinishSignInInput,
   type PeerHubInviteInput,
   type PeerHubProjectInput,
@@ -104,6 +106,8 @@ const PersistedState = Schema.Struct({
   lastSyncAt: Schema.NullOr(Schema.String),
   /** "workspace/project" → provider instances this environment provisioned for its shared capacity. */
   sharedInstances: Schema.Record(Schema.String, Schema.Array(Schema.String)),
+  /** Address → workspaces that person left on this computer; signing in does not rejoin them. */
+  leftWorkspaces: Schema.optional(Schema.Record(Schema.String, Schema.Array(Schema.String))),
 });
 type PersistedState = typeof PersistedState.Type;
 
@@ -168,6 +172,10 @@ export class PeerHub extends Context.Service<
       input: PeerHubWorkspaceInput,
     ) => Effect.Effect<PeerHubStatus, PeerHubError>;
     readonly invite: (input: PeerHubInviteInput) => Effect.Effect<PeerHubStatus, PeerHubError>;
+    /** A workspace by its short name (null when there is none), to join it by name. */
+    readonly findWorkspace: (
+      input: PeerHubFindWorkspaceInput,
+    ) => Effect.Effect<PeerFoundWorkspace | null, PeerHubError>;
     /** Clones the project's repositories (in the background) and registers them as projects. */
     readonly openProject: (
       input: PeerHubProjectInput,
@@ -266,6 +274,16 @@ function normalizeHubUrl(raw: string): string | null {
 }
 
 const hubError = (detail: string) => new PeerHubError({ detail });
+
+/** Records (or forgets) that `email` left `slug` here, so signing in again does not rejoin it. */
+function markLeft(persisted: PersistedState, email: string | null, slug: string, left: boolean) {
+  if (email === null) return persisted;
+  const current = (persisted.leftWorkspaces?.[email] ?? []).filter((s) => s !== slug);
+  return {
+    ...persisted,
+    leftWorkspaces: { ...persisted.leftWorkspaces, [email]: left ? [...current, slug] : current },
+  };
+}
 
 const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
@@ -761,6 +779,22 @@ const make = Effect.gen(function* () {
         .set(SESSION_SECRET, Buffer.from(signedIn.session, "utf8"))
         .pipe(Effect.mapError(() => hubError("Could not store the hub session.")));
       yield* updatePersisted((p) => ({ ...p, email: signedIn.email, pendingSignIn: null }));
+      // Workspaces that admit the address's domain take the person in right away, like Slack,
+      // except the ones they left on this computer before.
+      const hubUrl = hubUrlOf(persisted);
+      const left = new Set(persisted.leftWorkspaces?.[signedIn.email] ?? []);
+      const me = yield* hubApi.me(hubUrl, signedIn.session).pipe(Effect.option);
+      for (const workspace of Option.isSome(me) ? me.value.joinable : []) {
+        if (
+          workspace.joinReason !== "domain" ||
+          left.has(workspace.slug) ||
+          !safeId(workspace.slug)
+        )
+          continue;
+        yield* hubApi
+          .join(hubUrl, signedIn.session, workspace.slug)
+          .pipe(Effect.ignoreCause({ log: true }));
+      }
       return yield* syncNow;
     },
     lock.withPermits(1),
@@ -779,8 +813,15 @@ const make = Effect.gen(function* () {
         .pipe(Effect.ignoreCause({ log: true }));
     }
     yield* secrets.remove(SESSION_SECRET).pipe(Effect.ignoreCause({ log: true }));
-    // Keep the hub address so signing back in is one step. Checkouts stay: they are the person's files.
-    yield* updatePersisted(() => ({ ...EMPTY_PERSISTED, hubUrl: persisted.hubUrl }));
+    // Keep the hub address so signing back in is one step, and what each person left so it is
+    // not rejoined. Checkouts stay: they are the person's files.
+    yield* updatePersisted(() => ({
+      ...EMPTY_PERSISTED,
+      hubUrl: persisted.hubUrl,
+      ...(persisted.leftWorkspaces === undefined
+        ? {}
+        : { leftWorkspaces: persisted.leftWorkspaces }),
+    }));
     yield* updateRuntime((s) => ({
       ...s,
       error: null,
@@ -797,11 +838,13 @@ const make = Effect.gen(function* () {
     "PeerHub.createWorkspace",
   )(function* (input) {
     const { hubUrl, session } = yield* requireSession;
+    const slug = input.slug.toLowerCase();
     yield* hubApi.createWorkspace(hubUrl, session, {
-      slug: input.slug.toLowerCase(),
+      slug,
       name: input.name,
       allowedDomains: input.allowedDomains.map((domain) => domain.toLowerCase()),
     });
+    yield* updatePersisted((p) => markLeft(p, p.email, slug, false));
     return yield* syncNow;
   }, lock.withPermits(1));
 
@@ -809,6 +852,7 @@ const make = Effect.gen(function* () {
     function* (input) {
       const { hubUrl, session } = yield* requireSession;
       yield* hubApi.join(hubUrl, session, input.workspace);
+      yield* updatePersisted((p) => markLeft(p, p.email, input.workspace, false));
       return yield* syncNow;
     },
     lock.withPermits(1),
@@ -818,6 +862,7 @@ const make = Effect.gen(function* () {
     function* (input) {
       const { hubUrl, session } = yield* requireSession;
       yield* hubApi.leave(hubUrl, session, input.workspace);
+      yield* updatePersisted((p) => markLeft(p, p.email, input.workspace, true));
       // The hub revoked this member's keys; the local instances go too.
       const prefix = `${input.workspace}/`;
       for (const key of Object.keys((yield* Ref.get(stateRef)).persisted.sharedInstances)) {
@@ -836,6 +881,15 @@ const make = Effect.gen(function* () {
     });
     return yield* publish;
   });
+
+  const findWorkspace: PeerHub["Service"]["findWorkspace"] = Effect.fn("PeerHub.findWorkspace")(
+    function* (input) {
+      const slug = input.slug.trim().toLowerCase();
+      if (!safeId(slug)) return null;
+      const { hubUrl, session } = yield* requireSession;
+      return yield* hubApi.findWorkspace(hubUrl, session, slug);
+    },
+  );
 
   const findProject = (workspaceSlug: string, projectId: string) =>
     Effect.gen(function* () {
@@ -1066,6 +1120,7 @@ const make = Effect.gen(function* () {
     joinWorkspace,
     leaveWorkspace,
     invite,
+    findWorkspace,
     openProject,
     setSharedCapacity,
     projectUsage,

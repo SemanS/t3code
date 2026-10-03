@@ -260,3 +260,15 @@ it("leaves the workspace step out without a local server", async () => {
   await act(async () => root.render(<WelcomeWizard localAvailable={false} onDone={vi.fn()} />));
   expect(document.querySelector("h1")?.textContent).toBe("Connect your computers");
 });
+
+it("offers the company's own workspace, ready to create, when its domain has none", async () => {
+  mocks.peerHubStatus = { ...SIGNED_OUT, signedIn: true, email: "ana@acme.test" };
+  mocks.refresh.mockResolvedValue({ _tag: "Success", value: null });
+  await act(async () => root.render(<WelcomeWizard localAvailable onDone={vi.fn()} />));
+  expect(document.body.textContent).toContain("Create the Acme workspace");
+  await click("Create Acme");
+  expect(mocks.refresh).toHaveBeenCalledWith({
+    environmentId: "test-env",
+    input: { slug: "acme", name: "Acme", allowedDomains: ["acme.test"] },
+  });
+});

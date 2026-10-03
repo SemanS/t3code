@@ -258,6 +258,22 @@ export type PeerHubCreateWorkspaceInput = typeof PeerHubCreateWorkspaceInput.Typ
 export const PeerHubWorkspaceInput = Schema.Struct({ workspace: TrimmedNonEmptyString });
 export type PeerHubWorkspaceInput = typeof PeerHubWorkspaceInput.Type;
 
+export const PeerHubFindWorkspaceInput = Schema.Struct({ slug: TrimmedNonEmptyString });
+export type PeerHubFindWorkspaceInput = typeof PeerHubFindWorkspaceInput.Type;
+
+/**
+ * A workspace looked up by its short name. Its domains show only to those it concerns (members
+ * and people it admits), so a lookup never reveals whose workspace it is.
+ */
+export const PeerFoundWorkspace = Schema.Struct({
+  slug: Schema.String,
+  name: Schema.String,
+  role: Schema.NullOr(PeerWorkspaceRole),
+  canJoin: Schema.Boolean,
+  allowedDomains: Schema.Array(Schema.String),
+});
+export type PeerFoundWorkspace = typeof PeerFoundWorkspace.Type;
+
 export const PeerHubInviteInput = Schema.Struct({
   workspace: TrimmedNonEmptyString,
   email: TrimmedNonEmptyString,

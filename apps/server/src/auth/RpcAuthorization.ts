@@ -89,6 +89,7 @@ export const RPC_REQUIRED_SCOPES = {
   // capacity mints workspace credentials, so those belong to its owner.
   [WS_METHODS.peerHubSubscribe]: AuthOrchestrationReadScope,
   [WS_METHODS.peerHubProjectUsage]: AuthOrchestrationReadScope,
+  [WS_METHODS.peerHubFindWorkspace]: AuthOrchestrationReadScope,
   [WS_METHODS.peerHubSync]: AuthOrchestrationOperateScope,
   [WS_METHODS.peerHubOpenProject]: AuthOrchestrationOperateScope,
   [WS_METHODS.peerHubStartSignIn]: AuthAccessWriteScope,

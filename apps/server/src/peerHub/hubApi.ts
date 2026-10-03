@@ -5,6 +5,7 @@
  * @module peerHub/hubApi
  */
 import {
+  PeerFoundWorkspace,
   PeerHubError,
   PeerHubProjectUsage,
   PeerManifest,
@@ -83,7 +84,7 @@ const segment = (value: string) => encodeURIComponent(value);
 export const make = Effect.gen(function* () {
   const client = yield* HttpClient.HttpClient;
 
-  const request = <S extends Schema.Top & { readonly DecodingServices: never }>(
+  const request = <S extends Schema.Top & { readonly DecodingServices: never }, Missing = never>(
     schema: S,
     input: {
       readonly hubUrl: string;
@@ -91,8 +92,10 @@ export const make = Effect.gen(function* () {
       readonly method?: "GET" | "POST" | "DELETE";
       readonly session?: string | undefined;
       readonly body?: unknown;
+      /** What a 404 means instead of an error, e.g. "no such workspace". */
+      readonly notFound?: { readonly value: Missing };
     },
-  ): Effect.Effect<S["Type"], PeerHubError> =>
+  ): Effect.Effect<S["Type"] | Missing, PeerHubError> =>
     Effect.gen(function* () {
       const url = `${input.hubUrl.replace(/\/+$/, "")}${input.path}`;
       const base =
@@ -123,6 +126,7 @@ export const make = Effect.gen(function* () {
             }),
         ),
       );
+      if (response.status === 404 && input.notFound !== undefined) return input.notFound.value;
       if (response.status < 200 || response.status >= 300) {
         const decoded = decodeErrorBody(json);
         if (
@@ -190,6 +194,15 @@ export const make = Effect.gen(function* () {
         method: "POST",
         session,
         body,
+      }),
+
+    /** A workspace by its short name, or null when there is none. */
+    findWorkspace: (hubUrl: string, session: string, slug: string) =>
+      request(PeerFoundWorkspace, {
+        hubUrl,
+        path: workspacePath(slug),
+        session,
+        notFound: { value: null },
       }),
 
     join: (hubUrl: string, session: string, slug: string) =>

@@ -1,4 +1,4 @@
-import type { EnvironmentId, PeerHubStatus } from "@t3tools/contracts";
+import type { EnvironmentId, PeerFoundWorkspace, PeerHubStatus } from "@t3tools/contracts";
 import {
   type AtomCommandResult,
   isAtomCommandInterrupted,
@@ -18,9 +18,12 @@ import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collaps
 import { Input } from "../ui/input";
 import {
   companyDomainOf,
+  domainHasWorkspace,
   isValidWorkspaceSlug,
   looksLikeEmail,
+  matchesWorkspaceQuery,
   slugFromName,
+  workspaceNameFromDomain,
 } from "./workspaceAccess.logic";
 
 /** An environment's link to its Peer Hub: who is signed in, their workspaces, what they may join. */
@@ -238,76 +241,119 @@ export function WorkspaceSignIn({
 }
 
 /**
- * Joining and creating workspaces, the way Slack offers them: those the
- * address qualifies for (its domain, or an invite), and a new one of your own.
+ * Joining and creating workspaces, the way Slack offers them. Workspaces that
+ * admit the address's domain took the person in at sign-in already; this
+ * offers the rest: the company's own workspace, pre-filled, when its domain
+ * has none yet; the workspaces the address may join; a lookup by short name;
+ * and a new workspace of one's own.
  */
 export function WorkspacePicker({
   environmentId,
   status,
   onJoined,
+  autoFocus = false,
 }: {
   readonly environmentId: EnvironmentId;
   readonly status: PeerHubStatus;
   readonly onJoined?: (slug: string) => void;
+  /** Focus the main action (the first-run step), so Enter takes it. */
+  readonly autoFocus?: boolean;
 }) {
-  const join = useAtomCommand(serverEnvironment.peerHubJoinWorkspace, { reportFailure: false });
-  const { busy, error, run } = useHubAction();
-  const [joining, setJoining] = useState<string | null>(null);
-  const [creating, setCreating] = useState(status.joinable.length === 0);
+  const domain = companyDomainOf(status.email);
+  const suggestion =
+    domain !== null && !domainHasWorkspace(status, domain)
+      ? { domain, name: workspaceNameFromDomain(domain) }
+      : null;
+  const [creating, setCreating] = useState(suggestion === null && status.joinable.length === 0);
+  const [query, setQuery] = useState("");
+  const joinable = status.joinable.filter((workspace) => matchesWorkspaceQuery(workspace, query));
+  const mine =
+    query.trim() === ""
+      ? []
+      : status.workspaces.filter((workspace) => matchesWorkspaceQuery(workspace, query));
+  const known = new Set([...status.workspaces, ...status.joinable].map((w) => w.slug));
 
   return (
-    <div>
-      {status.joinable.length > 0 ? (
+    <div className="space-y-3">
+      {suggestion !== null && !creating ? (
+        <DomainWorkspaceCard
+          environmentId={environmentId}
+          domain={suggestion.domain}
+          name={suggestion.name}
+          autoFocus={autoFocus}
+          onCreated={(slug) => onJoined?.(slug)}
+          onOtherName={() => setCreating(true)}
+        />
+      ) : null}
+      <Input
+        className="w-full"
+        size="sm"
+        nativeInput
+        type="search"
+        autoCapitalize="none"
+        spellCheck={false}
+        placeholder="Find a workspace"
+        aria-label="Find a workspace"
+        value={query}
+        onChange={(event) => setQuery(event.currentTarget.value)}
+      />
+      {mine.length > 0 ? (
         <ul className="space-y-2">
-          {status.joinable.map((workspace) => (
+          {mine.map((workspace) => (
             <li
               key={workspace.slug}
               className="flex items-center gap-3 rounded-lg border border-border bg-background px-3 py-3"
             >
-              <span className="min-w-0 flex-1">
-                <span className="block text-sm font-medium break-words">{workspace.name}</span>
-                <span className="mt-0.5 block text-xs text-muted-foreground">
-                  {workspace.reason === "invite"
-                    ? "You were invited."
-                    : `Anyone with an ${workspace.allowedDomains.map((d) => `@${d}`).join(" or ")} address can join.`}
-                </span>
+              <span className="min-w-0 flex-1 text-sm font-medium break-words">
+                {workspace.name}
               </span>
-              <Button
-                size="sm"
-                disabled={busy}
-                onClick={() => {
-                  setJoining(workspace.slug);
-                  void run(() =>
-                    join({ environmentId, input: { workspace: workspace.slug } }),
-                  ).then((joined) => {
-                    setJoining(null);
-                    if (joined) onJoined?.(workspace.slug);
-                  });
-                }}
-              >
-                {joining === workspace.slug ? "Joining…" : "Join"}
-              </Button>
+              <Badge variant="outline">you’re in</Badge>
             </li>
           ))}
         </ul>
-      ) : (
+      ) : null}
+      {joinable.length > 0 ? (
+        <ul className="space-y-2">
+          {joinable.map((workspace) => (
+            <JoinRow
+              key={workspace.slug}
+              environmentId={environmentId}
+              slug={workspace.slug}
+              name={workspace.name}
+              description={
+                workspace.reason === "invite"
+                  ? "You were invited."
+                  : `Anyone with an ${workspace.allowedDomains.map((d) => `@${d}`).join(" or ")} address can join.`
+              }
+              onJoined={onJoined}
+            />
+          ))}
+        </ul>
+      ) : query.trim() === "" && suggestion === null ? (
         <p className="text-sm text-muted-foreground">
           No workspace is open to {status.email ?? "your address"} yet. Ask a colleague for an
-          invite, or create your team’s workspace.
+          invite, look one up by its short name, or create your team’s workspace.
         </p>
-      )}
-      <ErrorLine id="peer-join-error" message={error} />
-      <div className="mt-4">
+      ) : null}
+      <WorkspaceLookup
+        environmentId={environmentId}
+        email={status.email}
+        query={query}
+        known={known}
+        onJoined={onJoined}
+      />
+      <div className="pt-1">
         {creating ? (
           <CreateWorkspaceForm
             environmentId={environmentId}
             email={status.email}
+            initialName={suggestion?.name ?? ""}
             onCreated={(slug) => onJoined?.(slug)}
           />
         ) : (
           <Button variant="outline" size="sm" onClick={() => setCreating(true)}>
             <PlusIcon className="size-3.5" />
-            Create a workspace
+            {suggestion === null ? "Create a workspace" : "Create a different workspace"}
           </Button>
         )}
       </div>
@@ -315,13 +361,189 @@ export function WorkspacePicker({
   );
 }
 
+/** The company's own workspace, offered ready to create when its domain has none yet. */
+function DomainWorkspaceCard({
+  environmentId,
+  domain,
+  name,
+  autoFocus,
+  onCreated,
+  onOtherName,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly domain: string;
+  readonly name: string;
+  readonly autoFocus: boolean;
+  readonly onCreated: (slug: string) => void;
+  readonly onOtherName: () => void;
+}) {
+  const create = useAtomCommand(serverEnvironment.peerHubCreateWorkspace, {
+    reportFailure: false,
+  });
+  const { busy, error, run } = useHubAction();
+  const slug = slugFromName(name);
+  return (
+    <div className="rounded-lg border border-border bg-background p-3">
+      <p className="text-sm font-medium">Create the {name} workspace</p>
+      <p className="mt-0.5 text-xs text-muted-foreground">
+        @{domain} has no workspace yet. Everyone with an @{domain} address joins it on their own
+        when they sign in to Peer, and you can invite anyone else.
+      </p>
+      <ErrorLine id="peer-domain-create-error" message={error} />
+      <div className="mt-3 flex items-center justify-end gap-2">
+        <Button variant="ghost" size="sm" disabled={busy} onClick={onOtherName}>
+          Other name…
+        </Button>
+        <Button
+          size="sm"
+          autoFocus={autoFocus}
+          disabled={busy || !isValidWorkspaceSlug(slug)}
+          onClick={() =>
+            void run(() =>
+              create({ environmentId, input: { slug, name, allowedDomains: [domain] } }),
+            ).then((created) => {
+              if (created) onCreated(slug);
+            })
+          }
+        >
+          {busy ? "Creating…" : `Create ${name}`}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function JoinRow({
+  environmentId,
+  slug,
+  name,
+  description,
+  onJoined,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly slug: string;
+  readonly name: string;
+  readonly description: string;
+  readonly onJoined?: ((slug: string) => void) | undefined;
+}) {
+  const join = useAtomCommand(serverEnvironment.peerHubJoinWorkspace, { reportFailure: false });
+  const { busy, error, run } = useHubAction();
+  return (
+    <li className="rounded-lg border border-border bg-background px-3 py-3">
+      <div className="flex items-center gap-3">
+        <span className="min-w-0 flex-1">
+          <span className="block text-sm font-medium break-words">{name}</span>
+          <span className="mt-0.5 block text-xs text-muted-foreground">{description}</span>
+        </span>
+        <Button
+          size="sm"
+          disabled={busy}
+          onClick={() =>
+            void run(() => join({ environmentId, input: { workspace: slug } })).then((joined) => {
+              if (joined) onJoined?.(slug);
+            })
+          }
+        >
+          {busy ? "Joining…" : "Join"}
+        </Button>
+      </div>
+      <ErrorLine id={`peer-join-error-${slug}`} message={error} />
+    </li>
+  );
+}
+
+/**
+ * A workspace by its short name. The hub tells its name and whether this
+ * address may join; it never lists other companies' workspaces.
+ */
+function WorkspaceLookup({
+  environmentId,
+  email,
+  query,
+  known,
+  onJoined,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly email: string | null;
+  readonly query: string;
+  readonly known: ReadonlySet<string>;
+  readonly onJoined?: ((slug: string) => void) | undefined;
+}) {
+  const find = useAtomCommand(serverEnvironment.peerHubFindWorkspace, { reportFailure: false });
+  const [result, setResult] = useState<{
+    readonly slug: string;
+    readonly found: PeerFoundWorkspace | null;
+  } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const slug = query.trim().toLowerCase();
+  if (!isValidWorkspaceSlug(slug) || known.has(slug)) return null;
+
+  if (result === null || result.slug !== slug) {
+    return (
+      <div>
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={busy}
+          onClick={() => {
+            setBusy(true);
+            setError(null);
+            void find({ environmentId, input: { slug } })
+              .then((found) => {
+                if (found._tag === "Success") setResult({ slug, found: found.value });
+                else setError(failureMessage(found));
+              })
+              .finally(() => setBusy(false));
+          }}
+        >
+          {busy ? "Looking up…" : `Look up “${slug}”`}
+        </Button>
+        <ErrorLine id="peer-lookup-error" message={error} />
+      </div>
+    );
+  }
+  const found = result.found;
+  if (found === null) {
+    return <p className="text-sm text-muted-foreground">No workspace is called “{slug}”.</p>;
+  }
+  if (found.role !== null) {
+    return <p className="text-sm text-muted-foreground">You’re in {found.name} already.</p>;
+  }
+  if (found.canJoin) {
+    return (
+      <ul>
+        <JoinRow
+          environmentId={environmentId}
+          slug={found.slug}
+          name={found.name}
+          description={
+            found.allowedDomains.length > 0
+              ? `Anyone with an ${found.allowedDomains.map((d) => `@${d}`).join(" or ")} address can join.`
+              : "You were invited."
+          }
+          onJoined={onJoined}
+        />
+      </ul>
+    );
+  }
+  return (
+    <p className="text-sm text-muted-foreground">
+      {found.name} takes people by invite. Ask one of its admins to invite {email ?? "your address"}
+      .
+    </p>
+  );
+}
+
 function CreateWorkspaceForm({
   environmentId,
   email,
+  initialName,
   onCreated,
 }: {
   readonly environmentId: EnvironmentId;
   readonly email: string | null;
+  readonly initialName: string;
   readonly onCreated: (slug: string) => void;
 }) {
   const create = useAtomCommand(serverEnvironment.peerHubCreateWorkspace, {
@@ -329,7 +551,7 @@ function CreateWorkspaceForm({
   });
   const { busy, error, run } = useHubAction();
   const domain = companyDomainOf(email);
-  const [name, setName] = useState("");
+  const [name, setName] = useState(initialName);
   const [slug, setSlug] = useState("");
   const [slugEdited, setSlugEdited] = useState(false);
   const [openToDomain, setOpenToDomain] = useState(domain !== null);
@@ -393,7 +615,7 @@ function CreateWorkspaceForm({
             checked={openToDomain}
             onCheckedChange={(checked) => setOpenToDomain(checked)}
           />
-          Anyone with an @{domain} address can join
+          Everyone with an @{domain} address joins on their own
         </label>
       ) : (
         <p className="mt-3 text-xs text-muted-foreground">
