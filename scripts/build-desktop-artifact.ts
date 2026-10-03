@@ -994,6 +994,11 @@ export function resolveMacFileExclusions(arch?: typeof BuildArch.Type) {
   const unusedArch = arch === "arm64" ? "x64" : "arm64";
   return [...MAC_FILE_EXCLUSIONS, `!**/node_modules/node-pty/prebuilds/darwin-${unusedArch}/**/*`];
 }
+
+// Both halves of a universal build carry every Darwin platform package (and the
+// binaries staged beside their loaders), so those files are identical in both.
+// @electron/universal keeps such files as they are only when this matches them.
+export const MAC_UNIVERSAL_X64_ARCH_FILES = "**/*darwin-{arm64,x64}{/**,.node}";
 // Windows ships the server tree (bundle + node_modules) as a separate
 // resources/server.asar sidecar instead of loose files: the NSIS installer
 // then extracts a handful of large archives instead of thousands of small
@@ -2745,6 +2750,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
           schemes: ["peer-desktop"],
         },
       ],
+      ...(arch === "universal" ? { x64ArchFiles: MAC_UNIVERSAL_X64_ARCH_FILES } : {}),
       ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
       ...(macPasskeySigning
         ? {
