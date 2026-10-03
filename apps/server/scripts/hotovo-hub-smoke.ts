@@ -1,10 +1,10 @@
-// @effect-diagnostics nodeBuiltinImport:off
+// @effect-diagnostics nodeBuiltinImport:off globalTimers:off globalDate:off globalDateInEffect:off globalFetch:off globalFetchInEffect:off globalConsole:off globalRandom:off preferSchemaOverJson:off - host-side smoke harness: drives a real server process and reads its raw output.
 // End-to-end check of the Hotovo Hub integration against a built server:
 // starts `apps/server/dist/bin.mjs` in a throwaway home, connects the same
 // WebSocket RPC client the app uses, and walks sign-in → manifest → company
 // capacity → open project → sign-out against a running hub service.
 //
-//   HUB_URL=http://127.0.0.1:4747 node scripts/hotovo-hub-smoke.ts <project-id>
+//   HUB_URL=http://127.0.0.1:4747 node apps/server/scripts/hotovo-hub-smoke.ts <project-id>
 //
 // Sign-in uses this machine's `gh auth token`, so the GitHub account must be
 // a member of the hub with access to <project-id>.
@@ -27,9 +27,9 @@ import {
   WS_METHODS,
   WsRpcGroup,
   type HotovoHubStatus,
-} from "../packages/contracts/src/index.ts";
+} from "@t3tools/contracts";
 
-const repoRoot = NodePath.resolve(import.meta.dirname, "..");
+const repoRoot = NodePath.resolve(import.meta.dirname, "../../..");
 const hubUrl = process.env.HUB_URL ?? "http://127.0.0.1:4747";
 const projectId = process.argv[2] ?? "smoke";
 const port = Number(process.env.PEER_PORT ?? 39000 + Math.floor(Math.random() * 1000));
