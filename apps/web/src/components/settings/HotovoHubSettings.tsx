@@ -34,7 +34,7 @@ import {
   useRelativeTimeTick,
 } from "./settingsLayout";
 
-const DEFAULT_HUB_URL = "http://127.0.0.1:8787";
+const DEFAULT_HUB_URL = "http://127.0.0.1:4747";
 
 const PERSONAL_POLICY: Record<HotovoPersonalCapacityPolicy, string> = {
   any: "Your own subscription or seat works here.",

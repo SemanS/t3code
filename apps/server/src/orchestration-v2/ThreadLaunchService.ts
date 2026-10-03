@@ -38,6 +38,7 @@ import * as ProviderRegistry from "../provider/Services/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
+import { userFacingDispatchErrorMessage } from "./UserFacingErrors.ts";
 import * as IdAllocator from "./IdAllocator.ts";
 import { makeProviderFailure } from "./ProviderFailure.ts";
 import { randomUuidV4 } from "./RandomUuid.ts";
@@ -136,7 +137,10 @@ const isThreadLaunchError = Schema.is(ThreadLaunchError);
 function failureDetail(error: unknown): string {
   if (isThreadLaunchError(error)) {
     const cause = error.cause;
-    const detail = cause instanceof Error ? cause.message : String(cause);
+    // The deepest actionable reason (e.g. a capacity policy refusal), not the dispatch wrapper.
+    const detail =
+      userFacingDispatchErrorMessage(cause) ??
+      (cause instanceof Error ? cause.message : String(cause));
     return `Workspace preparation failed during ${error.operation.replaceAll("-", " ")}: ${detail}`;
   }
   return `Workspace preparation failed: ${error instanceof Error ? error.message : String(error)}`;
