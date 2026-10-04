@@ -35,6 +35,8 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  PeerAgentView,
+  type PeerHubAgentInput,
   type PeerHubAssignThreadInput,
   type PeerHubCreateTaskInput,
   type PeerHubCreateWorkspaceInput,
@@ -48,6 +50,7 @@ import {
   type PeerHubResolveOverlapInput,
   type PeerHubSetCoordinationInput,
   type PeerHubProjectUsage,
+  type PeerHubPromptAgentInput,
   type PeerHubShareProjectInput,
   type PeerHubSharedCapacityInput,
   type PeerHubStartSignInInput,
@@ -102,6 +105,7 @@ import {
   startGitHubSignIn,
   type GitHubSignIn,
 } from "./github.ts";
+import * as AgentTranscript from "./agentTranscript.ts";
 import * as Herdr from "./herdr.ts";
 import * as HubApi from "./hubApi.ts";
 import {
@@ -229,13 +233,18 @@ interface HerdrAgentState extends Herdr.HerdrAgent {
 }
 
 /** What Peer shows and reports of herdr's agents, to tell a change from a re-read. */
-function herdrSignature(agents: ReadonlyArray<HerdrAgentState> | null): string {
+function herdrSignature(
+  agents: ReadonlyArray<HerdrAgentState> | null,
+  keyOf: (agent: HerdrAgentState) => string,
+): string {
   if (agents === null) return "";
   return agents
-    .map((a) => [a.terminalId, a.paneId, a.status, a.title, a.cwd, a.branch].join("\u0000"))
+    .map((a) => [keyOf(a), a.paneId, a.status, a.title, a.cwd, a.branch].join("\u0000"))
     .toSorted()
     .join("\u0001");
 }
+
+const sameAgentView = Schema.toEquivalence(PeerAgentView);
 
 const ACTIVE_RUN_STATES: ReadonlySet<string> = new Set([
   "preparing",
@@ -375,6 +384,12 @@ export class PeerHub extends Context.Service<
     /** Brings a herdr agent's pane forward in herdr. */
     readonly focusAgent: (
       input: PeerHubFocusAgentInput,
+    ) => Effect.Effect<PeerHubStatus, PeerHubError>;
+    /** A herdr agent's work as it happens: its view now, then each change. */
+    readonly watchAgent: (input: PeerHubAgentInput) => Stream.Stream<PeerAgentView>;
+    /** Sends one of this computer's herdr agents a prompt, as if typed in its terminal. */
+    readonly promptAgent: (
+      input: PeerHubPromptAgentInput,
     ) => Effect.Effect<PeerHubStatus, PeerHubError>;
     /** Shares a local project's repository with a workspace, as a project everyone works on. */
     readonly shareProject: (
@@ -702,10 +717,25 @@ const make = Effect.gen(function* () {
     return undefined;
   };
 
+  /** The session an agent in a pane runs, as herdr's integration or Peer's own hooks say. */
+  const sessionOf = (agent: HerdrAgentState) =>
+    agent.session ?? broker?.sessionInPane(agent.paneId) ?? undefined;
+
+  /**
+   * A herdr agent's thread key: its own session once known, so the thread
+   * outlives the pane and a herdr restart; its terminal until then.
+   */
+  const agentKey = (agent: HerdrAgentState) => {
+    const session = sessionOf(agent)?.id;
+    return session === undefined
+      ? `herdr:${agent.terminalId}`
+      : `herdr:${agent.agent ?? "agent"}:${session}`;
+  };
+
   const localAgentView = (s: RuntimeState, agent: HerdrAgentState): PeerLocalAgent => {
     const place = projectOfPath(s, agent.cwd);
     return {
-      id: `herdr:${agent.terminalId}`,
+      id: agentKey(agent),
       paneId: agent.paneId,
       ...(agent.agent === undefined ? {} : { agent: agent.agent }),
       title: agent.title,
@@ -1104,8 +1134,10 @@ const make = Effect.gen(function* () {
       for (const agent of s.herdr ?? []) {
         const place = projectOfPath(s, agent.cwd);
         if (place === undefined || place.workspace !== workspace.slug) continue;
-        const id = `herdr:${agent.terminalId}`;
-        const task = assignedTask(s.persisted, id, workspace.slug, place.projectId);
+        const id = agentKey(agent);
+        const task =
+          assignedTask(s.persisted, id, workspace.slug, place.projectId) ??
+          assignedTask(s.persisted, `herdr:${agent.terminalId}`, workspace.slug, place.projectId);
         reported.push({
           id,
           project: place.projectId,
@@ -1217,6 +1249,90 @@ const make = Effect.gen(function* () {
     yield* updateRuntime((s) => ({ ...s, herdr: withBranches }));
   });
 
+  /** An agent placed on a task under its terminal keeps the task once its session is known. */
+  const keepAssignments = (agents: ReadonlyArray<HerdrAgentState>) =>
+    Effect.gen(function* () {
+      const assignments = (yield* Ref.get(stateRef)).persisted.assignments ?? {};
+      const moves = agents.flatMap((agent) => {
+        const legacy = `herdr:${agent.terminalId}`;
+        const key = agentKey(agent);
+        const assignment = assignments[legacy];
+        return key !== legacy && assignment !== undefined && assignments[key] === undefined
+          ? [{ legacy, key, assignment }]
+          : [];
+      });
+      if (moves.length === 0) return;
+      yield* updatePersisted((p) => {
+        const next = { ...p.assignments };
+        for (const move of moves) {
+          delete next[move.legacy];
+          next[move.key] = move.assignment;
+        }
+        return { ...p, assignments: next };
+      });
+    });
+
+  /** Where Peer found agents' transcripts: session id → file, or null, rechecked after a while. */
+  const transcripts = new Map<string, { readonly path: string | null; readonly at: number }>();
+
+  /** A herdr agent as its view shows it: its transcript when Peer can read it, else its terminal. */
+  const agentView = (agentId: string) =>
+    Effect.gen(function* () {
+      const agent = ((yield* Ref.get(stateRef)).herdr ?? []).find(
+        (candidate) =>
+          agentKey(candidate) === agentId || `herdr:${candidate.terminalId}` === agentId,
+      );
+      if (agent === undefined) {
+        return { agentId, title: "", status: "unknown", gone: true } satisfies PeerAgentView;
+      }
+      const base = {
+        agentId,
+        title: agent.title,
+        status: agent.status,
+        paneId: agent.paneId,
+        gone: false,
+        ...(agent.agent === undefined ? {} : { agent: agent.agent }),
+        ...(agent.cwd === undefined ? {} : { cwd: agent.cwd }),
+        ...(agent.branch === undefined ? {} : { branch: agent.branch }),
+      } satisfies PeerAgentView;
+      const session = sessionOf(agent);
+      const now = DateTime.toEpochMillis(yield* DateTime.now);
+      let path: string | null = null;
+      if (session !== undefined && agent.agent === "claude") {
+        const key = session.id ?? session.path ?? "";
+        const known = transcripts.get(key);
+        if (known !== undefined && (known.path !== null || now - known.at < 10_000)) {
+          path = known.path;
+        } else {
+          path = yield* Effect.promise(() => AgentTranscript.findClaudeTranscript(session));
+          transcripts.set(key, { path, at: now });
+        }
+      }
+      if (path !== null) {
+        const transcriptPath = path;
+        const lines = yield* Effect.tryPromise(() =>
+          AgentTranscript.readTranscriptTail(transcriptPath),
+        ).pipe(Effect.orElseSucceed(() => [] as string[]));
+        return {
+          ...base,
+          entries: AgentTranscript.transcriptEntries(
+            lines,
+            agent.cwd === undefined ? {} : { cwd: agent.cwd },
+          ),
+        } satisfies PeerAgentView;
+      }
+      const terminal = yield* Effect.promise(() => Herdr.readHerdrAgent(agent.paneId));
+      return {
+        ...base,
+        ...(terminal === null ? {} : { terminal }),
+        ...(agent.agent === "claude"
+          ? {
+              hint: "To follow this conversation here instead of its terminal, install herdr's Claude Code integration once: herdr integration install claude",
+            }
+          : {}),
+      } satisfies PeerAgentView;
+    });
+
   /**
    * Keeps herdr's agents current. herdr's events say when an agent appears,
    * leaves or changes state; Peer then reads the list, shows it at once and
@@ -1241,7 +1357,8 @@ const make = Effect.gen(function* () {
       yield* refreshHerdr;
       const agents = (yield* Ref.get(stateRef)).herdr;
       const now = DateTime.toEpochMillis(yield* DateTime.now);
-      const seen = herdrSignature(agents);
+      yield* keepAssignments(agents ?? []);
+      const seen = herdrSignature(agents, agentKey);
       if (seen !== shown) {
         shown = seen;
         yield* publish;
@@ -2080,6 +2197,37 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const watchAgent: PeerHub["Service"]["watchAgent"] = (input) =>
+    Stream.tick("1 second").pipe(
+      Stream.mapEffect(() => agentView(input.agentId)),
+      Stream.changesWith(sameAgentView),
+    );
+
+  const promptAgent: PeerHub["Service"]["promptAgent"] = Effect.fn("PeerHub.promptAgent")(
+    function* (input) {
+      const agent = ((yield* Ref.get(stateRef)).herdr ?? []).find(
+        (candidate) =>
+          agentKey(candidate) === input.agentId ||
+          `herdr:${candidate.terminalId}` === input.agentId,
+      );
+      if (agent === undefined) return yield* hubError("That agent no longer runs in herdr.");
+      if (agent.status === "blocked") {
+        return yield* hubError(
+          "It is waiting for an answer in its terminal. Answer it in herdr first.",
+        );
+      }
+      yield* Effect.tryPromise(() => Herdr.promptHerdrAgent(agent.paneId, input.text)).pipe(
+        Effect.mapError((error) =>
+          hubError(
+            `herdr did not take the prompt${error.cause instanceof Error ? `: ${error.cause.message}` : "."}`,
+          ),
+        ),
+      );
+      yield* refreshHerdr;
+      return yield* publish;
+    },
+  );
+
   /** What sharing gives the workspace: one repository, and where it is checked out here if it is. */
   interface SharedRepository {
     readonly name: string;
@@ -2388,6 +2536,8 @@ const make = Effect.gen(function* () {
     deleteTask,
     assignThread,
     focusAgent,
+    watchAgent,
+    promptAgent,
     shareProject,
     unshareProject,
   });

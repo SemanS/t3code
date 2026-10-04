@@ -90,6 +90,8 @@ interface LocalSession {
   readonly root: string;
   cwd: string;
   pane: string | undefined;
+  /** The transcript Claude Code keeps for the session. */
+  transcript: string | undefined;
   label: string;
   labelFromPrompt: boolean;
   branch: string | undefined;
@@ -320,6 +322,7 @@ export class CoordinationBroker {
       root: place.root,
       cwd,
       pane,
+      transcript: typeof body.transcript_path === "string" ? body.transcript_path : undefined,
       label: title ?? "Claude session",
       labelFromPrompt: false,
       branch: await this.deps.branchOf(place.root),
@@ -867,6 +870,20 @@ export class CoordinationBroker {
         files: s.files,
         claims: s.claims,
       }));
+  }
+
+  /** The Claude Code session most recently active in a herdr pane, as its hooks reported it. */
+  sessionInPane(
+    pane: string,
+  ): { readonly id: string; readonly path: string | undefined } | undefined {
+    let latest: LocalSession | undefined;
+    for (const session of this.sessions.values()) {
+      if (session.pane !== pane) continue;
+      if (latest === undefined || session.lastActivity > latest.lastActivity) latest = session;
+    }
+    return latest === undefined
+      ? undefined
+      : { id: latest.id.replace(/^claude:/, ""), path: latest.transcript };
   }
 
   /** The hub says a workspace's coordination changed: read it within a moment. */

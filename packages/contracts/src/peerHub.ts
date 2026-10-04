@@ -175,7 +175,10 @@ export type PeerWorkThread = typeof PeerWorkThread.Type;
 
 /** An agent herdr runs on this computer (https://herdr.dev), whatever started it. */
 export const PeerLocalAgent = Schema.Struct({
-  /** `herdr:<terminal id>`, stable while the terminal lives. */
+  /**
+   * `herdr:<agent>:<session id>` once Peer knows the agent's own session, so
+   * it survives a pane or herdr restart; `herdr:<terminal id>` until then.
+   */
   id: Schema.String,
   paneId: Schema.String,
   agent: Schema.optional(Schema.String),
@@ -188,6 +191,44 @@ export const PeerLocalAgent = Schema.Struct({
   projectId: Schema.optional(Schema.String),
 });
 export type PeerLocalAgent = typeof PeerLocalAgent.Type;
+
+/** One step of an agent's work, read from its own transcript. */
+export const PeerAgentEntry = Schema.Union([
+  /** What a person asked. */
+  Schema.Struct({ id: Schema.String, kind: Schema.Literal("prompt"), text: Schema.String }),
+  /** What the agent said. */
+  Schema.Struct({ id: Schema.String, kind: Schema.Literal("text"), text: Schema.String }),
+  /** A tool it used, e.g. `Read src/pay.ts` or `$ npm test`, with the start of its result. */
+  Schema.Struct({
+    id: Schema.String,
+    kind: Schema.Literal("tool"),
+    name: Schema.String,
+    summary: Schema.String,
+    result: Schema.optional(Schema.String),
+    failed: Schema.Boolean,
+  }),
+]);
+export type PeerAgentEntry = typeof PeerAgentEntry.Type;
+
+/** A herdr agent on this computer as Peer shows it: its work so far, and whether it is still there. */
+export const PeerAgentView = Schema.Struct({
+  agentId: Schema.String,
+  title: Schema.String,
+  status: PeerWorkStatus,
+  agent: Schema.optional(Schema.String),
+  paneId: Schema.optional(Schema.String),
+  cwd: Schema.optional(Schema.String),
+  branch: Schema.optional(Schema.String),
+  /** Its work from its own transcript, newest last, when Peer knows its session. */
+  entries: Schema.optional(Schema.Array(PeerAgentEntry)),
+  /** Otherwise the end of its terminal. */
+  terminal: Schema.optional(Schema.String),
+  /** What would let Peer show the transcript instead of the terminal. */
+  hint: Schema.optional(Schema.String),
+  /** The agent no longer runs in herdr. */
+  gone: Schema.Boolean,
+});
+export type PeerAgentView = typeof PeerAgentView.Type;
 
 /** One workspace project as provisioned on this environment. */
 export const PeerProjectState = Schema.Struct({
@@ -515,6 +556,15 @@ export type PeerHubResolveOverlapInput = typeof PeerHubResolveOverlapInput.Type;
 
 export const PeerHubFocusAgentInput = Schema.Struct({ paneId: TrimmedNonEmptyString });
 export type PeerHubFocusAgentInput = typeof PeerHubFocusAgentInput.Type;
+
+export const PeerHubAgentInput = Schema.Struct({ agentId: TrimmedNonEmptyString });
+export type PeerHubAgentInput = typeof PeerHubAgentInput.Type;
+
+export const PeerHubPromptAgentInput = Schema.Struct({
+  agentId: TrimmedNonEmptyString,
+  text: TrimmedNonEmptyString.check(Schema.isMaxLength(20_000)),
+});
+export type PeerHubPromptAgentInput = typeof PeerHubPromptAgentInput.Type;
 
 export const PeerHubShareProjectInput = Schema.Struct({
   workspace: TrimmedNonEmptyString,

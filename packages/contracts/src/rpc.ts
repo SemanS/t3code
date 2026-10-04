@@ -336,6 +336,9 @@ import {
   PeerHubStartSignInInput,
   PeerHubStatus,
   PeerHubWorkspaceInput,
+  PeerAgentView,
+  PeerHubAgentInput,
+  PeerHubPromptAgentInput,
 } from "./peerHub.ts";
 import {
   ProjectCloneActionInput,
@@ -504,6 +507,8 @@ export const WS_METHODS = {
   peerHubDeleteTask: "peerHub.deleteTask",
   peerHubAssignThread: "peerHub.assignThread",
   peerHubFocusAgent: "peerHub.focusAgent",
+  peerHubWatchAgent: "peerHub.watchAgent",
+  peerHubPromptAgent: "peerHub.promptAgent",
   peerHubShareProject: "peerHub.shareProject",
   peerHubUnshareProject: "peerHub.unshareProject",
   peerHubInvite: "peerHub.invite",
@@ -1814,6 +1819,20 @@ const WsPeerHubFocusAgentRpc = Rpc.make(WS_METHODS.peerHubFocusAgent, {
   error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
 });
 
+/** A herdr agent's work as it happens: a view on subscribe, then each change. */
+const WsPeerHubWatchAgentRpc = Rpc.make(WS_METHODS.peerHubWatchAgent, {
+  payload: PeerHubAgentInput,
+  success: PeerAgentView,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
+const WsPeerHubPromptAgentRpc = Rpc.make(WS_METHODS.peerHubPromptAgent, {
+  payload: PeerHubPromptAgentInput,
+  success: PeerHubStatus,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
 const WsPeerHubShareProjectRpc = Rpc.make(WS_METHODS.peerHubShareProject, {
   payload: PeerHubShareProjectInput,
   success: PeerHubStatus,
@@ -1945,6 +1964,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsPeerHubDeleteTaskRpc,
   WsPeerHubAssignThreadRpc,
   WsPeerHubFocusAgentRpc,
+  WsPeerHubWatchAgentRpc,
+  WsPeerHubPromptAgentRpc,
   WsPeerHubShareProjectRpc,
   WsPeerHubUnshareProjectRpc,
   WsPeerHubInviteRpc,

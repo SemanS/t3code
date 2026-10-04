@@ -26,6 +26,13 @@ export interface HerdrAgent {
   readonly title: string;
   readonly status: PeerWorkStatus;
   readonly cwd: string | undefined;
+  /**
+   * The agent's own session, when an integration reported it to herdr (e.g.
+   * `herdr integration install claude`): its id, or the file it keeps.
+   */
+  readonly session:
+    | { readonly id: string | undefined; readonly path: string | undefined }
+    | undefined;
 }
 
 const NullableString = Schema.optional(Schema.NullOr(Schema.String));
@@ -41,6 +48,9 @@ const AgentInfo = Schema.Struct({
   display_agent: NullableString,
   name: NullableString,
   terminal_title_stripped: NullableString,
+  agent_session: Schema.optional(
+    Schema.NullOr(Schema.Struct({ kind: Schema.String, value: Schema.String })),
+  ),
 });
 
 const AgentList = Schema.Struct({
@@ -146,7 +156,60 @@ export async function listHerdrAgents(
       "agent",
     status: (STATUSES.has(info.agent_status) ? info.agent_status : "unknown") as PeerWorkStatus,
     cwd: pick(info.foreground_cwd, info.cwd),
+    session: sessionOf(info.agent_session),
   }));
+}
+
+function sessionOf(
+  reported: { readonly kind: string; readonly value: string } | null | undefined,
+): HerdrAgent["session"] {
+  const value = reported?.value.trim();
+  if (value === undefined || value === "") return undefined;
+  if (reported?.kind === "path") {
+    const file = NodePath.basename(value);
+    return {
+      id: file.endsWith(".jsonl") ? file.slice(0, -".jsonl".length) : undefined,
+      path: value,
+    };
+  }
+  return { id: value, path: undefined };
+}
+
+const PaneRead = Schema.Struct({
+  type: Schema.Literal("pane_read"),
+  read: Schema.Struct({ text: Schema.String }),
+});
+const decodePaneRead = Schema.decodeUnknownOption(PaneRead);
+
+/** The end of an agent's terminal as plain text, or null when herdr cannot read it. */
+export async function readHerdrAgent(
+  paneId: string,
+  lines = 200,
+  socketPath: string = herdrSocketPath(),
+): Promise<string | null> {
+  let result: unknown;
+  try {
+    result = await call(socketPath, "agent.read", {
+      target: paneId,
+      source: "recent_unwrapped",
+      lines,
+      format: "text",
+      strip_ansi: true,
+    });
+  } catch {
+    return null;
+  }
+  const decoded = decodePaneRead(result);
+  return Option.isSome(decoded) ? decoded.value.read.text : null;
+}
+
+/** Submits a prompt to an agent, as if typed into its terminal and sent. */
+export async function promptHerdrAgent(
+  paneId: string,
+  text: string,
+  socketPath: string = herdrSocketPath(),
+): Promise<void> {
+  await call(socketPath, "agent.prompt", { target: paneId, text }, 5000);
 }
 
 /** Brings the agent's pane forward in herdr's attached client. */

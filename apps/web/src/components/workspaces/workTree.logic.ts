@@ -28,7 +28,8 @@ export const STALE_AFTER_MS = 3 * 60 * 1000;
 
 export type WorkOpen =
   | { readonly kind: "thread"; readonly environmentId: EnvironmentId; readonly threadId: ThreadId }
-  | { readonly kind: "herdr"; readonly paneId: string };
+  /** A herdr agent opens in Peer's agent view; its pane is where herdr shows it. */
+  | { readonly kind: "herdr"; readonly agentId: string; readonly paneId: string };
 
 export interface WorkThreadNode {
   readonly key: string;
@@ -193,7 +194,7 @@ function projectTree(input: {
         branch: agent.branch,
         source: "herdr",
         stale: false,
-        open: { kind: "herdr", paneId: agent.paneId },
+        open: { kind: "herdr", agentId: agent.id, paneId: agent.paneId },
         placeable: true,
       },
     });
@@ -343,7 +344,7 @@ export function activeAgents(input: {
         agent.id,
         projectTitle(agent.workspace, agent.projectId) ?? agent.cwd?.split("/").at(-1),
       ),
-      open: { kind: "herdr", paneId: agent.paneId },
+      open: { kind: "herdr", agentId: agent.id, paneId: agent.paneId },
       needs,
     });
   }

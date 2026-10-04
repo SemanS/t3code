@@ -3,7 +3,6 @@ import type {
   EnvironmentId,
   PeerHubStatus,
   PeerTask,
-  PeerWorkStatus,
   ProjectId,
 } from "@t3tools/contracts";
 import {
@@ -22,7 +21,6 @@ import {
   ChevronRightIcon,
   CircleCheckIcon,
   CircleDashedIcon,
-  CircleIcon,
   EllipsisIcon,
   GitBranchIcon,
   MessageCircleQuestionIcon,
@@ -54,6 +52,7 @@ import { MiddleTruncate } from "../ui/middle-truncate";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { OverlapList } from "./Coordination";
+import { STATUS_LABEL, STATUS_TONE, StatusGlyph, StatusIcon } from "./workStatus";
 import { GitHubConnect } from "./GitHubConnect";
 import {
   projectCheckout,
@@ -74,56 +73,6 @@ import {
   type WorkTaskNode,
   type WorkThreadNode,
 } from "./workTree.logic";
-
-const STATUS_LABEL: Readonly<Record<PeerWorkStatus, string>> = {
-  working: "Working",
-  blocked: "Needs input",
-  done: "Done",
-  idle: "Idle",
-  unknown: "Unknown",
-};
-
-// The hues the Threads list uses: sky while working, amber while it waits on
-// someone. Finished work recedes, since most threads end up there.
-const STATUS_ICON: Readonly<Record<PeerWorkStatus, LucideIcon>> = {
-  working: CircleDashedIcon,
-  blocked: MessageCircleQuestionIcon,
-  done: CircleCheckIcon,
-  idle: CircleIcon,
-  unknown: CircleIcon,
-};
-const STATUS_TONE: Readonly<Record<PeerWorkStatus, string>> = {
-  working: "text-info",
-  blocked: "text-warning-foreground",
-  done: "text-muted-foreground",
-  idle: "text-muted-foreground/60",
-  unknown: "text-muted-foreground/60",
-};
-
-function StatusGlyph({
-  status,
-  stale = false,
-}: {
-  readonly status: PeerWorkStatus;
-  readonly stale?: boolean;
-}) {
-  const Icon = STATUS_ICON[status];
-  const quiet = status === "idle" || status === "unknown";
-  return (
-    <span
-      role="img"
-      aria-label={stale ? `${STATUS_LABEL[status]} (not reported lately)` : STATUS_LABEL[status]}
-      className={cn("flex size-3.5 shrink-0 items-center justify-center", stale && "opacity-50")}
-    >
-      <Icon aria-hidden className={cn(quiet ? "size-2.5" : "size-3.5", STATUS_TONE[status])} />
-    </span>
-  );
-}
-
-function StatusIcon({ status }: { readonly status: PeerWorkStatus }) {
-  const Icon = STATUS_ICON[status];
-  return <Icon aria-hidden className="size-3.5 shrink-0" />;
-}
 
 /** Who a thread belongs to: you in the accent color, a colleague in a quiet outline. */
 function PersonMark({ name, mine }: { readonly name: string; readonly mine: boolean }) {
@@ -208,7 +157,7 @@ function useWorkActions(environmentId: EnvironmentId | null) {
   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
 
   return {
-    /** Opens a local thread, or brings a herdr agent forward in herdr. */
+    /** Opens a local thread, or a herdr agent in Peer's agent view. */
     open: (open: WorkOpen) => {
       if (open.kind === "thread") {
         void navigate({
@@ -217,8 +166,12 @@ function useWorkActions(environmentId: EnvironmentId | null) {
         });
         return;
       }
+      void navigate({ to: "/agent/$agentId", params: { agentId: open.agentId } });
+    },
+    /** Brings a herdr agent's pane forward in herdr itself. */
+    showInHerdr: (paneId: string) => {
       if (environmentId === null) return;
-      void focusAgent({ environmentId, input: { paneId: open.paneId } }).then((result) =>
+      void focusAgent({ environmentId, input: { paneId } }).then((result) =>
         reportFailure("Could not show that agent in herdr", result),
       );
     },
@@ -304,6 +257,13 @@ function useWorkActions(environmentId: EnvironmentId | null) {
 
 type WorkActions = ReturnType<typeof useWorkActions>;
 
+/** What the open route shows, in the terms of `WorkOpen`, to highlight it in the tree. */
+function openKey(open: WorkOpen): string {
+  return open.kind === "thread"
+    ? `${open.environmentId}:${open.threadId}`
+    : `agent:${open.agentId}`;
+}
+
 /**
  * The sidebar's Work view: what runs on this computer right now, then each
  * workspace project as Project → Area → Task → Threads, everyone's threads
@@ -321,7 +281,11 @@ export function WorkPanel() {
   const activeThread = useParams({
     strict: false,
     select: (params) =>
-      params.environmentId && params.threadId ? `${params.environmentId}:${params.threadId}` : null,
+      params.agentId
+        ? `agent:${params.agentId}`
+        : params.environmentId && params.threadId
+          ? `${params.environmentId}:${params.threadId}`
+          : null,
   });
   const tree = useMemo(
     () => (status === null ? [] : buildWorkTree({ status, localThreads: threads, now })),
@@ -476,10 +440,7 @@ function NeedsYou({
             <NeedCard
               key={agent.key}
               agent={agent}
-              active={
-                agent.open.kind === "thread" &&
-                activeThread === `${agent.open.environmentId}:${agent.open.threadId}`
-              }
+              active={activeThread === openKey(agent.open)}
               onOpen={onOpen}
             />
           ))}
@@ -993,7 +954,7 @@ function ThreadCard({
   const open = thread.open;
   const local = open?.kind === "thread" ? open : undefined;
   const actionable = thread.mine && open !== undefined;
-  const active = local !== undefined && activeThread === `${local.environmentId}:${local.threadId}`;
+  const active = open !== undefined && activeThread === openKey(open);
   const who = thread.mine ? (open === undefined ? "You · other computer" : "You") : thread.person;
   const agent = [thread.harness, thread.source === "herdr" ? "herdr" : null]
     .filter(Boolean)
@@ -1024,7 +985,7 @@ function ThreadCard({
     if (choice === null || choice === "move") return;
     if (choice === "rename") setRenaming(true);
     else if (choice === "show-in-herdr") {
-      if (open !== undefined) actions.open(open);
+      if (open?.kind === "herdr") actions.showInHerdr(open.paneId);
     } else if (choice === "archive") {
       if (local !== undefined) void actions.archiveThread(local, thread.title);
     } else if (choice === "delete") {

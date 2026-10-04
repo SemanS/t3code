@@ -224,6 +224,7 @@ describe("buildWorkTree", () => {
     const threads = project?.areas[0]?.tasks[0]?.threads ?? [];
     expect(threads.find((t) => t.source === "herdr")?.open).toEqual({
       kind: "herdr",
+      agentId: "herdr:term1",
       paneId: "w1:p2",
     });
     expect(threads.find((t) => t.title === "Main implementation")?.open).toEqual({
