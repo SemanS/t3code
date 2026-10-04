@@ -8,6 +8,7 @@
  * (`krk-812-split` → KRK-812), else under the project's unsorted work.
  */
 import type {
+  ContextMenuItem,
   EnvironmentId,
   PeerHubStatus,
   PeerLocalAgent,
@@ -53,6 +54,8 @@ export interface WorkTaskNode {
   /** What the task's threads add up to: blocked beats working beats the rest. */
   readonly status: PeerWorkStatus;
   readonly threads: ReadonlyArray<WorkThreadNode>;
+  /** Its creator, the project's leads and the workspace's admins may remove it. */
+  readonly removable: boolean;
 }
 
 export interface WorkAreaNode {
@@ -106,8 +109,13 @@ const STATUS_ORDER: Readonly<Record<PeerWorkStatus, number>> = {
   done: 4,
 };
 
+/** Your own threads first, then what needs attention. */
 function byActivity(a: WorkThreadNode, b: WorkThreadNode): number {
-  return STATUS_ORDER[a.status] - STATUS_ORDER[b.status] || a.title.localeCompare(b.title);
+  return (
+    Number(b.mine) - Number(a.mine) ||
+    STATUS_ORDER[a.status] - STATUS_ORDER[b.status] ||
+    a.title.localeCompare(b.title)
+  );
 }
 
 function rollup(threads: ReadonlyArray<WorkThreadNode>, done: boolean): PeerWorkStatus {
@@ -226,6 +234,8 @@ function projectTree(input: {
       done: task.status === "done",
       status: rollup(threads, task.status === "done"),
       threads,
+      removable:
+        task.createdBy === me || state.project.role === "lead" || workspace.role !== "member",
     });
   }
   // Areas the project declares come first, in its order; then those tasks name; then no area.
@@ -333,4 +343,111 @@ export function activeAgents(input: {
   return agents.toSorted(
     (a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status] || a.title.localeCompare(b.title),
   );
+}
+
+/** A task the way lists and menus name it: `KRK-812 · Split Payments`. */
+export function taskLabel(task: { readonly key?: string | undefined; readonly title: string }) {
+  return task.key ? `${task.key} · ${task.title}` : task.title;
+}
+
+export type WorkThreadMenuId =
+  | "rename"
+  | "show-in-herdr"
+  | "move"
+  | `task:${string}`
+  | "unassign"
+  | "archive"
+  | "delete";
+
+/**
+ * What a thread's menu offers. Only your own work on this computer changes
+ * from here: a colleague's thread, or yours on another computer, is read-only.
+ * herdr owns its agents' names and lifetimes, so those only move between tasks.
+ */
+export function threadMenuItems(input: {
+  readonly thread: WorkThreadNode;
+  readonly tasks: ReadonlyArray<PeerTask>;
+  /** The task the thread sits under now, null when on none. */
+  readonly taskId: string | null;
+  /** Archive refuses a thread whose agent is still attached. */
+  readonly running: boolean;
+}): ReadonlyArray<ContextMenuItem<WorkThreadMenuId>> {
+  const { thread, taskId } = input;
+  if (!thread.mine || thread.open === undefined) return [];
+  const local = thread.open.kind === "thread";
+  const choices = input.tasks.filter((task) => task.status === "open" || task.id === taskId);
+  return [
+    local
+      ? { id: "rename", label: "Rename thread", icon: "pencil" }
+      : { id: "show-in-herdr", label: "Show in herdr" },
+    ...(thread.placeable
+      ? [
+          {
+            id: "move" as const,
+            label: "Move to task",
+            icon: "folder-tree",
+            children: [
+              ...choices.map((task) => ({
+                id: `task:${task.id}` as const,
+                label: taskLabel(task),
+                checked: task.id === taskId,
+              })),
+              {
+                id: "unassign" as const,
+                label: "Not on a task",
+                checked: taskId === null,
+                separatorBefore: choices.length > 0,
+              },
+            ],
+          },
+        ]
+      : []),
+    ...(local
+      ? [
+          {
+            id: "archive" as const,
+            label: "Archive thread",
+            icon: "archive",
+            disabled: input.running,
+            separatorBefore: true,
+          },
+          { id: "delete" as const, label: "Delete", icon: "trash", destructive: true },
+        ]
+      : []),
+  ];
+}
+
+export type WorkTaskMenuId = "new-thread" | "rename" | "toggle-done" | "remove";
+
+/** What a task's menu offers. Anyone on the project renames or closes a task. */
+export function taskMenuItems(input: {
+  readonly task: WorkTaskNode;
+  /** A new thread needs the project's checkout on this computer. */
+  readonly canStartThread: boolean;
+}): ReadonlyArray<ContextMenuItem<WorkTaskMenuId>> {
+  return [
+    {
+      id: "new-thread",
+      label: "New thread on this task",
+      icon: "message-square-plus",
+      disabled: !input.canStartThread,
+    },
+    { id: "rename", label: "Rename task", icon: "pencil", separatorBefore: true },
+    {
+      id: "toggle-done",
+      label: input.task.done ? "Reopen task" : "Mark done",
+      icon: "circle-check",
+    },
+    ...(input.task.removable
+      ? [
+          {
+            id: "remove" as const,
+            label: "Remove task",
+            icon: "trash",
+            destructive: true,
+            separatorBefore: true,
+          },
+        ]
+      : []),
+  ];
 }

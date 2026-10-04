@@ -1,4 +1,5 @@
 import type {
+  ContextMenuItem,
   EnvironmentId,
   PeerHubStatus,
   PeerTask,
@@ -6,32 +7,40 @@ import type {
   ProjectId,
 } from "@t3tools/contracts";
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { threadRuntimeCanArchive } from "@t3tools/client-runtime/state/models";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
-import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
-import { useNavigate } from "@tanstack/react-router";
+import { settlePromise, type AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
+import { useNavigate, useParams } from "@tanstack/react-router";
 import {
-  CheckIcon,
   ChevronRightIcon,
-  CircleAlertIcon,
+  CircleCheckIcon,
+  CircleDashedIcon,
   CircleIcon,
   EllipsisIcon,
+  GitBranchIcon,
+  MessageCircleQuestionIcon,
   PlusIcon,
   Share2Icon,
+  type LucideIcon,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 
 import { useNewThreadHandler } from "../../hooks/useHandleNewThread";
 import { useScratchProject } from "../../hooks/useScratchProject";
+import { useClientSettings } from "../../hooks/useSettings";
+import { useThreadActions } from "../../hooks/useThreadActions";
 import { cn } from "../../lib/utils";
-import { useProjects, useThreadShells } from "../../state/entities";
+import { readLocalApi } from "../../localApi";
+import { readThreadShell, useProjects, useThreadShells } from "../../state/entities";
 import { usePrimaryEnvironment } from "../../state/environments";
 import { serverEnvironment } from "../../state/server";
+import { threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { useRelativeTimeTick } from "../settings/settingsLayout";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
-import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
+import { MiddleTruncate } from "../ui/middle-truncate";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { OverlapList } from "./Coordination";
@@ -45,6 +54,9 @@ import { failureMessage, usePeerHubStatus } from "./WorkspaceAccess";
 import {
   activeAgents,
   buildWorkTree,
+  taskLabel,
+  taskMenuItems,
+  threadMenuItems,
   type ActiveAgentNode,
   type WorkOpen,
   type WorkProjectNode,
@@ -54,10 +66,27 @@ import {
 
 const STATUS_LABEL: Readonly<Record<PeerWorkStatus, string>> = {
   working: "Working",
-  blocked: "Needs an answer",
+  blocked: "Needs input",
   done: "Done",
   idle: "Idle",
   unknown: "Unknown",
+};
+
+// The hues the Threads list uses: sky while working, amber while it waits on
+// someone. Finished work recedes, since most threads end up there.
+const STATUS_ICON: Readonly<Record<PeerWorkStatus, LucideIcon>> = {
+  working: CircleDashedIcon,
+  blocked: MessageCircleQuestionIcon,
+  done: CircleCheckIcon,
+  idle: CircleIcon,
+  unknown: CircleIcon,
+};
+const STATUS_TONE: Readonly<Record<PeerWorkStatus, string>> = {
+  working: "text-info",
+  blocked: "text-warning-foreground",
+  done: "text-muted-foreground",
+  idle: "text-muted-foreground/60",
+  unknown: "text-muted-foreground/60",
 };
 
 function StatusGlyph({
@@ -67,22 +96,37 @@ function StatusGlyph({
   readonly status: PeerWorkStatus;
   readonly stale?: boolean;
 }) {
-  const label = stale ? `${STATUS_LABEL[status]} (not reported lately)` : STATUS_LABEL[status];
-  if (status === "blocked") {
-    return <CircleAlertIcon aria-label={label} className="size-3.5 shrink-0 text-warning" />;
-  }
-  if (status === "done") {
-    return <CheckIcon aria-label={label} className="size-3.5 shrink-0 text-muted-foreground" />;
-  }
+  const Icon = STATUS_ICON[status];
+  const quiet = status === "idle" || status === "unknown";
   return (
-    <span className="flex size-3.5 shrink-0 items-center justify-center" aria-label={label}>
-      <CircleIcon
-        className={cn(
-          "size-2.5",
-          status === "working" ? "fill-current text-success" : "text-muted-foreground",
-          stale && "opacity-50",
-        )}
-      />
+    <span
+      role="img"
+      aria-label={stale ? `${STATUS_LABEL[status]} (not reported lately)` : STATUS_LABEL[status]}
+      className={cn("flex size-3.5 shrink-0 items-center justify-center", stale && "opacity-50")}
+    >
+      <Icon aria-hidden className={cn(quiet ? "size-2.5" : "size-3.5", STATUS_TONE[status])} />
+    </span>
+  );
+}
+
+function StatusIcon({ status }: { readonly status: PeerWorkStatus }) {
+  const Icon = STATUS_ICON[status];
+  return <Icon aria-hidden className="size-3.5 shrink-0" />;
+}
+
+/** Who a thread belongs to: you in the accent color, a colleague in a quiet outline. */
+function PersonMark({ name, mine }: { readonly name: string; readonly mine: boolean }) {
+  return (
+    <span
+      aria-hidden
+      className={cn(
+        "flex size-4 shrink-0 items-center justify-center rounded-full text-3xs font-semibold",
+        mine
+          ? "bg-primary text-primary-foreground"
+          : "border border-sidebar-border bg-sidebar text-muted-foreground",
+      )}
+    >
+      {name.trim().charAt(0).toUpperCase() || "?"}
     </span>
   );
 }
@@ -95,24 +139,159 @@ function reportFailure(title: string, result: AtomCommandResult<unknown, unknown
   return message === null;
 }
 
-/** Opens a local thread, or brings a herdr agent forward in herdr. */
-function useOpenWork(environmentId: EnvironmentId | null) {
+async function confirmed(message: string, destructive = false): Promise<boolean> {
+  const api = readLocalApi();
+  if (api === undefined) return true;
+  const answer = await settlePromise(() =>
+    api.dialogs.confirm(message, destructive ? { variant: "destructive" } : undefined),
+  );
+  return answer._tag === "Success" && answer.value;
+}
+
+interface MenuPosition {
+  readonly x: number;
+  readonly y: number;
+}
+
+/** Shows a menu through the bridge the Threads list uses: native on desktop. */
+async function pickFromMenu<T extends string>(
+  items: ReadonlyArray<ContextMenuItem<T>>,
+  position: MenuPosition,
+): Promise<T | null> {
+  const api = readLocalApi();
+  if (api === undefined || items.length === 0) return null;
+  const picked = await settlePromise(() => api.contextMenu.show(items, position));
+  return picked._tag === "Success" ? picked.value : null;
+}
+
+function below(event: ReactMouseEvent<HTMLElement>): MenuPosition {
+  const rect = event.currentTarget.getBoundingClientRect();
+  return { x: rect.left, y: rect.bottom + 4 };
+}
+
+type ThreadOpen = Extract<WorkOpen, { readonly kind: "thread" }>;
+
+interface Scope {
+  readonly workspace: string;
+  readonly projectId: string;
+}
+
+/**
+ * Everything the tree does to threads and tasks, set up once for the panel:
+ * opening, renaming, archiving and deleting your threads, placing them on
+ * tasks, and the tasks' own changes.
+ */
+function useWorkActions(environmentId: EnvironmentId | null) {
   const navigate = useNavigate();
   const focusAgent = useAtomCommand(serverEnvironment.peerHubFocusAgent, { reportFailure: false });
-  return (open: WorkOpen) => {
-    if (open.kind === "thread") {
-      void navigate({
-        to: "/$environmentId/$threadId",
-        params: buildThreadRouteParams(scopeThreadRef(open.environmentId, open.threadId)),
-      });
-      return;
-    }
-    if (environmentId === null) return;
-    void focusAgent({ environmentId, input: { paneId: open.paneId } }).then((result) =>
-      reportFailure("Could not show that agent in herdr", result),
-    );
+  const assignThread = useAtomCommand(serverEnvironment.peerHubAssignThread, {
+    reportFailure: false,
+  });
+  const updateTask = useAtomCommand(serverEnvironment.peerHubUpdateTask, { reportFailure: false });
+  const deleteTask = useAtomCommand(serverEnvironment.peerHubDeleteTask, { reportFailure: false });
+  const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
+    reportFailure: false,
+  });
+  const openNewThread = useNewThreadHandler();
+  const { archiveThread, confirmAndDeleteThread } = useThreadActions();
+  const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
+
+  return {
+    /** Opens a local thread, or brings a herdr agent forward in herdr. */
+    open: (open: WorkOpen) => {
+      if (open.kind === "thread") {
+        void navigate({
+          to: "/$environmentId/$threadId",
+          params: buildThreadRouteParams(scopeThreadRef(open.environmentId, open.threadId)),
+        });
+        return;
+      }
+      if (environmentId === null) return;
+      void focusAgent({ environmentId, input: { paneId: open.paneId } }).then((result) =>
+        reportFailure("Could not show that agent in herdr", result),
+      );
+    },
+    renameThread: async (open: ThreadOpen, title: string, before: string) => {
+      const trimmed = title.trim();
+      if (trimmed === "" || trimmed === before) return;
+      reportFailure(
+        "Could not rename the thread",
+        await updateThreadMetadata({
+          environmentId: open.environmentId,
+          input: { threadId: open.threadId, title: trimmed },
+        }),
+      );
+    },
+    archiveThread: async (open: ThreadOpen, title: string) => {
+      if (confirmThreadArchive && !(await confirmed(`Archive thread "${title}"?`))) return;
+      reportFailure(
+        "Could not archive the thread",
+        await archiveThread(scopeThreadRef(open.environmentId, open.threadId)),
+      );
+    },
+    deleteThread: async (open: ThreadOpen) => {
+      const ref = scopeThreadRef(open.environmentId, open.threadId);
+      const result = await confirmAndDeleteThread(ref);
+      // Once the thread is gone, a failure is its worktree's cleanup, which reports itself.
+      if (readThreadShell(ref) !== null) reportFailure("Could not delete the thread", result);
+    },
+    placeThread: async (scope: Scope, thread: string, taskId: string | null) => {
+      if (environmentId === null) return;
+      reportFailure(
+        "Could not move the thread",
+        await assignThread({ environmentId, input: { ...scope, thread, taskId } }),
+      );
+    },
+    startThread: async (scope: Scope, taskId: string, projectId: ProjectId) => {
+      if (environmentId === null) return;
+      const draft = await openNewThread(scopeProjectRef(environmentId, projectId));
+      if (draft === null) return;
+      // The draft already knows the id its thread will have, so the thread starts under the task.
+      reportFailure(
+        "Could not put the new thread under the task",
+        await assignThread({
+          environmentId,
+          input: { ...scope, thread: `peer:${draft.threadId}`, taskId },
+        }),
+      );
+    },
+    renameTask: async (scope: Scope, task: WorkTaskNode, title: string) => {
+      const trimmed = title.trim();
+      if (environmentId === null || trimmed === "" || trimmed === task.title) return;
+      reportFailure(
+        "Could not rename the task",
+        await updateTask({ environmentId, input: { ...scope, taskId: task.id, title: trimmed } }),
+      );
+    },
+    setTaskDone: async (scope: Scope, task: WorkTaskNode, done: boolean) => {
+      if (environmentId === null) return;
+      reportFailure(
+        `Could not update ${taskLabel(task)}`,
+        await updateTask({
+          environmentId,
+          input: { ...scope, taskId: task.id, status: done ? "done" : "open" },
+        }),
+      );
+    },
+    removeTask: async (scope: Scope, task: WorkTaskNode) => {
+      if (environmentId === null) return;
+      const sure = await confirmed(
+        [
+          `Remove task "${taskLabel(task)}" for everyone on the project?`,
+          "Its threads stay, on no task.",
+        ].join("\n"),
+        true,
+      );
+      if (!sure) return;
+      reportFailure(
+        `Could not remove ${taskLabel(task)}`,
+        await deleteTask({ environmentId, input: { ...scope, taskId: task.id } }),
+      );
+    },
   };
 }
+
+type WorkActions = ReturnType<typeof useWorkActions>;
 
 /**
  * The sidebar's Work view: what runs on this computer right now, then each
@@ -127,7 +306,12 @@ export function WorkPanel() {
   const threads = useThreadShells();
   const projects = useProjects();
   const now = useRelativeTimeTick(30_000);
-  const open = useOpenWork(environmentId);
+  const actions = useWorkActions(environmentId);
+  const activeThread = useParams({
+    strict: false,
+    select: (params) =>
+      params.environmentId && params.threadId ? `${params.environmentId}:${params.threadId}` : null,
+  });
   const tree = useMemo(
     () => (status === null ? [] : buildWorkTree({ status, localThreads: threads, now })),
     [now, status, threads],
@@ -152,7 +336,7 @@ export function WorkPanel() {
       {environmentId !== null && status !== null && status.signedIn ? (
         <OverlapList environmentId={environmentId} status={status} />
       ) : null}
-      <ActiveAgents agents={running} herdr={status?.agents.herdr ?? null} onOpen={open} />
+      <ActiveAgents agents={running} herdr={status?.agents.herdr ?? null} onOpen={actions.open} />
       {environmentId === null || status === null ? (
         <p className="px-2 text-xs text-muted-foreground">Connecting…</p>
       ) : !status.signedIn ? (
@@ -171,7 +355,8 @@ export function WorkPanel() {
             status={status}
             project={project}
             showWorkspace={status.workspaces.length > 1}
-            onOpen={open}
+            activeThread={activeThread}
+            actions={actions}
           />
         ))
       )}
@@ -253,13 +438,15 @@ function ProjectSection({
   status,
   project,
   showWorkspace,
-  onOpen,
+  activeThread,
+  actions,
 }: {
   readonly environmentId: EnvironmentId;
   readonly status: PeerHubStatus;
   readonly project: WorkProjectNode;
   readonly showWorkspace: boolean;
-  readonly onOpen: (open: WorkOpen) => void;
+  readonly activeThread: string | null;
+  readonly actions: WorkActions;
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const [adding, setAdding] = useState(false);
@@ -310,7 +497,7 @@ function ProjectSection({
         </Tooltip>
       </div>
       {collapsed ? null : (
-        <div className="flex flex-col gap-1 pl-2">
+        <div className="flex flex-col gap-1 pl-1">
           {adding ? (
             <NewTaskForm
               environmentId={environmentId}
@@ -330,7 +517,7 @@ function ProjectSection({
           ) : null}
           {project.areas.map((area) => (
             <div key={area.name ?? "—"}>
-              <p className="px-2 pt-1 text-xs text-muted-foreground">
+              <p className="px-2 pt-1.5 pb-0.5 text-xs font-medium text-muted-foreground">
                 {area.name ?? "Other tasks"}
               </p>
               {area.tasks.length === 0 ? (
@@ -340,12 +527,12 @@ function ProjectSection({
                   {area.tasks.map((task) => (
                     <TaskRow
                       key={task.id}
-                      environmentId={environmentId}
                       scope={scope}
                       task={task}
                       tasks={project.tasks}
                       t3ProjectId={t3ProjectId}
-                      onOpen={onOpen}
+                      activeThread={activeThread}
+                      actions={actions}
                     />
                   ))}
                 </ul>
@@ -354,16 +541,19 @@ function ProjectSection({
           ))}
           {project.unsorted.length > 0 ? (
             <div>
-              <p className="px-2 pt-1 text-xs text-muted-foreground">Not on a task</p>
-              <ul className="flex flex-col gap-px">
+              <p className="px-2 pt-1.5 pb-0.5 text-xs font-medium text-muted-foreground">
+                Not on a task
+              </p>
+              <ul className="flex flex-col">
                 {project.unsorted.map((thread) => (
-                  <ThreadRow
+                  <ThreadCard
                     key={thread.key}
-                    environmentId={environmentId}
                     scope={scope}
                     thread={thread}
+                    taskId={null}
                     tasks={project.tasks}
-                    onOpen={onOpen}
+                    activeThread={activeThread}
+                    actions={actions}
                   />
                 ))}
               </ul>
@@ -423,137 +613,216 @@ function NotOpenHere({
   );
 }
 
-interface Scope {
-  readonly workspace: string;
-  readonly projectId: string;
+/** Edits a title in place: Enter or leaving the field saves, Escape keeps the old one. */
+function TitleInput({
+  value,
+  label,
+  onDone,
+}: {
+  readonly value: string;
+  readonly label: string;
+  /** The edited title, or null when cancelled. */
+  readonly onDone: (title: string | null) => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  const finished = useRef(false);
+  const finish = (title: string | null) => {
+    if (finished.current) return;
+    finished.current = true;
+    onDone(title);
+  };
+  return (
+    <input
+      autoFocus
+      value={draft}
+      aria-label={label}
+      onChange={(event) => setDraft(event.target.value)}
+      onFocus={(event) => event.currentTarget.select()}
+      onKeyDown={(event) => {
+        event.stopPropagation();
+        if (event.nativeEvent.isComposing) return;
+        if (event.key === "Enter") {
+          event.preventDefault();
+          finish(draft);
+        } else if (event.key === "Escape") {
+          event.preventDefault();
+          finish(null);
+        }
+      }}
+      onBlur={() => finish(draft)}
+      onClick={(event) => event.stopPropagation()}
+      onDoubleClick={(event) => event.stopPropagation()}
+      className="min-w-0 flex-1 rounded-sm border border-input bg-card px-1 text-sm font-medium text-card-foreground outline-none focus:border-foreground"
+    />
+  );
+}
+
+/** Up to three people on a task, you first. */
+function TaskPeople({ threads }: { readonly threads: ReadonlyArray<WorkThreadNode> }) {
+  const people = [
+    ...new Map(threads.map((t) => [`${t.mine}:${t.person}`, t] as const)).values(),
+  ].slice(0, 3);
+  if (people.length === 0) return null;
+  return (
+    <span className="flex items-center -space-x-1">
+      {people.map((t) => (
+        <PersonMark key={`${t.mine}:${t.person}`} name={t.person} mine={t.mine} />
+      ))}
+    </span>
+  );
 }
 
 function TaskRow({
-  environmentId,
   scope,
   task,
   tasks,
   t3ProjectId,
-  onOpen,
+  activeThread,
+  actions,
 }: {
-  readonly environmentId: EnvironmentId;
   readonly scope: Scope;
   readonly task: WorkTaskNode;
   readonly tasks: ReadonlyArray<PeerTask>;
   readonly t3ProjectId: ProjectId | undefined;
-  readonly onOpen: (open: WorkOpen) => void;
+  readonly activeThread: string | null;
+  readonly actions: WorkActions;
 }) {
   const [expanded, setExpanded] = useState(!task.done);
-  const updateTask = useAtomCommand(serverEnvironment.peerHubUpdateTask, { reportFailure: false });
-  const deleteTask = useAtomCommand(serverEnvironment.peerHubDeleteTask, { reportFailure: false });
-  const assignThread = useAtomCommand(serverEnvironment.peerHubAssignThread, {
-    reportFailure: false,
-  });
-  const openNewThread = useNewThreadHandler();
-  const label = task.key ? `${task.key} · ${task.title}` : task.title;
+  const [renaming, setRenaming] = useState(false);
+  const label = taskLabel(task);
 
-  const startThread = async () => {
-    if (t3ProjectId === undefined) return;
-    const draft = await openNewThread(scopeProjectRef(environmentId, t3ProjectId));
-    if (draft === null) return;
-    // The draft already knows the id its thread will have, so the thread starts under the task.
-    reportFailure(
-      "Could not put the new thread under the task",
-      await assignThread({
-        environmentId,
-        input: { ...scope, thread: `peer:${draft.threadId}`, taskId: task.id },
-      }),
+  const startThread = () => {
+    if (t3ProjectId !== undefined) void actions.startThread(scope, task.id, t3ProjectId);
+  };
+  const showMenu = async (position: MenuPosition) => {
+    const choice = await pickFromMenu(
+      taskMenuItems({ task, canStartThread: t3ProjectId !== undefined }),
+      position,
     );
+    if (choice === "new-thread") startThread();
+    else if (choice === "rename") setRenaming(true);
+    else if (choice === "toggle-done") void actions.setTaskDone(scope, task, !task.done);
+    else if (choice === "remove") void actions.removeTask(scope, task);
   };
 
   return (
-    <li>
-      <div className="group/task flex items-center gap-1 pr-1">
-        <button
-          type="button"
+    <li className="list-none">
+      <div
+        role="button"
+        tabIndex={0}
+        aria-expanded={expanded}
+        aria-label={label}
+        className="group/task flex h-8 min-w-0 cursor-pointer items-center gap-1.5 rounded-md pr-1 pl-1 outline-none select-none hover:bg-sidebar-row-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+        onClick={() => {
+          if (!renaming) setExpanded((value) => !value);
+        }}
+        onDoubleClick={(event) => {
+          if ((event.target as HTMLElement).closest("button, input")) return;
+          event.preventDefault();
+          setRenaming(true);
+        }}
+        onKeyDown={(event) => {
+          if (event.target !== event.currentTarget) return;
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            setExpanded((value) => !value);
+          } else if (event.key === "F2") {
+            event.preventDefault();
+            setRenaming(true);
+          }
+        }}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          void showMenu({ x: event.clientX, y: event.clientY });
+        }}
+      >
+        <ChevronRightIcon
           className={cn(
-            "flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 text-left text-sm text-sidebar-foreground hover:bg-sidebar-row-hover",
-            task.done && "text-muted-foreground",
+            "size-3 shrink-0 text-muted-foreground",
+            expanded && "rotate-90",
+            task.threads.length === 0 && "invisible",
           )}
-          aria-expanded={expanded}
-          onClick={() => setExpanded((value) => !value)}
-        >
-          <ChevronRightIcon
-            className={cn(
-              "size-3 shrink-0 text-muted-foreground",
-              expanded && "rotate-90",
-              task.threads.length === 0 && "opacity-0",
-            )}
-          />
-          <StatusGlyph status={task.status} />
-          <span className={cn("min-w-0 flex-1 truncate", task.done && "line-through")}>
-            {label}
+        />
+        <StatusGlyph status={task.status} />
+        {task.key ? (
+          <span className="shrink-0 rounded-sm bg-muted px-1 font-mono text-2xs text-muted-foreground">
+            {task.key}
           </span>
-          {task.threads.length > 0 ? (
-            <span className="shrink-0 text-xs text-muted-foreground">{task.threads.length}</span>
-          ) : null}
-        </button>
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <Button
-                size="icon-xs"
-                variant="ghost-muted"
-                aria-label={`New thread on ${label}`}
-                disabled={t3ProjectId === undefined}
-                onClick={() => void startThread()}
-              />
-            }
+        ) : null}
+        {renaming ? (
+          <TitleInput
+            value={task.title}
+            label="Task title"
+            onDone={(title) => {
+              setRenaming(false);
+              if (title !== null) void actions.renameTask(scope, task, title);
+            }}
+          />
+        ) : (
+          <span
+            className={cn(
+              "min-w-0 flex-1 truncate text-sm font-medium",
+              task.done ? "text-muted-foreground line-through" : "text-sidebar-foreground",
+            )}
           >
-            <PlusIcon className="size-3.5" />
-          </TooltipTrigger>
-          <TooltipPopup side="top">
-            {t3ProjectId === undefined ? "Clone the project first" : "New thread on this task"}
-          </TooltipPopup>
-        </Tooltip>
-        <Menu>
-          <MenuTrigger
-            render={
-              <Button size="icon-xs" variant="ghost-muted" aria-label={`More for ${label}`} />
-            }
-          >
-            <EllipsisIcon className="size-3.5" />
-          </MenuTrigger>
-          <MenuPopup align="end">
-            <MenuItem
-              onClick={() =>
-                void updateTask({
-                  environmentId,
-                  input: { ...scope, taskId: task.id, status: task.done ? "open" : "done" },
-                }).then((result) => reportFailure(`Could not update ${label}`, result))
-              }
+            {task.title}
+          </span>
+        )}
+        {/* Who is on it at rest; the task's actions take the slot on hover or keyboard focus. */}
+        <span className="group/task-slot relative flex h-5 shrink-0 items-center justify-end">
+          <span className="flex items-center gap-1.5 text-xs text-muted-foreground group-hover/task:pointer-events-none group-hover/task:absolute group-hover/task:right-0 group-hover/task:opacity-0 group-has-[:focus-visible]/task-slot:pointer-events-none group-has-[:focus-visible]/task-slot:absolute group-has-[:focus-visible]/task-slot:right-0 group-has-[:focus-visible]/task-slot:opacity-0">
+            <TaskPeople threads={task.threads} />
+            {task.threads.length > 0 ? (
+              <span className="tabular-nums">{task.threads.length}</span>
+            ) : null}
+          </span>
+          <span className="pointer-events-none absolute inset-y-0 right-0 flex items-center opacity-0 group-hover/task:pointer-events-auto group-hover/task:static group-hover/task:opacity-100 has-[:focus-visible]:pointer-events-auto has-[:focus-visible]:static has-[:focus-visible]:opacity-100">
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    size="icon-xs"
+                    variant="ghost-muted"
+                    aria-label={`New thread on ${label}`}
+                    disabled={t3ProjectId === undefined}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      startThread();
+                    }}
+                  />
+                }
+              >
+                <PlusIcon className="size-3.5" />
+              </TooltipTrigger>
+              <TooltipPopup side="top">
+                {t3ProjectId === undefined ? "Clone the project first" : "New thread on this task"}
+              </TooltipPopup>
+            </Tooltip>
+            <Button
+              size="icon-xs"
+              variant="ghost-muted"
+              aria-label={`More for ${label}`}
+              onClick={(event) => {
+                event.stopPropagation();
+                void showMenu(below(event));
+              }}
             >
-              {task.done ? "Reopen" : "Mark done"}
-            </MenuItem>
-            <MenuSeparator />
-            <MenuItem
-              variant="destructive"
-              onClick={() =>
-                void deleteTask({ environmentId, input: { ...scope, taskId: task.id } }).then(
-                  (result) => reportFailure(`Could not remove ${label}`, result),
-                )
-              }
-            >
-              Remove task
-            </MenuItem>
-          </MenuPopup>
-        </Menu>
+              <EllipsisIcon className="size-3.5" />
+            </Button>
+          </span>
+        </span>
       </div>
       {expanded && task.threads.length > 0 ? (
-        <ul className="ml-4 flex flex-col gap-px border-l border-sidebar-border pl-1">
+        <ul className="mt-px mb-1 ml-3 flex flex-col border-l border-sidebar-border pl-1">
           {task.threads.map((thread) => (
-            <ThreadRow
+            <ThreadCard
               key={thread.key}
-              environmentId={environmentId}
               scope={scope}
               thread={thread}
+              taskId={task.id}
               tasks={tasks}
-              onOpen={onOpen}
+              activeThread={activeThread}
+              actions={actions}
             />
           ))}
         </ul>
@@ -562,105 +831,214 @@ function TaskRow({
   );
 }
 
-function ThreadRow({
-  environmentId,
+/**
+ * One thread as the Threads list shows it: who and how it is doing, the
+ * title, then branch and agent. Your own carry the accent and, on this
+ * computer, open on click and rename, move, archive or delete from their
+ * menu; a colleague's are read-only and quieter.
+ */
+function ThreadCard({
   scope,
   thread,
+  taskId,
   tasks,
-  onOpen,
+  activeThread,
+  actions,
 }: {
-  readonly environmentId: EnvironmentId;
   readonly scope: Scope;
   readonly thread: WorkThreadNode;
+  /** The task it sits under here, null under "Not on a task". */
+  readonly taskId: string | null;
   readonly tasks: ReadonlyArray<PeerTask>;
-  readonly onOpen: (open: WorkOpen) => void;
+  readonly activeThread: string | null;
+  readonly actions: WorkActions;
 }) {
-  const assignThread = useAtomCommand(serverEnvironment.peerHubAssignThread, {
-    reportFailure: false,
-  });
-  const details = [
-    thread.source === "herdr" ? "in herdr" : null,
-    thread.harness,
-    thread.branch,
-    thread.stale ? "not reported lately" : null,
-  ]
+  const [renaming, setRenaming] = useState(false);
+  const open = thread.open;
+  const local = open?.kind === "thread" ? open : undefined;
+  const actionable = thread.mine && open !== undefined;
+  const active = local !== undefined && activeThread === `${local.environmentId}:${local.threadId}`;
+  const who = thread.mine ? (open === undefined ? "You · other computer" : "You") : thread.person;
+  const agent = [thread.harness, thread.source === "herdr" ? "herdr" : null]
     .filter(Boolean)
     .join(" · ");
-  const row = (
-    <span className="flex min-w-0 flex-1 items-center gap-2">
-      <StatusGlyph status={thread.status} stale={thread.stale} />
-      <span className={cn("min-w-0 flex-1 truncate", thread.stale && "text-muted-foreground")}>
-        {thread.title}
-      </span>
-      <span className="shrink-0 text-xs text-muted-foreground">{thread.person}</span>
+  const details = [
+    thread.mine
+      ? open === undefined
+        ? "Yours, on another computer: open it there"
+        : null
+      : `${thread.person}’s thread: only they change it`,
+    thread.stale ? "Not reported for a few minutes" : null,
+  ].filter((line) => line !== null);
+
+  const showMenu = async (position: MenuPosition) => {
+    const shell =
+      local === undefined
+        ? null
+        : readThreadShell(scopeThreadRef(local.environmentId, local.threadId));
+    const choice = await pickFromMenu(
+      threadMenuItems({
+        thread,
+        tasks,
+        taskId,
+        running: shell !== null && !threadRuntimeCanArchive(shell.runtime),
+      }),
+      position,
+    );
+    if (choice === null || choice === "move") return;
+    if (choice === "rename") setRenaming(true);
+    else if (choice === "show-in-herdr") {
+      if (open !== undefined) actions.open(open);
+    } else if (choice === "archive") {
+      if (local !== undefined) void actions.archiveThread(local, thread.title);
+    } else if (choice === "delete") {
+      if (local !== undefined) void actions.deleteThread(local);
+    } else if (choice === "unassign") void actions.placeThread(scope, thread.key, null);
+    else void actions.placeThread(scope, thread.key, choice.slice("task:".length));
+  };
+
+  const statusLabel = thread.stale ? (
+    <span className="text-muted-foreground">Away</span>
+  ) : thread.status === "idle" || thread.status === "unknown" ? null : (
+    <span className={cn("inline-flex items-center gap-1 font-medium", STATUS_TONE[thread.status])}>
+      <StatusIcon status={thread.status} />
+      {STATUS_LABEL[thread.status]}
     </span>
   );
-  const open = thread.open;
+
   return (
-    <li className="group/thread flex items-center gap-1 pr-1">
+    <li className="list-none py-px">
       <Tooltip>
         <TooltipTrigger
           render={
-            open === undefined ? (
-              <div className="flex h-7 min-w-0 flex-1 items-center rounded-md px-2 text-sm text-sidebar-foreground" />
-            ) : (
-              <button
-                type="button"
-                className="flex h-7 min-w-0 flex-1 items-center rounded-md px-2 text-left text-sm text-sidebar-foreground hover:bg-sidebar-row-hover"
-                onClick={() => onOpen(open)}
-              />
-            )
+            <div
+              role={open === undefined ? undefined : "button"}
+              tabIndex={open === undefined ? undefined : 0}
+              aria-label={`${thread.title}, ${who}, ${STATUS_LABEL[thread.status]}`}
+              aria-current={active ? "page" : undefined}
+              className={cn(
+                "group/work-thread relative w-full overflow-hidden rounded-md px-2.5 py-1.5 text-left outline-none select-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+                active
+                  ? "bg-sidebar-row-active"
+                  : open === undefined
+                    ? "cursor-default"
+                    : "cursor-pointer hover:bg-sidebar-row-hover",
+                thread.stale && "opacity-60",
+              )}
+              onClick={() => {
+                if (open !== undefined && !renaming) actions.open(open);
+              }}
+              onDoubleClick={(event) => {
+                if (!actionable || local === undefined) return;
+                if ((event.target as HTMLElement).closest("button, input")) return;
+                event.preventDefault();
+                setRenaming(true);
+              }}
+              onKeyDown={(event) => {
+                if (event.target !== event.currentTarget || open === undefined) return;
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  actions.open(open);
+                } else if (event.key === "F2" && actionable && local !== undefined) {
+                  event.preventDefault();
+                  setRenaming(true);
+                }
+              }}
+              onContextMenu={(event) => {
+                if (!actionable) return;
+                event.preventDefault();
+                void showMenu({ x: event.clientX, y: event.clientY });
+              }}
+            />
           }
         >
-          {row}
+          {thread.mine ? (
+            <span aria-hidden className="absolute inset-y-2 left-0 w-0.5 rounded-full bg-primary" />
+          ) : null}
+          <div className="flex h-5 min-w-0 items-center gap-1.5">
+            <PersonMark name={thread.person} mine={thread.mine} />
+            <span
+              className={cn(
+                "min-w-0 flex-1 truncate text-xs",
+                thread.mine ? "font-medium text-sidebar-foreground" : "text-secondary-label",
+              )}
+            >
+              {who}
+            </span>
+            {/* The state at rest; the thread's menu takes the slot on hover or keyboard focus. */}
+            <span className="group/thread-slot relative flex h-5 min-w-5 shrink-0 items-center justify-end text-xs">
+              <span
+                className={cn(
+                  "flex items-center",
+                  actionable &&
+                    "group-hover/work-thread:pointer-events-none group-hover/work-thread:absolute group-hover/work-thread:right-0 group-hover/work-thread:opacity-0 group-has-[:focus-visible]/thread-slot:pointer-events-none group-has-[:focus-visible]/thread-slot:absolute group-has-[:focus-visible]/thread-slot:right-0 group-has-[:focus-visible]/thread-slot:opacity-0",
+                )}
+              >
+                {statusLabel}
+              </span>
+              {actionable ? (
+                <span className="pointer-events-none absolute inset-y-0 right-0 flex items-center opacity-0 group-hover/work-thread:pointer-events-auto group-hover/work-thread:static group-hover/work-thread:opacity-100 has-[:focus-visible]:pointer-events-auto has-[:focus-visible]:static has-[:focus-visible]:opacity-100">
+                  <Button
+                    size="icon-xs"
+                    variant="ghost-muted"
+                    aria-label={`More for ${thread.title}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void showMenu(below(event));
+                    }}
+                  >
+                    <EllipsisIcon className="size-3.5" />
+                  </Button>
+                </span>
+              ) : null}
+            </span>
+          </div>
+          <div className="mt-0.5 flex min-w-0">
+            {renaming && local !== undefined ? (
+              <TitleInput
+                value={thread.title}
+                label="Thread title"
+                onDone={(title) => {
+                  setRenaming(false);
+                  if (title !== null) void actions.renameThread(local, title, thread.title);
+                }}
+              />
+            ) : (
+              <span
+                className={cn(
+                  "min-w-0 flex-1 truncate text-sm",
+                  thread.mine ? "font-medium text-foreground" : "text-secondary-label",
+                )}
+              >
+                {thread.title}
+              </span>
+            )}
+          </div>
+          {thread.branch !== undefined || agent !== "" ? (
+            <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+              {thread.branch !== undefined ? (
+                <>
+                  <GitBranchIcon aria-hidden className="size-3 shrink-0 opacity-60" />
+                  <span className="flex min-w-0 flex-1 opacity-70">
+                    <MiddleTruncate value={thread.branch} showTitle={false} />
+                  </span>
+                </>
+              ) : (
+                <span className="flex-1" />
+              )}
+              {agent !== "" ? <span className="shrink-0">{agent}</span> : null}
+            </div>
+          ) : null}
         </TooltipTrigger>
         <TooltipPopup side="right">
-          {details === "" ? STATUS_LABEL[thread.status] : details}
+          <p className="font-medium">{thread.title}</p>
+          {details.map((line) => (
+            <p key={line} className="text-muted-foreground">
+              {line}
+            </p>
+          ))}
         </TooltipPopup>
       </Tooltip>
-      {thread.placeable ? (
-        <Menu>
-          <MenuTrigger
-            render={
-              <Button
-                size="icon-xs"
-                variant="ghost-muted"
-                aria-label={`Move ${thread.title} to a task`}
-              />
-            }
-          >
-            <EllipsisIcon className="size-3.5" />
-          </MenuTrigger>
-          <MenuPopup align="end">
-            {tasks
-              .filter((task) => task.status === "open")
-              .map((task) => (
-                <MenuItem
-                  key={task.id}
-                  onClick={() =>
-                    void assignThread({
-                      environmentId,
-                      input: { ...scope, thread: thread.key, taskId: task.id },
-                    }).then((result) => reportFailure("Could not move the thread", result))
-                  }
-                >
-                  {task.key ? `${task.key} · ${task.title}` : task.title}
-                </MenuItem>
-              ))}
-            <MenuSeparator />
-            <MenuItem
-              onClick={() =>
-                void assignThread({
-                  environmentId,
-                  input: { ...scope, thread: thread.key, taskId: null },
-                }).then((result) => reportFailure("Could not move the thread", result))
-              }
-            >
-              Not on a task
-            </MenuItem>
-          </MenuPopup>
-        </Menu>
-      ) : null}
     </li>
   );
 }

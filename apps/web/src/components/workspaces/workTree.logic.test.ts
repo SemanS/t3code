@@ -9,7 +9,13 @@ import {
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
 import { describe, expect, it } from "vite-plus/test";
 
-import { activeAgents, buildWorkTree, taskNamedIn } from "./workTree.logic";
+import {
+  activeAgents,
+  buildWorkTree,
+  taskMenuItems,
+  taskNamedIn,
+  threadMenuItems,
+} from "./workTree.logic";
 
 const HERE = EnvironmentId.make("env-here");
 const KIRKWOOD_T3 = ProjectId.make("t3-kirkwood");
@@ -114,7 +120,7 @@ function kirkwood(): PeerProjectState {
   };
 }
 
-function status(project: PeerProjectState): PeerHubStatus {
+function status(project: PeerProjectState, role: "owner" | "member" = "owner"): PeerHubStatus {
   return {
     hubUrl: "https://hub.example.test",
     signedIn: true,
@@ -124,7 +130,7 @@ function status(project: PeerProjectState): PeerHubStatus {
       {
         slug: "acme",
         name: "Acme",
-        role: "owner",
+        role,
         allowedDomains: ["acme.test"],
         currency: "EUR",
         memberName: "Slavo",
@@ -226,6 +232,91 @@ describe("buildWorkTree", () => {
       threadId: ThreadId.make("t1"),
     });
     expect(threads.find((t) => t.person === "Yev")?.placeable).toBe(false);
+  });
+
+  it("puts your own threads first, then what needs attention", () => {
+    const project = kirkwood();
+    const colleague = project.work.threads[0];
+    const waiting = {
+      ...colleague!,
+      id: "peer:t10",
+      title: "Payments review",
+      email: "chino@acme.test",
+      status: "blocked" as const,
+    };
+    const [tree] = buildWorkTree({
+      status: status({ ...project, work: { ...project.work, threads: [colleague!, waiting] } }),
+      localThreads: LOCAL,
+      now: NOW,
+    });
+    expect(tree?.areas[0]?.tasks[0]?.threads.map((t) => [t.person, t.status])).toEqual([
+      ["Slavo", "blocked"],
+      ["Slavo", "working"],
+      ["Chino", "blocked"],
+      ["Yev", "working"],
+    ]);
+  });
+
+  it("lets the task's creator, a lead or an admin remove it, as the hub does", () => {
+    const project = kirkwood();
+    const asMember = {
+      ...project,
+      project: { ...project.project, role: "member" as const },
+      work: {
+        ...project.work,
+        tasks: [
+          { ...task("mine", "Mine", "Revenue"), createdBy: "slavo@acme.test" },
+          { ...task("theirs", "Theirs", "Revenue"), createdBy: "yev@acme.test" },
+        ],
+      },
+    };
+    const removable = (role: "owner" | "member") =>
+      buildWorkTree({ status: status(asMember, role), localThreads: [], now: NOW })[0]
+        ?.areas.flatMap((a) => a.tasks)
+        .map((t) => [t.id, t.removable]);
+    expect(removable("member")).toEqual([
+      ["mine", true],
+      ["theirs", false],
+    ]);
+    expect(removable("owner")).toEqual([
+      ["mine", true],
+      ["theirs", true],
+    ]);
+  });
+});
+
+describe("menus", () => {
+  const [project] = buildWorkTree({ status: status(kirkwood()), localThreads: LOCAL, now: NOW });
+  const split = project?.areas[0]?.tasks[0];
+  const tasks = project?.tasks ?? [];
+  const thread = (title: string) => split?.threads.find((t) => t.title === title);
+
+  it("changes only your own threads on this computer", () => {
+    const menu = (title: string) =>
+      threadMenuItems({ thread: thread(title)!, tasks, taskId: "krk-812", running: true });
+    expect(menu("UI adjustments")).toEqual([]);
+    expect(menu("Investigation for KRK-812").map((item) => item.id)).toEqual([
+      "show-in-herdr",
+      "move",
+    ]);
+    const mine = menu("Main implementation");
+    expect(mine.map((item) => [item.id, item.disabled ?? false])).toEqual([
+      ["rename", false],
+      ["move", false],
+      ["archive", true],
+      ["delete", false],
+    ]);
+    const places = mine.find((item) => item.id === "move")?.children ?? [];
+    expect(places.filter((item) => item.checked).map((item) => item.id)).toEqual(["task:krk-812"]);
+    expect(places.at(-1)?.id).toBe("unassign");
+  });
+
+  it("offers removing a task only to those the hub lets remove it", () => {
+    const ids = (removable: boolean) =>
+      taskMenuItems({ task: { ...split!, removable }, canStartThread: false }).map((i) => i.id);
+    expect(ids(true)).toContain("remove");
+    expect(ids(false)).not.toContain("remove");
+    expect(ids(false)).toContain("rename");
   });
 });
 
