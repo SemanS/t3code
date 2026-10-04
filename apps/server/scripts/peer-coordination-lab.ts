@@ -11,7 +11,8 @@
 //   5. Under the `ask` policy, Bob himself is asked instead, once.
 //   6. Working contexts (after arXiv:2609.37725): the first agent on a work keeps its shared
 //      context; the other reads it, may not edit it, hears when it changes, and sends what it
-//      finds to the keeper. A compaction gives each agent back the context it keeps.
+//      finds to the keeper. The keeper is asked to compact as it grows, the hub keeps its
+//      versions, a person can bring one back, and a compaction gives each agent back its context.
 //   7. After Peer restarts, a session it meets again keeps what it shared.
 //   8. When the keeper's session ends, the other agent keeps the shared context.
 //
@@ -450,7 +451,15 @@ const program = Effect.gen(function* () {
 
   // 5. Under `ask`, Bob decides himself, once.
   yield* bob.client[WS_METHODS.peerHubSetCoordination]({ policy: "ask" });
-  anas.hook("UserPromptSubmit", { prompt: "Also format prices in src/format.ts" });
+  const roster = context(
+    anas.hook("UserPromptSubmit", { prompt: "Also format prices in src/format.ts" }),
+  );
+  told(`${anas.name} (next prompt)`, roster);
+  check(
+    roster?.includes("Peer · on the work whose context you keep: Bob's agent") === true &&
+      roster.includes("joined"),
+    "the agent keeping the work's context hears who joined the work",
+  );
   anas.edit("PreToolUse", "src/format.ts");
   anas.edit("PostToolUse", "src/format.ts");
   yield* Effect.promise(() => sleep(3500));
@@ -556,27 +565,63 @@ const program = Effect.gen(function* () {
     ),
     "and reaches it once",
   );
+  // The keeper compacts as its context grows, and may: Peer keeps its versions.
   const kept = NodeFS.readFileSync(sharedPath, "utf8");
-  NodeFS.writeFileSync(sharedPath, `${kept}\n${"- an endless log line\n".repeat(2000)}`);
-  const tooLong = context(
-    anas.hook("PostToolUse", {
-      tool_name: "Write",
-      tool_input: { file_path: sharedPath, content: "(too long)" },
-    }),
+  const writeShared = (text: string) => {
+    NodeFS.writeFileSync(sharedPath, text);
+    return context(
+      anas.hook("PostToolUse", {
+        tool_name: "Write",
+        tool_input: { file_path: sharedPath, content: "(the context above)" },
+      }),
+    );
+  };
+  const big = writeShared(`${kept}\n${"- an endless log line\n".repeat(1150)}`);
+  told(`${anas.name} (its context grew)`, big);
+  check(
+    big?.includes("Compact it now") === true,
+    "a keeper whose context passes about 6K tokens is asked to compact it",
   );
   check(
-    tooLong?.includes("over 32 KiB") === true,
+    writeShared(`${kept}\n${"- an endless log line\n".repeat(2000)}`)?.includes("over 32 KiB") ===
+      true,
     "a keeper whose context outgrows what the hub keeps is told to shorten it",
   );
-  NodeFS.writeFileSync(sharedPath, kept);
-  anas.hook("PostToolUse", {
-    tool_name: "Write",
-    tool_input: { file_path: sharedPath, content: "(shortened)" },
+  writeShared(kept);
+  writeShared(`${kept}\n- retry once on an empty answer`);
+  const history = anas.peer("context", "history");
+  told(`${anas.name} (peer context history)`, history);
+  check(
+    /^ {2}4 .*\n {2}3 .*\n {2}2 .*\n {2}1 /m.test(history),
+    "the hub keeps every version the keeper wrote",
+  );
+  const older = bobs.peer("context", "2");
+  check(older.includes("an endless log line"), "and any agent on the work reads an older one back");
+
+  // Bob brings version 1 back from Peer: Ana's agent hears it and goes on from it.
+  yield* bob.client[WS_METHODS.peerHubRestoreContext]({
+    workspace: "acme",
+    project: "lab",
+    scope: "project",
+    version: 1,
   });
+  yield* Effect.promise(() => sleep(3500));
+  const replaced = context(anas.edit("PostToolUse", "src/pricing.ts"));
+  told(`${anas.name} (next step)`, replaced);
+  check(
+    replaced?.includes(
+      "Bob brought version 1 of the shared context you keep back (now version 5)",
+    ) === true,
+    "a keeper hears when a person brings an older version back",
+  );
+  check(
+    !NodeFS.readFileSync(sharedPath, "utf8").includes("retry once"),
+    "and the file it keeps has that version",
+  );
   const keeperBack = context(anas.hook("SessionStart", { source: "compact" }));
   told(`${anas.name} (after a compaction)`, keeperBack);
   check(
-    keeperBack?.includes("the shared context as it stands (version 1)") === true &&
+    keeperBack?.includes("the shared context as it stands (version 5)") === true &&
       keeperBack.includes("applyVat()"),
     "after a compaction the keeper gets the shared context back",
   );
@@ -584,7 +629,7 @@ const program = Effect.gen(function* () {
   told(`${bobs.name} (after a compaction)`, readerBack);
   check(
     readerBack?.includes("renaming the callers in src/cart.ts") === true &&
-      readerBack.includes("kept by Ana's agent (version 1"),
+      readerBack.includes("kept by Ana's agent (version 5"),
     "and the other agent its own context, with the shared one to read",
   );
 

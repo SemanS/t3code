@@ -25,6 +25,7 @@ import {
   decideEdit,
   editedFile,
   emptyMemory,
+  compactionNudge,
   findingsForKeeper,
   findingsOnWork,
   isPlainCliCall,
@@ -32,6 +33,7 @@ import {
   mentionsCli,
   newsFor,
   repositoryPath,
+  rosterChange,
   scopeOf,
   sharedChange,
   sharedTemplate,
@@ -45,12 +47,15 @@ import {
   type CoordinationView,
   type SessionMemory,
   type SharedContext,
+  type WorkAgent,
 } from "./coordination.ts";
 import type {
   ContextRefusal,
   HubContext,
   HubContextKeeper,
   HubContextText,
+  HubContextVersion,
+  HubContextVersionText,
   HubCoordSession,
   HubCoordView,
   HubFinding,
@@ -140,6 +145,18 @@ export interface BrokerDeps {
     baseVersion: number,
     text: string,
   ) => Promise<HubContextText | ContextRefusal>;
+  /** The versions of a shared context the hub keeps, newest first. */
+  readonly contextVersions: (
+    workspace: string,
+    project: string,
+    scope: string,
+  ) => Promise<ReadonlyArray<HubContextVersion>>;
+  readonly readContextVersion: (
+    workspace: string,
+    project: string,
+    scope: string,
+    version: number,
+  ) => Promise<HubContextVersionText | null>;
 }
 
 interface LocalSession {
@@ -177,6 +194,10 @@ interface LocalSession {
   readonly pending: string[];
   /** Its SessionStart is being answered, which settles who keeps its work's context itself. */
   starting: boolean;
+  /** Who it last heard is on its work, while it keeps the shared context. */
+  roster: ReadonlyArray<WorkAgent> | undefined;
+  /** The size its kept context had when it was last told to compact it. */
+  compactedAt: number;
   /** Its "For the team" lines as last read: what it shares with the project. */
   team: ReadonlyArray<string>;
   readonly startedAt: number;
@@ -203,6 +224,9 @@ interface SharedMirror {
   keeper: HubContextKeeper | undefined;
   updatedAt: string;
   updatedBy: string | undefined;
+  /** The agent session that wrote it; none when a person brought an older version back. */
+  updatedSession: string | undefined;
+  restoredFrom: number | undefined;
   /** Its keeper here changed it and the hub has not taken the change yet. */
   unsent: boolean;
 }
@@ -231,6 +255,11 @@ const CLAIM_GAP_MS = 20_000;
 const SHARED_NEWS_GAP_MS = 5 * 60 * 1000;
 /** What the hub keeps of a shared context. */
 const SHARED_MAX_BYTES = 32 * 1024;
+/** About 6K tokens: past this a keeper is told to compact, again for every 4 KiB more. */
+const SHARED_COMPACT_BYTES = 24 * 1024;
+const SHARED_COMPACT_STEP = 4 * 1024;
+/** A keeper idle this long, while an agent here works on its work, gives way (the hub decides). */
+const KEEPER_IDLE_MS = 10 * 60 * 1000;
 
 const clip = (text: string, max: number) => text.replace(/\s+/g, " ").trim().slice(0, max);
 
@@ -479,6 +508,8 @@ export class CoordinationBroker {
       sharedToldAt: 0,
       pending: [],
       starting: false,
+      roster: undefined,
+      compactedAt: 0,
       team: [],
       startedAt: now,
       contextAt: now,
@@ -779,7 +810,12 @@ export class CoordinationBroker {
     const parts = [news?.text ?? null];
     // Findings and shared contexts wait for the agent's next step; they never wake it.
     if (options.team !== false) {
-      parts.push(...session.pending.splice(0), this.sharedNews(session), this.findingNews(session));
+      parts.push(
+        ...session.pending.splice(0),
+        this.rosterNews(session),
+        this.sharedNews(session),
+        this.findingNews(session),
+      );
     }
     const said = parts.filter((part) => part !== null);
     return said.length === 0 ? null : said.join("\n\n");
@@ -831,6 +867,17 @@ export class CoordinationBroker {
       text,
     });
     return text;
+  }
+
+  /** Who joined or left the work a keeper keeps the context of, since it last heard. */
+  private rosterNews(session: LocalSession): string | null {
+    if (!session.keeps) return null;
+    const now = this.agentsOn(session);
+    const before = session.roster;
+    session.roster = now;
+    // Its start, or the handover, said who was there.
+    if (before === undefined) return null;
+    return rosterChange(before, now);
   }
 
   /** What changed in the shared context a session reads, at most every few minutes. */
@@ -933,7 +980,13 @@ export class CoordinationBroker {
     } else if (this.keeperOf(session) === undefined) {
       findings = onWork.slice(0, 8);
       for (const finding of findings) session.heard.add(finding.id);
+    } else if (mirror !== undefined && contextWritten(mirror.text)) {
+      // Kept by another agent: what it has not folded in yet goes along with the context.
+      const since = Date.parse(mirror.updatedAt);
+      findings = onWork.filter((finding) => Date.parse(finding.at) > since).slice(0, 8);
+      for (const finding of findings) session.heard.add(finding.id);
     }
+    if (session.keeps) session.roster = this.agentsOn(session);
     if (!session.keeps && mirror !== undefined) {
       // It reads the context now; the first change after this is news at once.
       session.sharedHeard = mirror.version;
@@ -947,7 +1000,7 @@ export class CoordinationBroker {
       },
       shared: mirror === undefined ? undefined : { ...this.sharedOf(mirror), keeps: session.keeps },
       findings,
-      agents: this.agentsOn(session),
+      agents: this.agentsOn(session).map((agent) => agent.name),
       nameOf: this.nameOf(session.workspace),
     });
     this.log("context.injected", {
@@ -1081,7 +1134,7 @@ export class CoordinationBroker {
   }
 
   /** The other agents at work on the same work, as people name them. */
-  private agentsOn(session: LocalSession): string[] {
+  private agentsOn(session: LocalSession): WorkAgent[] {
     return this.merged(session.workspace, this.views.get(session.workspace))
       .sessions.filter(
         (s) =>
@@ -1089,7 +1142,10 @@ export class CoordinationBroker {
           s.project === session.project &&
           scopeOf(s.task) === scopeOf(session.task),
       )
-      .map((s) => `${this.deps.nameOf(session.workspace, s.email)}'s agent ("${s.label}")`);
+      .map((s) => ({
+        id: s.id,
+        name: `${this.deps.nameOf(session.workspace, s.email)}'s agent ("${s.label}")`,
+      }));
   }
 
   /**
@@ -1119,6 +1175,8 @@ export class CoordinationBroker {
       keeper: undefined,
       updatedAt: context.updatedAt,
       updatedBy: undefined,
+      updatedSession: undefined,
+      restoredFrom: undefined,
       unsent: false,
     };
     this.shared.set(key, mirror);
@@ -1133,6 +1191,8 @@ export class CoordinationBroker {
     mirror.text = file;
     mirror.updatedAt = context.updatedAt;
     mirror.updatedBy = context.updatedBy;
+    mirror.updatedSession = context.updatedSession;
+    mirror.restoredFrom = context.restoredFrom;
     mirror.unsent = false;
     try {
       await NodeFSP.mkdir(NodePath.dirname(mirror.path), { recursive: true });
@@ -1268,9 +1328,18 @@ export class CoordinationBroker {
       mirror.version = answer.version;
       mirror.updatedAt = answer.updatedAt;
       mirror.updatedBy = answer.updatedBy;
+      mirror.updatedSession = answer.updatedSession;
+      mirror.restoredFrom = undefined;
       mirror.unsent = false;
       session.sharedHeard = answer.version;
       session.sharedHeardText = mirror.text;
+      const bytes = Buffer.byteLength(mirror.text);
+      if (bytes < SHARED_COMPACT_BYTES) session.compactedAt = 0;
+      else if (bytes >= session.compactedAt + SHARED_COMPACT_STEP) {
+        session.compactedAt = bytes;
+        session.pending.push(compactionNudge(mirror.path, bytes));
+        this.log("shared.compact", { session: session.id, scope: mirror.scope, bytes });
+      }
       this.log("shared.written", {
         session: session.id,
         scope: mirror.scope,
@@ -1337,10 +1406,38 @@ export class CoordinationBroker {
       const listed = view.contexts.find((c) => c.project === first.project && c.scope === scope);
       let mirror = this.shared.get(key);
       if (listed !== undefined && listed.version > (mirror?.version ?? -1)) {
+        const known = mirror?.version;
         const current = await this.deps
           .readContext(workspace, first.project, scope)
           .catch(() => null);
         if (current !== null) mirror = await this.mirror(workspace, current);
+        // A version its keeper here did not write: a person brought an older one back.
+        const keeping = sessions.find((s) => s.keeps);
+        if (
+          current !== null &&
+          mirror !== undefined &&
+          keeping !== undefined &&
+          known !== undefined &&
+          current.updatedSession !== keeping.id
+        ) {
+          keeping.sharedHeard = current.version;
+          keeping.sharedHeardText = mirror.text;
+          const who =
+            current.updatedBy === undefined
+              ? "Someone"
+              : this.deps.nameOf(workspace, current.updatedBy);
+          keeping.pending.push(
+            current.restoredFrom === undefined
+              ? `Peer: ${who} changed the shared context you keep (now version ${current.version}); ${mirror.path} has it. Go on from it.`
+              : `Peer: ${who} brought version ${current.restoredFrom} of the shared context you keep back (now version ${current.version}); ${mirror.path} has it. Go on from it; what it replaced is version ${known} (\`${this.cli} context ${known}\`).`,
+          );
+          this.log("shared.replaced", {
+            session: keeping.id,
+            scope,
+            version: current.version,
+            restoredFrom: current.restoredFrom,
+          });
+        }
       }
       if (mirror !== undefined && listed !== undefined) mirror.keeper = listed.keeper;
       for (const session of sessions) {
@@ -1365,7 +1462,20 @@ export class CoordinationBroker {
         else await this.saveShared(keeper);
         continue;
       }
-      if (listed?.keeper !== undefined && atWork.has(listed.keeper.session)) continue;
+      // Like the paper's orchestrator, a keeper is an agent at work: one that stopped reporting, or
+      // has been idle a while when an agent here works on its work, gives way.
+      const keeperSession =
+        listed?.keeper === undefined
+          ? undefined
+          : view.sessions.find((s) => s.id === listed.keeper?.session);
+      const idleFor =
+        keeperSession === undefined || keeperSession.status === "working"
+          ? 0
+          : Date.now() - Date.parse(keeperSession.activeAt ?? keeperSession.seenAt);
+      const away =
+        keeperSession === undefined ||
+        (idleFor > KEEPER_IDLE_MS && sessions.some((s) => s.status === "working"));
+      if (listed?.keeper !== undefined && !away) continue;
       if (Date.now() - (this.claimedAt.get(key) ?? 0) < CLAIM_GAP_MS) continue;
       this.claimedAt.set(key, Date.now());
       // The agent most at work here takes it over; one starting takes it up as it starts.
@@ -1384,14 +1494,18 @@ export class CoordinationBroker {
       const since = kept.version === 0 ? 0 : Date.parse(kept.updatedAt);
       const findings = findingsOnWork(this.holder(next), this.findingsOf(workspace), next.heard);
       for (const finding of findings) next.heard.add(finding.id);
+      next.roster = this.agentsOn(next);
       const fresh = findings.filter((finding) => Date.parse(finding.at) > since).slice(0, 10);
       next.pending.push(
         [
-          `Peer: you keep the shared context of ${subject} now${before === undefined ? "" : `; ${this.deps.nameOf(workspace, before.email)}'s agent kept it before`}. It is your working context from now on: carry over what matters from ${next.ownContextPath}, then keep it current.`,
+          `Peer: you keep the shared context of ${subject} now${before === undefined ? "" : `; ${this.deps.nameOf(workspace, before.email)}'s agent kept it before${keeperSession === undefined ? "" : ` and has been idle for ${Math.round(idleFor / 60_000)} minutes`}`}. It is your working context from now on: carry over what matters from ${next.ownContextPath}, then keep it current.`,
           keeperSkill(kept.path, subject),
           contextWritten(kept.text)
             ? `It reads now (version ${kept.version}):\n\n${kept.text.trim().slice(0, 12_000)}`
             : "Nobody has written it yet: Peer started it from a template.",
+          ...(next.roster.length === 0
+            ? []
+            : [`Agents on this work now: ${next.roster.map((agent) => agent.name).join("; ")}.`]),
           ...(fresh.length === 0
             ? []
             : [findingsForKeeper({ subject, findings: fresh, nameOf: this.nameOf(workspace) })]),
@@ -1616,9 +1730,75 @@ export class CoordinationBroker {
           ? "Released all claims."
           : `Still claimed: ${session.claims.join(", ")}`;
       }
+      case "context":
+        return this.contextCli(session, plain[0]);
       default:
         return this.help();
     }
+  }
+
+  /** `peer context`: the shared context of the caller's work, its kept versions, or one of them. */
+  private async contextCli(session: LocalSession, which: string | undefined): Promise<string> {
+    const scope = scopeOf(session.task);
+    const subject = this.subjectOf(session.workspace, session.project, scope);
+    const who = (
+      by: string | undefined,
+      agent: string | undefined,
+      restored: number | undefined,
+    ) =>
+      by === undefined
+        ? "someone"
+        : agent === undefined && restored !== undefined
+          ? `${this.deps.nameOf(session.workspace, by)}, bringing back ${restored}`
+          : `${this.deps.nameOf(session.workspace, by)}'s agent`;
+    if (which === "history") {
+      const versions = await this.deps
+        .contextVersions(session.workspace, session.project, scope)
+        .catch(() => null);
+      if (versions === null) return "peer: the hub cannot be reached now.";
+      if (versions.length === 0)
+        return `peer: the shared context of ${subject} has no versions yet.`;
+      return [
+        `Versions of the shared context of ${subject}, newest first (${this.cli} context <version> reads one):`,
+        ...versions.map(
+          (v) =>
+            `  ${v.version}  ${v.at.slice(0, 16).replace("T", " ")}  ${who(v.by, v.session, v.restoredFrom)}  +${v.added} -${v.dropped}`,
+        ),
+      ].join("\n");
+    }
+    if (which !== undefined) {
+      const number = Number(which);
+      if (!Number.isInteger(number) || number < 1) {
+        return `peer: say which version, e.g. ${this.cli} context 7, or ${this.cli} context history.`;
+      }
+      const version = await this.deps
+        .readContextVersion(session.workspace, session.project, scope, number)
+        .catch(() => null);
+      if (version === null) {
+        return `peer: version ${number} of the shared context of ${subject} is not kept. ${this.cli} context history lists the versions that are.`;
+      }
+      return [
+        `Version ${version.version} of the shared context of ${subject}, by ${who(version.by, version.session, version.restoredFrom)}, ${version.at.slice(0, 16).replace("T", " ")}:`,
+        "<shared-context>",
+        version.text.trim(),
+        "</shared-context>",
+      ].join("\n");
+    }
+    await this.syncNow(session.workspace, 3000);
+    const mirror = this.mirrorOf(session);
+    if (mirror === undefined)
+      return `peer: the shared context of ${subject} is not known here yet.`;
+    const keeper = session.keeps
+      ? "you keep it"
+      : mirror.keeper === undefined
+        ? "nobody keeps it now"
+        : `${this.deps.nameOf(session.workspace, mirror.keeper.email)}'s agent keeps it`;
+    return [
+      `The shared context of ${subject}, version ${mirror.version}; ${keeper} (${mirror.path}):`,
+      contextWritten(mirror.text)
+        ? `<shared-context>\n${mirror.text.trim()}\n</shared-context>`
+        : "Nobody has written it yet.",
+    ].join("\n");
   }
 
   private help(): string {
@@ -1630,6 +1810,7 @@ export class CoordinationBroker {
       `  ${cli} resolve "<agreement>"      close your open overlaps with what was agreed`,
       `  ${cli} claim <path>... [--intent "<why>"]   files or directories/ you are about to change`,
       `  ${cli} release [<path>...]        drop claims`,
+      `  ${cli} context [history|<version>]  the shared context of your work, its kept versions, or one of them`,
     ].join("\n");
   }
 

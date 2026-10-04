@@ -306,7 +306,21 @@ describe("shared contexts", () => {
   });
 
   it("gives a task its context: who keeps it while at work, and what was found since it changed", () => {
-    const base = status(kirkwood());
+    const project = kirkwood();
+    const yevAgent = {
+      id: "herdr:claude:s-yev",
+      task: "krk-812",
+      title: "Webhook retries",
+      email: "yev@acme.test",
+      status: "working" as const,
+      source: "herdr" as const,
+      environment: "yev-laptop",
+      seenAt: "2026-10-03T11:59:30Z",
+    };
+    const base = status({
+      ...project,
+      work: { ...project.work, threads: [...project.work.threads, yevAgent] },
+    });
     const finding = (id: string, text: string, at: string, task?: string) => ({
       id,
       workspace: "acme",
@@ -342,6 +356,9 @@ describe("shared contexts", () => {
               keeper: keeper("claude:s-yev", "yev@acme.test"),
               updatedAt: "2026-10-03T11:30:00Z",
               updatedBy: "yev@acme.test",
+              updatedSession: "claude:s-yev",
+              gist: "Stripe webhooks retry; we dedupe by event id",
+              bytes: 8_400,
             },
             {
               workspace: "acme",
@@ -350,6 +367,7 @@ describe("shared contexts", () => {
               version: 0,
               keeper: keeper("claude:ended", "chino@acme.test"),
               updatedAt: "2026-10-03T09:00:00Z",
+              bytes: 0,
             },
           ],
         },
@@ -358,10 +376,17 @@ describe("shared contexts", () => {
       now: NOW,
     });
     const task = tree?.areas[0]?.tasks[0];
-    expect([task?.id, task?.context?.keeper, task?.context?.updatedBy]).toEqual([
+    expect([task?.id, task?.context?.keeper?.person, task?.context?.updatedBy]).toEqual([
       "krk-812",
       "Yev",
       "Yev",
+    ]);
+    expect([task?.context?.gist, task?.context?.tokens]).toEqual([
+      "Stripe webhooks retry; we dedupe by event id",
+      2_100,
+    ]);
+    expect(task?.threads.filter((t) => t.keepsContext).map((t) => t.title)).toEqual([
+      "Webhook retries",
     ]);
     expect(task?.context?.reports.map((r) => r.text)).toEqual([
       "Stripe retries webhooks for 3 days",

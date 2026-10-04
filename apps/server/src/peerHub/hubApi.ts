@@ -100,6 +100,8 @@ const HubCoordSession = Schema.Struct({
   files: Schema.Array(Schema.String),
   claims: Schema.Array(Schema.String),
   seenAt: Schema.String,
+  /** When its agent last did something; a hub from before activity times has none. */
+  activeAt: Schema.optional(Schema.String),
 });
 export type HubCoordSession = typeof HubCoordSession.Type;
 
@@ -153,8 +155,37 @@ const HubContext = Schema.Struct({
   keeper: Schema.optional(HubContextKeeper),
   updatedAt: Schema.String,
   updatedBy: Schema.optional(Schema.String),
+  updatedSession: Schema.optional(Schema.String),
+  restoredFrom: Schema.optional(Schema.Number),
+  gist: Schema.optional(Schema.String),
+  bytes: Schema.optional(Schema.Number),
 });
 export type HubContext = typeof HubContext.Type;
+
+/** A kept version of a shared context, without its text. */
+const HubContextVersion = Schema.Struct({
+  version: Schema.Number,
+  at: Schema.String,
+  by: Schema.optional(Schema.String),
+  session: Schema.optional(Schema.String),
+  restoredFrom: Schema.optional(Schema.Number),
+  bytes: Schema.Number,
+  added: Schema.Number,
+  dropped: Schema.Number,
+});
+export type HubContextVersion = typeof HubContextVersion.Type;
+
+const HubContextVersionText = Schema.Struct({
+  version: Schema.Number,
+  at: Schema.String,
+  by: Schema.optional(Schema.String),
+  session: Schema.optional(Schema.String),
+  restoredFrom: Schema.optional(Schema.Number),
+  added: Schema.Array(Schema.String),
+  dropped: Schema.Array(Schema.String),
+  text: Schema.String,
+});
+export type HubContextVersionText = typeof HubContextVersionText.Type;
 
 const HubContextText = Schema.Struct({ ...HubContext.fields, text: Schema.String });
 export type HubContextText = typeof HubContextText.Type;
@@ -193,6 +224,8 @@ export interface ReportedSession {
   readonly claims: ReadonlyArray<string>;
   /** The "For the team" lines of its working context. */
   readonly findings?: ReadonlyArray<string>;
+  /** When its agent last did something: an idle keeper gives way to an agent at work. */
+  readonly activeAt?: string;
 }
 
 const Ok = Schema.Struct({});
@@ -538,6 +571,57 @@ export const make = Effect.gen(function* () {
         path: workspacePath(slug, `/contexts/${segment(project)}/${segment(scope)}`),
         session,
         notFound: { value: null },
+      }),
+
+    /** The versions of a shared context the hub keeps, newest first. */
+    contextVersions: (
+      hubUrl: string,
+      session: string,
+      slug: string,
+      project: string,
+      scope: string,
+    ) =>
+      request(Schema.Array(HubContextVersion), {
+        hubUrl,
+        path: workspacePath(slug, `/contexts/${segment(project)}/${segment(scope)}/versions`),
+        session,
+        notFound: { value: [] },
+      }),
+
+    /** One kept version with its text, or null when the hub no longer keeps it. */
+    contextVersion: (
+      hubUrl: string,
+      session: string,
+      slug: string,
+      project: string,
+      scope: string,
+      version: number,
+    ) =>
+      request(HubContextVersionText, {
+        hubUrl,
+        path: workspacePath(
+          slug,
+          `/contexts/${segment(project)}/${segment(scope)}/versions/${Math.trunc(version)}`,
+        ),
+        session,
+        notFound: { value: null },
+      }),
+
+    /** Brings an older version back as a new one, by the person signed in here. */
+    restoreContext: (
+      hubUrl: string,
+      session: string,
+      slug: string,
+      project: string,
+      scope: string,
+      version: number,
+    ) =>
+      request(HubContextText, {
+        hubUrl,
+        path: workspacePath(slug, `/contexts/${segment(project)}/${segment(scope)}/restore`),
+        method: "POST",
+        session,
+        body: { version: Math.trunc(version) },
       }),
 
     /**

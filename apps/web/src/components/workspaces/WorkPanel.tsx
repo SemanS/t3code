@@ -86,6 +86,7 @@ import { failureMessage, usePeerHubStatus } from "./WorkspaceAccess";
 import {
   activeAgents,
   buildWorkTree,
+  contextSize,
   taskLabel,
   taskMenuItems,
   threadMenuItems,
@@ -203,7 +204,7 @@ function activeLabel(at: string | undefined): string | null {
   return label.endsWith(" ago") ? label.slice(0, -4) : label;
 }
 
-function reportFailure(title: string, result: AtomCommandResult<unknown, unknown>): boolean {
+export function reportFailure(title: string, result: AtomCommandResult<unknown, unknown>): boolean {
   const message = failureMessage(result);
   if (message !== null) {
     toastManager.add(stackedThreadToast({ type: "error", title, description: message }));
@@ -211,7 +212,7 @@ function reportFailure(title: string, result: AtomCommandResult<unknown, unknown
   return message === null;
 }
 
-async function confirmed(message: string, destructive = false): Promise<boolean> {
+export async function confirmed(message: string, destructive = false): Promise<boolean> {
   const api = readLocalApi();
   if (api === undefined) return true;
   const answer = await settlePromise(() =>
@@ -1092,9 +1093,10 @@ function TaskRow({
 }
 
 /**
- * The shared context of a task, or of the project's work on no task: who keeps
- * it and what waits for them to fold in. It opens the page that shows it; the
- * team's threads are there too, not in the tree.
+ * The shared context of a task, or of the project's work on no task: where the
+ * work stands, as the agent keeping it put it, and how much waits for that
+ * agent to fold in. It opens the page that shows it; the team's threads are
+ * there too, not in the tree.
  */
 function ContextRow({
   context,
@@ -1108,36 +1110,55 @@ function ContextRow({
   const navigate = useNavigate();
   const active =
     activeThread === `context:${context.workspace}:${context.project}:${context.scope}`;
-  const detail = [
-    context.keeper === undefined ? "nobody keeps it now" : `${context.keeper}’s agent keeps it`,
-    context.reports.length > 0 ? `${context.reports.length} new` : null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
+  const keeper =
+    context.keeper === undefined
+      ? "Nobody keeps it now"
+      : context.keeper.mine
+        ? "Your agent keeps it"
+        : `${context.keeper.person}’s agent keeps it`;
+  const written =
+    context.version === 0
+      ? "nothing written yet"
+      : `version ${context.version}, ${formatRelativeTimeLabel(context.updatedAt)}`;
   return (
     <li className="list-none">
-      <button
-        type="button"
-        aria-current={active ? "page" : undefined}
-        className={cn(
-          "flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left text-xs text-muted-foreground",
-          active ? "bg-sidebar-row-active" : "hover:bg-sidebar-row-hover",
-        )}
-        onClick={() =>
-          void navigate({
-            to: "/context/$workspace/$project/$scope",
-            params: {
-              workspace: context.workspace,
-              project: context.project,
-              scope: context.scope,
-            },
-          })
-        }
-      >
-        <FileTextIcon aria-hidden className="size-3.5 shrink-0" />
-        <span className="shrink-0 font-medium text-sidebar-foreground">{label}</span>
-        <span className="min-w-0 flex-1 truncate">{detail}</span>
-      </button>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <button
+              type="button"
+              aria-current={active ? "page" : undefined}
+              className={cn(
+                "flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left text-xs text-muted-foreground",
+                active ? "bg-sidebar-row-active" : "hover:bg-sidebar-row-hover",
+              )}
+              onClick={() =>
+                void navigate({
+                  to: "/context/$workspace/$project/$scope",
+                  params: {
+                    workspace: context.workspace,
+                    project: context.project,
+                    scope: context.scope,
+                  },
+                })
+              }
+            />
+          }
+        >
+          <FileTextIcon aria-hidden className="size-3.5 shrink-0" />
+          <span className="shrink-0 font-medium text-sidebar-foreground">{label}</span>
+          <span className="min-w-0 flex-1 truncate">
+            {context.gist ?? (context.version === 0 ? "nothing written yet" : "")}
+          </span>
+          {context.reports.length > 0 ? (
+            <span className="shrink-0 text-info tabular-nums">{context.reports.length} new</span>
+          ) : null}
+        </TooltipTrigger>
+        <TooltipPopup side="right">
+          {keeper} · {written}
+          {context.tokens > 0 ? ` · ${contextSize(context.tokens)}` : ""}
+        </TooltipPopup>
+      </Tooltip>
     </li>
   );
 }
@@ -1326,6 +1347,12 @@ function ThreadCard({
             >
               {who}
             </span>
+            {thread.keepsContext ? (
+              <FileTextIcon
+                aria-label="Keeps the task's shared context"
+                className="size-3 shrink-0 text-muted-foreground"
+              />
+            ) : null}
             {thread.observable ? (
               <EyeIcon
                 aria-label={thread.mine ? "The team can watch it" : "Shared to watch live"}

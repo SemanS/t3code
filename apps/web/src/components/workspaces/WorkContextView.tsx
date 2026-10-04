@@ -1,43 +1,47 @@
-import { FileTextIcon } from "lucide-react";
-import { useMemo } from "react";
+import type { EnvironmentId, PeerContextVersion, PeerProjectState } from "@t3tools/contracts";
+import { ChevronRightIcon, FileTextIcon } from "lucide-react";
+import { useMemo, useState } from "react";
 
 import { isElectron } from "../../env";
+import { cn } from "../../lib/utils";
 import { useThreadShells } from "../../state/entities";
 import { usePrimaryEnvironment } from "../../state/environments";
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
+import { useAtomCommand } from "../../state/use-atom-command";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 import ChatMarkdown from "../ChatMarkdown";
 import { useRelativeTimeTick } from "../settings/settingsLayout";
 import { Button } from "../ui/button";
 import { SidebarInset } from "../ui/sidebar";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
-import { useWorkActions } from "./WorkPanel";
+import { confirmed, reportFailure, useWorkActions } from "./WorkPanel";
 import { StatusGlyph } from "./workStatus";
 import { usePeerHubStatus } from "./WorkspaceAccess";
 import {
   buildWorkTree,
+  contextSize,
+  personName,
   taskLabel,
   type WorkContextNode,
   type WorkOpen,
   type WorkThreadNode,
 } from "./workTree.logic";
 
-/**
- * The shared context of a task, or of a project's work on no task, as the
- * agent keeping it left it. One agent keeps it at a time; the others read it
- * and send it what they find. Below it, the agents on the work, to open (yours)
- * or watch (a colleague's they share).
- */
-export function WorkContextView({
-  workspace,
-  project,
-  scope,
-}: {
+interface Place {
   readonly workspace: string;
   readonly project: string;
   readonly scope: string;
-}) {
+}
+
+/**
+ * The shared context of a task, or of a project's work on no task, as the
+ * agent keeping it left it. One agent keeps it at a time; the others read it
+ * and send it what they find. Below it: what waits to be folded in, the agents
+ * on the work (to open yours or watch a colleague's they share), and the
+ * versions the hub keeps, to see what changed and bring one back.
+ */
+export function WorkContextView({ workspace, project, scope }: Place) {
   const primary = usePrimaryEnvironment();
   const environmentId =
     primary !== null && primary.connection.phase === "connected" ? primary.environmentId : null;
@@ -45,11 +49,17 @@ export function WorkContextView({
   const localThreads = useThreadShells();
   const now = useRelativeTimeTick(30_000);
   const actions = useWorkActions(environmentId);
+  const restoreContext = useAtomCommand(serverEnvironment.peerHubRestoreContext, {
+    reportFailure: false,
+  });
   const tree = useMemo(
     () => (status === null ? [] : buildWorkTree({ status, localThreads, now })),
     [localThreads, now, status],
   );
   const node = tree.find((p) => p.workspace === workspace && p.projectId === project);
+  const state = status?.workspaces
+    .find((w) => w.slug === workspace)
+    ?.projects.find((p) => p.project.id === project);
   const task = scope.startsWith("task:")
     ? node?.areas.flatMap((area) => area.tasks).find((t) => t.id === scope.slice("task:".length))
     : undefined;
@@ -69,6 +79,18 @@ export function WorkContextView({
       : `${node?.name ?? project}${scope === "project" ? " · work outside tasks" : ""}`;
   const agents = (scope === "project" ? node?.unsorted : task?.threads) ?? [];
 
+  const restore = async (version: number) => {
+    if (environmentId === null) return;
+    const sure = await confirmed(
+      `Bring version ${version} back? It becomes the newest version, and the agent keeping the context goes on from it.`,
+    );
+    if (!sure) return;
+    reportFailure(
+      `Could not bring version ${version} back`,
+      await restoreContext({ environmentId, input: { workspace, project, scope, version } }),
+    );
+  };
+
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden bg-background">
@@ -77,8 +99,13 @@ export function WorkContextView({
             <FileTextIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
             <span className="min-w-0 truncate text-sm font-medium text-foreground">{subject}</span>
             <span className="shrink-0 truncate text-xs text-muted-foreground">
-              {scope === "project" ? "Shared context" : "Task context"}
-              {context === undefined ? "" : ` · version ${context.version}`}
+              {[
+                scope === "project" ? "Shared context" : "Task context",
+                context === undefined ? null : `version ${context.version}`,
+                context === undefined || context.tokens === 0 ? null : contextSize(context.tokens),
+              ]
+                .filter(Boolean)
+                .join(" · ")}
             </span>
           </div>
         </WorkspacePageHeader>
@@ -103,9 +130,7 @@ export function WorkContextView({
               </>
             )}
             <section aria-label="Agents on this work">
-              <h2 className="pb-1 text-xs font-medium tracking-wide text-muted-foreground uppercase">
-                Agents on this work · {agents.length}
-              </h2>
+              <SectionTitle>Agents on this work · {agents.length}</SectionTitle>
               {agents.length === 0 ? (
                 <p className="text-sm text-muted-foreground">None right now.</p>
               ) : (
@@ -116,10 +141,19 @@ export function WorkContextView({
                 </ul>
               )}
             </section>
+            {context === undefined || context.version === 0 || environmentId === null ? null : (
+              <History
+                environmentId={environmentId}
+                place={{ workspace, project, scope }}
+                current={context.version}
+                state={state}
+                onRestore={(version) => void restore(version)}
+              />
+            )}
             <p className="text-xs leading-relaxed text-muted-foreground">
-              One agent keeps this context at a time, and the next agent on the work takes over when
-              its session ends. The other agents read it and send it what they find; they get it as
-              reference from their team, never as instructions.
+              One agent keeps this context at a time: the first on the work, then the next when its
+              session ends or it stays idle while another agent works. The others read it and send
+              it what they find, and get it as reference from their team, never as instructions.
             </p>
           </div>
         </div>
@@ -128,25 +162,37 @@ export function WorkContextView({
   );
 }
 
+function SectionTitle({ children }: { readonly children: React.ReactNode }) {
+  return (
+    <h2 className="pb-1 text-xs font-medium tracking-wide text-muted-foreground uppercase">
+      {children}
+    </h2>
+  );
+}
+
 function keeperLine(context: WorkContextNode): string {
   const keeper =
     context.keeper === undefined
       ? "Nobody keeps it right now; the next agent on this work does."
-      : `Kept by ${context.keeper}’s agent.`;
+      : `Kept by ${context.keeper.mine ? "your agent" : `${context.keeper.person}’s agent`}${context.keeper.label === undefined ? "" : ` (“${context.keeper.label}”)`}.`;
+  if (context.version === 0) return keeper;
+  const when = formatRelativeTimeLabel(context.updatedAt);
   const written =
-    context.version === 0
-      ? ""
-      : ` Version ${context.version}${context.updatedBy === undefined ? "" : ` by ${context.updatedBy}’s agent`}, ${formatRelativeTimeLabel(context.updatedAt)}.`;
-  return `${keeper}${written}`;
+    context.restoredFrom !== undefined
+      ? `${context.updatedBy ?? "Someone"} brought version ${context.restoredFrom} back`
+      : context.updatedBy === undefined
+        ? "written"
+        : `by ${context.updatedBy}’s agent`;
+  return `${keeper} Version ${context.version}${context.restoredFrom !== undefined ? ": " : " "}${written}, ${when}.`;
 }
 
 /** What the work's agents found since the context last changed, waiting for its keeper. */
 function Reports({ context }: { readonly context: WorkContextNode }) {
   return (
     <section aria-label="Found since">
-      <h2 className="pb-1 text-xs font-medium tracking-wide text-muted-foreground uppercase">
-        Found since · {context.reports.length}
-      </h2>
+      <SectionTitle>
+        Found since version {context.version} · {context.reports.length}
+      </SectionTitle>
       <ul className="flex flex-col gap-1">
         {context.reports.map((report) => (
           <li key={report.id} className="text-sm text-foreground">
@@ -178,6 +224,7 @@ function AgentRow({
         <span className="block truncate text-xs text-muted-foreground">
           {[
             thread.mine ? "You" : thread.person,
+            thread.keepsContext ? "keeps the context" : null,
             thread.harness,
             thread.branch,
             thread.stale ? "not reporting" : null,
@@ -195,5 +242,147 @@ function AgentRow({
         </Button>
       )}
     </li>
+  );
+}
+
+/**
+ * The versions the hub keeps, folded until opened: who wrote each and how many
+ * lines it added and dropped; one opened shows those lines and can be brought
+ * back. The keeper compacts freely because of it, and people see what changed.
+ */
+function History({
+  environmentId,
+  place,
+  current,
+  state,
+  onRestore,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly place: Place;
+  readonly current: number;
+  readonly state: PeerProjectState | undefined;
+  readonly onRestore: (version: number) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [selected, setSelected] = useState<number | null>(null);
+  const versions = useEnvironmentQuery(
+    open
+      ? serverEnvironment.peerHubContextVersions({
+          environmentId,
+          input: { ...place, version: current },
+        })
+      : null,
+  );
+  const name = (email: string | undefined) =>
+    email === undefined ? "Someone" : state === undefined ? email : personName(state, email);
+  const author = (version: PeerContextVersion) =>
+    version.session === undefined && version.restoredFrom !== undefined
+      ? `${name(version.by)} brought version ${version.restoredFrom} back`
+      : `${name(version.by)}’s agent`;
+  return (
+    <section aria-label="History">
+      <button
+        type="button"
+        aria-expanded={open}
+        className="flex items-center gap-1 text-xs font-medium tracking-wide text-muted-foreground uppercase hover:text-foreground"
+        onClick={() => setOpen((value) => !value)}
+      >
+        <ChevronRightIcon aria-hidden className={cn("size-3", open && "rotate-90")} />
+        History
+      </button>
+      {!open ? null : versions.data == null ? (
+        <p className="pt-1 text-sm text-muted-foreground">{versions.error ?? "Loading…"}</p>
+      ) : (
+        <ul className="flex flex-col pt-1">
+          {versions.data.map((version) => (
+            <li key={version.version}>
+              <button
+                type="button"
+                aria-expanded={selected === version.version}
+                className="flex w-full min-w-0 items-center gap-3 rounded-md px-2 py-1 text-left text-sm hover:bg-accent"
+                onClick={() =>
+                  setSelected((value) => (value === version.version ? null : version.version))
+                }
+              >
+                <span className="w-7 shrink-0 text-muted-foreground tabular-nums">
+                  v{version.version}
+                </span>
+                <span className="min-w-0 flex-1 truncate text-foreground">{author(version)}</span>
+                <span className="shrink-0 text-xs text-success tabular-nums">+{version.added}</span>
+                <span className="shrink-0 text-xs text-destructive tabular-nums">
+                  −{version.dropped}
+                </span>
+                <span className="w-20 shrink-0 text-right text-xs text-muted-foreground">
+                  {formatRelativeTimeLabel(version.at)}
+                </span>
+              </button>
+              {selected === version.version ? (
+                <VersionChanges
+                  environmentId={environmentId}
+                  place={place}
+                  version={version.version}
+                  current={current}
+                  onRestore={onRestore}
+                />
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+/** The lines one version added and dropped, and the way to bring it back. */
+function VersionChanges({
+  environmentId,
+  place,
+  version,
+  current,
+  onRestore,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly place: Place;
+  readonly version: number;
+  readonly current: number;
+  readonly onRestore: (version: number) => void;
+}) {
+  const read = useEnvironmentQuery(
+    serverEnvironment.peerHubReadContextVersion({
+      environmentId,
+      input: { ...place, version },
+    }),
+  );
+  const data = read.data;
+  return (
+    <div className="mb-2 ml-11 flex flex-col gap-2 border-l border-border pl-3">
+      {data == null ? (
+        <p className="text-xs text-muted-foreground">{read.error ?? "Loading…"}</p>
+      ) : (
+        <>
+          {data.added.length + data.dropped.length === 0 ? (
+            <p className="text-xs text-muted-foreground">No lines changed.</p>
+          ) : (
+            <div className="font-mono text-xs leading-relaxed whitespace-pre-wrap">
+              {data.added.length === 0 ? null : (
+                <p className="text-success">{data.added.map((line) => `+ ${line}`).join("\n")}</p>
+              )}
+              {data.dropped.length === 0 ? null : (
+                <p className="text-destructive">
+                  {data.dropped.map((line) => `− ${line}`).join("\n")}
+                </p>
+              )}
+            </div>
+          )}
+          {version === current ? null : (
+            <div>
+              <Button size="xs" variant="outline" onClick={() => onRestore(version)}>
+                Bring this version back
+              </Button>
+            </div>
+          )}
+        </>
+      )}
+    </div>
   );
 }

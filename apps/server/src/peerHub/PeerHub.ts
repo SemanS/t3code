@@ -39,6 +39,9 @@ import {
   ThreadId,
   type PeerHubAgentInput,
   type PeerHubContextInput,
+  type PeerHubContextVersionInput,
+  type PeerContextVersion,
+  type PeerContextVersionText,
   type PeerHubObserveInput,
   type PeerHubShareThreadInput,
   type PeerHubAssignThreadInput,
@@ -417,6 +420,17 @@ export class PeerHub extends Context.Service<
     readonly readContext: (
       input: PeerHubContextInput,
     ) => Effect.Effect<PeerWorkContextText | null, PeerHubError>;
+    /** The versions of a shared context the hub keeps, newest first. */
+    readonly contextVersions: (
+      input: PeerHubContextInput,
+    ) => Effect.Effect<ReadonlyArray<PeerContextVersion>, PeerHubError>;
+    readonly readContextVersion: (
+      input: PeerHubContextVersionInput,
+    ) => Effect.Effect<PeerContextVersionText | null, PeerHubError>;
+    /** Brings an older version of a shared context back; its keeper goes on from it. */
+    readonly restoreContext: (
+      input: PeerHubContextVersionInput,
+    ) => Effect.Effect<PeerHubStatus, PeerHubError>;
     /** Shares a local project's repository with a workspace, as a project everyone works on. */
     readonly shareProject: (
       input: PeerHubShareProjectInput,
@@ -812,6 +826,7 @@ const make = Effect.gen(function* () {
         files: session.files,
         claims: session.claims,
         local: session.local,
+        ...(session.activeAt === undefined ? {} : { activeAt: session.activeAt }),
       })),
       findings: snapshot.findings.map((finding) => ({
         id: finding.id,
@@ -830,6 +845,10 @@ const make = Effect.gen(function* () {
         ...(context.keeper === undefined ? {} : { keeper: context.keeper }),
         updatedAt: context.updatedAt,
         ...(context.updatedBy === undefined ? {} : { updatedBy: context.updatedBy }),
+        ...(context.updatedSession === undefined ? {} : { updatedSession: context.updatedSession }),
+        ...(context.restoredFrom === undefined ? {} : { restoredFrom: context.restoredFrom }),
+        ...(context.gist === undefined ? {} : { gist: context.gist }),
+        bytes: context.bytes ?? 0,
       })),
       overlaps: snapshot.overlaps.map((overlap) => ({
         id: overlap.id,
@@ -2000,6 +2019,14 @@ const make = Effect.gen(function* () {
           withHub((hubUrl, session) =>
             hubApi.readContext(hubUrl, session, workspace, project, scope),
           ),
+        contextVersions: (workspace, project, scope) =>
+          withHub((hubUrl, session) =>
+            hubApi.contextVersions(hubUrl, session, workspace, project, scope),
+          ),
+        readContextVersion: (workspace, project, scope, version) =>
+          withHub((hubUrl, session) =>
+            hubApi.contextVersion(hubUrl, session, workspace, project, scope, version),
+          ),
         keepContext: (workspace, project, scope, agentSession, release) =>
           withHub((hubUrl, session) =>
             hubApi.keepContext(hubUrl, session, workspace, project, scope, {
@@ -2442,9 +2469,49 @@ const make = Effect.gen(function* () {
         hubApi.readContext(hubUrl, session, input.workspace, input.project, input.scope),
       ),
       Effect.map((context) =>
-        context === null ? null : { ...context, workspace: input.workspace },
+        context === null
+          ? null
+          : { ...context, workspace: input.workspace, bytes: context.bytes ?? context.text.length },
       ),
     );
+
+  const contextVersions: PeerHub["Service"]["contextVersions"] = (input) =>
+    requireSession.pipe(
+      Effect.flatMap(({ hubUrl, session }) =>
+        hubApi.contextVersions(hubUrl, session, input.workspace, input.project, input.scope),
+      ),
+    );
+
+  const readContextVersion: PeerHub["Service"]["readContextVersion"] = (input) =>
+    requireSession.pipe(
+      Effect.flatMap(({ hubUrl, session }) =>
+        hubApi.contextVersion(
+          hubUrl,
+          session,
+          input.workspace,
+          input.project,
+          input.scope,
+          input.version,
+        ),
+      ),
+    );
+
+  const restoreContext: PeerHub["Service"]["restoreContext"] = Effect.fn("PeerHub.restoreContext")(
+    function* (input) {
+      const { hubUrl, session } = yield* requireSession;
+      yield* hubApi.restoreContext(
+        hubUrl,
+        session,
+        input.workspace,
+        input.project,
+        input.scope,
+        input.version,
+      );
+      // Its keeper here, if any, hears of it at its next step; the status follows the new version.
+      broker?.hubChanged();
+      return yield* publish;
+    },
+  );
 
   const watchAgent: PeerHub["Service"]["watchAgent"] = (input) =>
     Stream.tick("1 second").pipe(
@@ -2797,6 +2864,9 @@ const make = Effect.gen(function* () {
     shareThread,
     observeThread,
     readContext,
+    contextVersions,
+    readContextVersion,
+    restoreContext,
     shareProject,
     unshareProject,
   });

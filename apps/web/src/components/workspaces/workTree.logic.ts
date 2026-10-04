@@ -63,6 +63,8 @@ export interface WorkThreadNode {
   readonly agent: WorkAgent | undefined;
   /** When it was last active, for threads on this computer. */
   readonly activeAt: string | undefined;
+  /** Its agent keeps the shared context of the work it is on. */
+  readonly keepsContext: boolean;
 }
 
 export type WorkAgent =
@@ -93,11 +95,26 @@ export interface WorkContextNode {
   /** `task:<id>`, or `project`. */
   readonly scope: string;
   readonly version: number;
-  /** Whose agent keeps it, while that agent is at work. */
-  readonly keeper: string | undefined;
+  /** Where the work stands, in a line, as its keeper put it. */
+  readonly gist: string | undefined;
+  /** About how many tokens its text takes. */
+  readonly tokens: number;
+  /** The agent keeping it, while that agent reports. */
+  readonly keeper:
+    | {
+        readonly person: string;
+        readonly mine: boolean;
+        readonly session: string;
+        /** What its session is called: the thread's title or the agent's first prompt. */
+        readonly label: string | undefined;
+        readonly since: string;
+      }
+    | undefined;
   readonly updatedAt: string;
-  /** Whose agent wrote the version there is. */
+  /** Who wrote the version there is: the keeper's person, or the person who brought an older one back. */
   readonly updatedBy: string | undefined;
+  /** The older version a person brought back, when that is what the version there is. */
+  readonly restoredFrom: number | undefined;
   /** What the work's agents found since it last changed: for its keeper to fold in, newest first. */
   readonly reports: ReadonlyArray<{
     readonly id: string;
@@ -176,7 +193,8 @@ function rollup(threads: ReadonlyArray<WorkThreadNode>, done: boolean): PeerWork
   return "idle";
 }
 
-function personName(project: PeerProjectState, email: string): string {
+/** A member as people call them: their name in the project, else the start of their address. */
+export function personName(project: PeerProjectState, email: string): string {
   return (
     project.project.members.find((m) => m.email === email)?.name ?? email.split("@")[0] ?? email
   );
@@ -194,19 +212,32 @@ function contextNode(
     (c) => c.workspace === workspace && c.project === project && c.scope === scope,
   );
   if (context === undefined) return undefined;
+  const keeper = context.keeper;
   const keeping =
-    context.keeper !== undefined &&
-    status.coordination.sessions.some((session) => session.id === context.keeper?.session);
+    keeper === undefined
+      ? undefined
+      : status.coordination.sessions.find((session) => session.id === keeper.session);
   const since = context.version === 0 ? 0 : Date.parse(context.updatedAt);
   return {
     workspace,
     project,
     scope,
     version: context.version,
+    gist: context.gist,
+    tokens: Math.round(context.bytes / 4),
     keeper:
-      keeping && context.keeper !== undefined ? personName(state, context.keeper.email) : undefined,
+      keeper === undefined || keeping === undefined
+        ? undefined
+        : {
+            person: personName(state, keeper.email),
+            mine: keeper.email === status.email,
+            session: keeper.session,
+            label: keeping.label,
+            since: keeper.since,
+          },
     updatedAt: context.updatedAt,
     updatedBy: context.updatedBy === undefined ? undefined : personName(state, context.updatedBy),
+    restoredFrom: context.restoredFrom,
     reports: status.coordination.findings
       .filter(
         (finding) =>
@@ -277,6 +308,7 @@ function projectTree(input: {
           model: thread.modelSelection.model,
         },
         activeAt: thread.latestUserMessageAt ?? thread.updatedAt,
+        keepsContext: false,
       },
     });
   }
@@ -300,6 +332,7 @@ function projectTree(input: {
         observable: shared.has(agent.id),
         agent: agent.agent === undefined ? undefined : { harness: agent.agent },
         activeAt: undefined,
+        keepsContext: false,
       },
     });
   }
@@ -359,15 +392,24 @@ function projectTree(input: {
         observable: thread.observable === true,
         agent: thread.harness === undefined ? undefined : { harness: thread.harness },
         activeAt: undefined,
+        keepsContext: false,
       },
     });
   }
 
+  // A herdr agent's thread is known by its session (`herdr:claude:<id>`, after its computer for a
+  // colleague's), the keeper by the session alone.
+  const keeping = (context: WorkContextNode | undefined) => (node: WorkThreadNode) =>
+    context?.keeper !== undefined &&
+    /(?:^|:)herdr:(.+)$/.exec(node.key)?.[1] === context.keeper.session
+      ? { ...node, keepsContext: true }
+      : node;
   const taskNodes = new Map<string, WorkTaskNode>();
   for (const task of work.tasks) {
+    const context = contextNode(status, workspace.slug, state, `task:${task.id}`);
     const threads = placed
       .filter((entry) => entry.task === task.id)
-      .map((entry) => entry.node)
+      .map((entry) => keeping(context)(entry.node))
       .toSorted(byActivity);
     taskNodes.set(task.id, {
       id: task.id,
@@ -378,9 +420,10 @@ function projectTree(input: {
       threads,
       removable:
         task.createdBy === me || state.project.role === "lead" || workspace.role !== "member",
-      context: contextNode(status, workspace.slug, state, `task:${task.id}`),
+      context,
     });
   }
+  const projectContext = contextNode(status, workspace.slug, state, "project");
   // Areas the project declares come first, in its order; then those tasks name; then no area.
   const areaNames = [...work.areas];
   for (const task of work.tasks) {
@@ -402,9 +445,9 @@ function projectTree(input: {
     areas,
     unsorted: placed
       .filter((entry) => entry.task === null)
-      .map((entry) => entry.node)
+      .map((entry) => keeping(projectContext)(entry.node))
       .toSorted(byActivity),
-    context: contextNode(status, workspace.slug, state, "project"),
+    context: projectContext,
     tasks: work.tasks,
   };
 }
@@ -525,6 +568,11 @@ export function activeAgents(input: {
   const rank = (agent: ActiveAgentNode) =>
     agent.needs === undefined ? 3 + STATUS_ORDER[agent.status] : NEED_ORDER[agent.needs];
   return agents.toSorted((a, b) => rank(a) - rank(b) || a.title.localeCompare(b.title));
+}
+
+/** A context's size the way people read it: `~2.1k tokens`. */
+export function contextSize(tokens: number): string {
+  return tokens >= 1000 ? `~${(tokens / 1000).toFixed(1)}k tokens` : `~${tokens} tokens`;
 }
 
 /** A task the way lists and menus name it: `KRK-812 · Split Payments`. */

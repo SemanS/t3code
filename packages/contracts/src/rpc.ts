@@ -340,6 +340,9 @@ import {
   PeerHubAgentInput,
   PeerHubObserveInput,
   PeerHubContextInput,
+  PeerHubContextVersionInput,
+  PeerContextVersion,
+  PeerContextVersionText,
   PeerWorkContextText,
   PeerHubPromptAgentInput,
   PeerHubShareThreadInput,
@@ -516,6 +519,9 @@ export const WS_METHODS = {
   peerHubShareThread: "peerHub.shareThread",
   peerHubObserveThread: "peerHub.observeThread",
   peerHubReadContext: "peerHub.readContext",
+  peerHubContextVersions: "peerHub.contextVersions",
+  peerHubReadContextVersion: "peerHub.readContextVersion",
+  peerHubRestoreContext: "peerHub.restoreContext",
   peerHubShareProject: "peerHub.shareProject",
   peerHubUnshareProject: "peerHub.unshareProject",
   peerHubInvite: "peerHub.invite",
@@ -1861,6 +1867,26 @@ const WsPeerHubReadContextRpc = Rpc.make(WS_METHODS.peerHubReadContext, {
   error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
 });
 
+/** The versions of a shared context the hub keeps, newest first. */
+const WsPeerHubContextVersionsRpc = Rpc.make(WS_METHODS.peerHubContextVersions, {
+  payload: PeerHubContextInput,
+  success: Schema.Array(PeerContextVersion),
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
+const WsPeerHubReadContextVersionRpc = Rpc.make(WS_METHODS.peerHubReadContextVersion, {
+  payload: PeerHubContextVersionInput,
+  success: Schema.NullOr(PeerContextVersionText),
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
+/** A person brings an older version of a shared context back, as a new version. */
+const WsPeerHubRestoreContextRpc = Rpc.make(WS_METHODS.peerHubRestoreContext, {
+  payload: PeerHubContextVersionInput,
+  success: PeerHubStatus,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
 const WsPeerHubShareProjectRpc = Rpc.make(WS_METHODS.peerHubShareProject, {
   payload: PeerHubShareProjectInput,
   success: PeerHubStatus,
@@ -1997,6 +2023,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsPeerHubShareThreadRpc,
   WsPeerHubObserveThreadRpc,
   WsPeerHubReadContextRpc,
+  WsPeerHubContextVersionsRpc,
+  WsPeerHubReadContextVersionRpc,
+  WsPeerHubRestoreContextRpc,
   WsPeerHubShareProjectRpc,
   WsPeerHubUnshareProjectRpc,
   WsPeerHubInviteRpc,

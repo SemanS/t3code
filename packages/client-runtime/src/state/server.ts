@@ -1156,6 +1156,19 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:peer-hub:read-context",
       tag: WS_METHODS.peerHubReadContext,
     }),
+    /** The versions of a shared context the hub keeps; its current version in the input reads them again. */
+    peerHubContextVersions: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:peer-hub:context-versions",
+      tag: WS_METHODS.peerHubContextVersions,
+    }),
+    peerHubReadContextVersion: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:peer-hub:read-context-version",
+      tag: WS_METHODS.peerHubReadContextVersion,
+    }),
+    peerHubRestoreContext: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:restore-context",
+      tag: WS_METHODS.peerHubRestoreContext,
+    }),
     peerHubShareProject: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:peer-hub:share-project",
       tag: WS_METHODS.peerHubShareProject,

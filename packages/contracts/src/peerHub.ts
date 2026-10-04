@@ -347,6 +347,8 @@ export const PeerCoordSession = Schema.Struct({
   claims: Schema.Array(Schema.String),
   /** This computer runs it. */
   local: Schema.Boolean,
+  /** When its agent last did something. */
+  activeAt: Schema.optional(Schema.String),
 });
 export type PeerCoordSession = typeof PeerCoordSession.Type;
 
@@ -413,8 +415,14 @@ export const PeerWorkContext = Schema.Struct({
   version: Schema.Number,
   keeper: Schema.optional(PeerContextKeeper),
   updatedAt: Schema.String,
-  /** Whose agent wrote this version. */
+  /** Who wrote this version: the keeper's person, or the person who brought an older one back. */
   updatedBy: Schema.optional(Schema.String),
+  /** The agent session that wrote it; none when a person brought an older version back. */
+  updatedSession: Schema.optional(Schema.String),
+  restoredFrom: Schema.optional(Schema.Number),
+  /** Where the work stands, in a line. */
+  gist: Schema.optional(Schema.String),
+  bytes: Schema.Number,
 });
 export type PeerWorkContext = typeof PeerWorkContext.Type;
 
@@ -423,6 +431,33 @@ export const PeerWorkContextText = Schema.Struct({
   text: Schema.String,
 });
 export type PeerWorkContextText = typeof PeerWorkContextText.Type;
+
+/** A kept version of a shared context: who wrote it, when, and how much it changed. */
+export const PeerContextVersion = Schema.Struct({
+  version: Schema.Number,
+  at: Schema.String,
+  by: Schema.optional(Schema.String),
+  /** The agent session that wrote it; none when a person brought an older version back. */
+  session: Schema.optional(Schema.String),
+  restoredFrom: Schema.optional(Schema.Number),
+  bytes: Schema.Number,
+  added: Schema.Number,
+  dropped: Schema.Number,
+});
+export type PeerContextVersion = typeof PeerContextVersion.Type;
+
+/** A kept version with its text and the lines it added and dropped. */
+export const PeerContextVersionText = Schema.Struct({
+  version: Schema.Number,
+  at: Schema.String,
+  by: Schema.optional(Schema.String),
+  session: Schema.optional(Schema.String),
+  restoredFrom: Schema.optional(Schema.Number),
+  added: Schema.Array(Schema.String),
+  dropped: Schema.Array(Schema.String),
+  text: Schema.String,
+});
+export type PeerContextVersionText = typeof PeerContextVersionText.Type;
 
 export const PeerCoordinationState = Schema.Struct({
   enabled: Schema.Boolean,
@@ -635,6 +670,15 @@ export const PeerHubContextInput = Schema.Struct({
   version: Schema.optional(Schema.Number),
 });
 export type PeerHubContextInput = typeof PeerHubContextInput.Type;
+
+/** One kept version of a shared context. */
+export const PeerHubContextVersionInput = Schema.Struct({
+  workspace: TrimmedNonEmptyString,
+  project: TrimmedNonEmptyString,
+  scope: TrimmedNonEmptyString,
+  version: Schema.Number,
+});
+export type PeerHubContextVersionInput = typeof PeerHubContextVersionInput.Type;
 
 export const PeerHubAgentInput = Schema.Struct({ agentId: TrimmedNonEmptyString });
 export type PeerHubAgentInput = typeof PeerHubAgentInput.Type;
