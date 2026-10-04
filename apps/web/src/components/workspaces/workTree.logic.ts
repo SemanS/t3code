@@ -52,10 +52,7 @@ export interface WorkThreadNode {
   readonly open: WorkOpen | undefined;
   /** This computer's threads can be placed under a task. */
   readonly placeable: boolean;
-  /**
-   * Why a colleague's thread concerns you, e.g. its agent overlaps with yours;
-   * such a thread shows with yours instead of folded into Team activity.
-   */
+  /** Why a colleague's thread concerns you, e.g. its agent overlaps with yours. */
   readonly concerns: string | undefined;
   /** Its owner lets the team watch it live: yours when you shared it, a colleague's to observe. */
   readonly observable: boolean;
@@ -82,11 +79,31 @@ export interface WorkTaskNode {
   readonly threads: ReadonlyArray<WorkThreadNode>;
   /** Its creator, the project's leads and the workspace's admins may remove it. */
   readonly removable: boolean;
-  /** What the team's agents found on it, newest first. */
-  readonly findings: ReadonlyArray<{
+  /** Its shared context, once an agent on it started one. */
+  readonly context: WorkContextNode | undefined;
+}
+
+/**
+ * A task's shared context (or a project's, for work on no task): kept by one
+ * agent session at a time, read by the other agents on it and by people.
+ */
+export interface WorkContextNode {
+  readonly workspace: string;
+  readonly project: string;
+  /** `task:<id>`, or `project`. */
+  readonly scope: string;
+  readonly version: number;
+  /** Whose agent keeps it, while that agent is at work. */
+  readonly keeper: string | undefined;
+  readonly updatedAt: string;
+  /** Whose agent wrote the version there is. */
+  readonly updatedBy: string | undefined;
+  /** What the work's agents found since it last changed: for its keeper to fold in, newest first. */
+  readonly reports: ReadonlyArray<{
     readonly id: string;
     readonly person: string;
     readonly text: string;
+    readonly at: string;
   }>;
 }
 
@@ -104,6 +121,8 @@ export interface WorkProjectNode {
   readonly areas: ReadonlyArray<WorkAreaNode>;
   /** Threads on no task yet. */
   readonly unsorted: ReadonlyArray<WorkThreadNode>;
+  /** The shared context of the project's work on no task. */
+  readonly context: WorkContextNode | undefined;
   readonly tasks: ReadonlyArray<PeerTask>;
 }
 
@@ -161,6 +180,48 @@ function personName(project: PeerProjectState, email: string): string {
   return (
     project.project.members.find((m) => m.email === email)?.name ?? email.split("@")[0] ?? email
   );
+}
+
+/** A shared context as the tree shows it, with what was found on its work since it last changed. */
+function contextNode(
+  status: PeerHubStatus,
+  workspace: string,
+  state: PeerProjectState,
+  scope: string,
+): WorkContextNode | undefined {
+  const project = state.project.id;
+  const context = status.coordination.contexts.find(
+    (c) => c.workspace === workspace && c.project === project && c.scope === scope,
+  );
+  if (context === undefined) return undefined;
+  const keeping =
+    context.keeper !== undefined &&
+    status.coordination.sessions.some((session) => session.id === context.keeper?.session);
+  const since = context.version === 0 ? 0 : Date.parse(context.updatedAt);
+  return {
+    workspace,
+    project,
+    scope,
+    version: context.version,
+    keeper:
+      keeping && context.keeper !== undefined ? personName(state, context.keeper.email) : undefined,
+    updatedAt: context.updatedAt,
+    updatedBy: context.updatedBy === undefined ? undefined : personName(state, context.updatedBy),
+    reports: status.coordination.findings
+      .filter(
+        (finding) =>
+          finding.workspace === workspace &&
+          finding.project === project &&
+          (finding.task === undefined ? "project" : `task:${finding.task}`) === scope &&
+          Date.parse(finding.at) > since,
+      )
+      .map((finding) => ({
+        id: finding.id,
+        person: personName(state, finding.email),
+        text: finding.text,
+        at: finding.at,
+      })),
+  };
 }
 
 function projectTree(input: {
@@ -317,18 +378,7 @@ function projectTree(input: {
       threads,
       removable:
         task.createdBy === me || state.project.role === "lead" || workspace.role !== "member",
-      findings: status.coordination.findings
-        .filter(
-          (finding) =>
-            finding.workspace === workspace.slug &&
-            finding.project === state.project.id &&
-            finding.task === task.id,
-        )
-        .map((finding) => ({
-          id: finding.id,
-          person: personName(state, finding.email),
-          text: finding.text,
-        })),
+      context: contextNode(status, workspace.slug, state, `task:${task.id}`),
     });
   }
   // Areas the project declares come first, in its order; then those tasks name; then no area.
@@ -354,6 +404,7 @@ function projectTree(input: {
       .filter((entry) => entry.task === null)
       .map((entry) => entry.node)
       .toSorted(byActivity),
+    context: contextNode(status, workspace.slug, state, "project"),
     tasks: work.tasks,
   };
 }
@@ -474,44 +525,6 @@ export function activeAgents(input: {
   const rank = (agent: ActiveAgentNode) =>
     agent.needs === undefined ? 3 + STATUS_ORDER[agent.status] : NEED_ORDER[agent.needs];
   return agents.toSorted((a, b) => rank(a) - rank(b) || a.title.localeCompare(b.title));
-}
-
-export interface ThreadSections {
-  /** Your threads, on any computer. */
-  readonly mine: ReadonlyArray<WorkThreadNode>;
-  /** Colleagues' threads that concern you, shown with yours. */
-  readonly surfaced: ReadonlyArray<WorkThreadNode>;
-  /** Everyone else's, by person, folded into Team activity. */
-  readonly team: ReadonlyArray<{
-    readonly person: string;
-    readonly threads: ReadonlyArray<WorkThreadNode>;
-  }>;
-  readonly teamCount: number;
-}
-
-/**
- * Shared context, not shared clutter: a task lists your threads, plus a
- * colleague's only when it concerns you; the rest of the team's work waits,
- * by person, until you open Team activity.
- */
-export function threadSections(threads: ReadonlyArray<WorkThreadNode>): ThreadSections {
-  const mine = threads.filter((thread) => thread.mine);
-  const surfaced = threads.filter((thread) => !thread.mine && thread.concerns !== undefined);
-  const rest = threads.filter((thread) => !thread.mine && thread.concerns === undefined);
-  const people = new Map<string, WorkThreadNode[]>();
-  for (const thread of rest) {
-    const list = people.get(thread.person);
-    if (list === undefined) people.set(thread.person, [thread]);
-    else list.push(thread);
-  }
-  return {
-    mine,
-    surfaced,
-    team: [...people]
-      .map(([person, list]) => ({ person, threads: list }))
-      .toSorted((a, b) => a.person.localeCompare(b.person)),
-    teamCount: rest.length,
-  };
 }
 
 /** A task the way lists and menus name it: `KRK-812 · Split Payments`. */

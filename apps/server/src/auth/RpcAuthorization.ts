@@ -91,6 +91,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.peerHubProjectUsage]: AuthOrchestrationReadScope,
   [WS_METHODS.peerHubWatchAgent]: AuthOrchestrationReadScope,
   [WS_METHODS.peerHubObserveThread]: AuthOrchestrationReadScope,
+  [WS_METHODS.peerHubReadContext]: AuthOrchestrationReadScope,
   [WS_METHODS.peerHubFindWorkspace]: AuthOrchestrationReadScope,
   // Tasks and threads are shared work, so changing them is operating, like starting a thread;
   // sharing a project hands the workspace a repository, so it belongs to the owner.

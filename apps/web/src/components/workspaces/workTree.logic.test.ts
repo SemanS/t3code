@@ -15,7 +15,6 @@ import {
   taskMenuItems,
   taskNamedIn,
   threadMenuItems,
-  threadSections,
 } from "./workTree.logic";
 
 const HERE = EnvironmentId.make("env-here");
@@ -178,6 +177,7 @@ function status(project: PeerProjectState, role: "owner" | "member" = "owner"): 
       sessions: [],
       overlaps: [],
       findings: [],
+      contexts: [],
     },
     sharedThreads: ["peer:t1"],
     syncing: false,
@@ -292,8 +292,86 @@ describe("buildWorkTree", () => {
   });
 });
 
-describe("threadSections", () => {
-  it("lists your threads, brings out a colleague's that overlaps with yours, folds the rest by person", () => {
+describe("shared contexts", () => {
+  const session = (id: string, email: string) => ({
+    id,
+    workspace: "acme",
+    project: "kirkwood",
+    email,
+    label: "work",
+    status: "working" as const,
+    files: ["src/pay.ts"],
+    claims: [],
+    local: email === "slavo@acme.test",
+  });
+
+  it("gives a task its context: who keeps it while at work, and what was found since it changed", () => {
+    const base = status(kirkwood());
+    const finding = (id: string, text: string, at: string, task?: string) => ({
+      id,
+      workspace: "acme",
+      project: "kirkwood",
+      ...(task === undefined ? {} : { task }),
+      text,
+      email: "chino@acme.test",
+      at,
+    });
+    const keeper = (session: string, email: string) => ({
+      session,
+      email,
+      environment: "laptop",
+      since: "2026-10-03T10:00:00Z",
+    });
+    const [tree] = buildWorkTree({
+      status: {
+        ...base,
+        coordination: {
+          ...base.coordination,
+          sessions: [session("claude:s-yev", "yev@acme.test")],
+          findings: [
+            finding("f1", "Stripe retries webhooks for 3 days", "2026-10-03T11:50:00Z", "krk-812"),
+            finding("f2", "Folded in already", "2026-10-03T11:00:00Z", "krk-812"),
+            finding("f3", "Work outside tasks", "2026-10-03T11:55:00Z"),
+          ],
+          contexts: [
+            {
+              workspace: "acme",
+              project: "kirkwood",
+              scope: "task:krk-812",
+              version: 4,
+              keeper: keeper("claude:s-yev", "yev@acme.test"),
+              updatedAt: "2026-10-03T11:30:00Z",
+              updatedBy: "yev@acme.test",
+            },
+            {
+              workspace: "acme",
+              project: "kirkwood",
+              scope: "project",
+              version: 0,
+              keeper: keeper("claude:ended", "chino@acme.test"),
+              updatedAt: "2026-10-03T09:00:00Z",
+            },
+          ],
+        },
+      },
+      localThreads: LOCAL,
+      now: NOW,
+    });
+    const task = tree?.areas[0]?.tasks[0];
+    expect([task?.id, task?.context?.keeper, task?.context?.updatedBy]).toEqual([
+      "krk-812",
+      "Yev",
+      "Yev",
+    ]);
+    expect(task?.context?.reports.map((r) => r.text)).toEqual([
+      "Stripe retries webhooks for 3 days",
+    ]);
+    expect(tree?.context?.keeper).toBeUndefined();
+    expect(tree?.context?.reports.map((r) => r.text)).toEqual(["Work outside tasks"]);
+    expect(tree?.areas[0]?.tasks[1]?.context).toBeUndefined();
+  });
+
+  it("says why a colleague's thread concerns you", () => {
     const project = kirkwood();
     const yevAgent = {
       id: "herdr:claude:s-yev",
@@ -305,58 +383,41 @@ describe("threadSections", () => {
       environment: "yev-laptop",
       seenAt: "2026-10-03T11:59:30Z",
     };
-    const chino = { ...yevAgent, id: "peer:c1", title: "Payment copy", email: "chino@acme.test" };
     const base = status({
       ...project,
-      work: { ...project.work, threads: [...project.work.threads, yevAgent, chino] },
+      work: { ...project.work, threads: [...project.work.threads, yevAgent] },
     });
-    const session = (id: string, email: string) => ({
-      id,
-      workspace: "acme",
-      project: "kirkwood",
-      email,
-      label: "work",
-      status: "working" as const,
-      files: ["src/pay.ts"],
-      claims: [],
-      local: email === "slavo@acme.test",
-    });
-    const withOverlap = {
-      ...base,
-      coordination: {
-        ...base.coordination,
-        sessions: [
-          session("claude:s-me", "slavo@acme.test"),
-          session("claude:s-yev", "yev@acme.test"),
-        ],
-        overlaps: [
-          {
-            id: "o1",
-            workspace: "acme",
-            project: "kirkwood",
-            sessions: ["claude:s-me", "claude:s-yev"],
-            files: ["src/pay.ts"],
-            state: "open" as const,
-            notes: [],
-            updatedAt: "2026-10-03T11:59:00Z",
-          },
-        ],
+    const [tree] = buildWorkTree({
+      status: {
+        ...base,
+        coordination: {
+          ...base.coordination,
+          sessions: [
+            session("claude:s-me", "slavo@acme.test"),
+            session("claude:s-yev", "yev@acme.test"),
+          ],
+          overlaps: [
+            {
+              id: "o1",
+              workspace: "acme",
+              project: "kirkwood",
+              sessions: ["claude:s-me", "claude:s-yev"],
+              files: ["src/pay.ts"],
+              state: "open" as const,
+              notes: [],
+              updatedAt: "2026-10-03T11:59:00Z",
+            },
+          ],
+        },
       },
-    };
-    const [tree] = buildWorkTree({ status: withOverlap, localThreads: LOCAL, now: NOW });
-    const sections = threadSections(tree?.areas[0]?.tasks[0]?.threads ?? []);
-    expect(sections.mine.map((t) => t.title)).toEqual([
-      "Investigation for KRK-812",
-      "Main implementation",
-    ]);
-    expect(sections.surfaced.map((t) => [t.title, t.concerns])).toEqual([
-      ["Pay form validation", "Its agent and yours both change src/pay.ts"],
-    ]);
-    expect(sections.team.map((g) => [g.person, g.threads.map((t) => t.title)])).toEqual([
-      ["Chino", ["Payment copy"]],
-      ["Yev", ["UI adjustments"]],
-    ]);
-    expect(sections.teamCount).toBe(2);
+      localThreads: LOCAL,
+      now: NOW,
+    });
+    const threads = tree?.areas[0]?.tasks[0]?.threads ?? [];
+    expect(threads.find((t) => t.title === "Pay form validation")?.concerns).toBe(
+      "Its agent and yours both change src/pay.ts",
+    );
+    expect(threads.find((t) => t.title === "UI adjustments")?.concerns).toBeUndefined();
   });
 });
 

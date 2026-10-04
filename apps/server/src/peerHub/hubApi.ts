@@ -137,11 +137,44 @@ const HubFinding = Schema.Struct({
 });
 export type HubFinding = typeof HubFinding.Type;
 
+const HubContextKeeper = Schema.Struct({
+  session: Schema.String,
+  email: Schema.String,
+  environment: Schema.String,
+  since: Schema.String,
+});
+export type HubContextKeeper = typeof HubContextKeeper.Type;
+
+/** A task's (or a project's) shared context and who keeps it, without its text. */
+const HubContext = Schema.Struct({
+  project: Schema.String,
+  scope: Schema.String,
+  version: Schema.Number,
+  keeper: Schema.optional(HubContextKeeper),
+  updatedAt: Schema.String,
+  updatedBy: Schema.optional(Schema.String),
+});
+export type HubContext = typeof HubContext.Type;
+
+const HubContextText = Schema.Struct({ ...HubContext.fields, text: Schema.String });
+export type HubContextText = typeof HubContextText.Type;
+
+/** Why the hub would not let a session keep or write a context. */
+export type ContextRefusal =
+  | { readonly refused: "kept"; readonly keeper: HubContextKeeper | undefined }
+  | { readonly refused: "stale"; readonly current: HubContextText };
+
+const KeeperDetails = Schema.Struct({ keeper: Schema.optional(Schema.NullOr(HubContextKeeper)) });
+const decodeKeeperDetails = Schema.decodeUnknownOption(KeeperDetails);
+const decodeContextText = Schema.decodeUnknownOption(HubContextText);
+
 const CoordView = Schema.Struct({
   sessions: Schema.Array(HubCoordSession),
   overlaps: Schema.Array(HubOverlap),
   /** A hub from before findings has none. */
   findings: Schema.optional(Schema.Array(HubFinding)),
+  /** Nor before shared contexts. */
+  contexts: Schema.optional(Schema.Array(HubContext)),
   at: Schema.String,
 });
 export type HubCoordView = typeof CoordView.Type;
@@ -164,7 +197,11 @@ export interface ReportedSession {
 
 const Ok = Schema.Struct({});
 const ErrorBody = Schema.Struct({
-  error: Schema.Struct({ code: Schema.String, message: Schema.String }),
+  error: Schema.Struct({
+    code: Schema.String,
+    message: Schema.String,
+    details: Schema.optional(Schema.Unknown),
+  }),
 });
 const decodeErrorBody = Schema.decodeUnknownOption(ErrorBody);
 
@@ -228,6 +265,8 @@ export const make = Effect.gen(function* () {
       readonly body?: unknown;
       /** What a 404 means instead of an error, e.g. "no such workspace". */
       readonly notFound?: { readonly value: Missing };
+      /** What a 409 means instead of an error, from its code and details; undefined: an error. */
+      readonly conflict?: (code: string, details: unknown) => Missing | undefined;
     },
   ): Effect.Effect<S["Type"] | Missing, PeerHubError> =>
     Effect.gen(function* () {
@@ -267,6 +306,10 @@ export const make = Effect.gen(function* () {
       if (response.status === 404 && input.notFound !== undefined) return input.notFound.value;
       if (response.status < 200 || response.status >= 300) {
         const decoded = decodeErrorBody(json);
+        if (response.status === 409 && input.conflict !== undefined && decoded._tag === "Some") {
+          const meant = input.conflict(decoded.value.error.code, decoded.value.error.details);
+          if (meant !== undefined) return meant;
+        }
         if (
           response.status === 401 &&
           decoded._tag === "Some" &&
@@ -486,6 +529,75 @@ export const make = Effect.gen(function* () {
         method: "POST",
         session,
         body,
+      }),
+
+    /** A task's shared context with its text, or null when it has none. */
+    readContext: (hubUrl: string, session: string, slug: string, project: string, scope: string) =>
+      request(HubContextText, {
+        hubUrl,
+        path: workspacePath(slug, `/contexts/${segment(project)}/${segment(scope)}`),
+        session,
+        notFound: { value: null },
+      }),
+
+    /**
+     * Asks for an agent session to keep a shared context (or, with `release`,
+     * gives it up): the context with its text, or who keeps it instead.
+     */
+    keepContext: (
+      hubUrl: string,
+      session: string,
+      slug: string,
+      project: string,
+      scope: string,
+      body: { readonly environment: string; readonly session: string; readonly release?: boolean },
+    ) =>
+      request(HubContextText, {
+        hubUrl,
+        path: workspacePath(slug, `/contexts/${segment(project)}/${segment(scope)}/keeper`),
+        method: "POST",
+        session,
+        body,
+        conflict: (code, details): ContextRefusal | undefined => {
+          const keeper = decodeKeeperDetails(details);
+          return code === "kept" && keeper._tag === "Some"
+            ? { refused: "kept", keeper: keeper.value.keeper ?? undefined }
+            : undefined;
+        },
+      }),
+
+    /** A new version from the session keeping a context, written on `baseVersion`. */
+    writeContext: (
+      hubUrl: string,
+      session: string,
+      slug: string,
+      project: string,
+      scope: string,
+      body: {
+        readonly environment: string;
+        readonly session: string;
+        readonly baseVersion: number;
+        readonly text: string;
+      },
+    ) =>
+      request(HubContextText, {
+        hubUrl,
+        path: workspacePath(slug, `/contexts/${segment(project)}/${segment(scope)}`),
+        method: "PUT",
+        session,
+        body,
+        conflict: (code, details): ContextRefusal | undefined => {
+          if (code === "stale") {
+            const current = decodeContextText(details);
+            return current._tag === "Some"
+              ? { refused: "stale", current: current.value }
+              : undefined;
+          }
+          const keeper = decodeKeeperDetails(details);
+          return code === "not_keeper" && keeper._tag === "Some"
+            ? { refused: "kept", keeper: keeper.value.keeper ?? undefined }
+            : undefined;
+        },
       }),
 
     createTask: (

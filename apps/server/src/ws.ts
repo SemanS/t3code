@@ -2060,6 +2060,10 @@ const makeWsRpcLayer = (
           observeRpcStream(WS_METHODS.peerHubObserveThread, peerHub.observeThread(input), {
             "rpc.aggregate": "peerHub",
           }),
+        [WS_METHODS.peerHubReadContext]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubReadContext, peerHub.readContext(input), {
+            "rpc.aggregate": "peerHub",
+          }),
         [WS_METHODS.peerHubShareProject]: (input) =>
           observeRpcEffect(WS_METHODS.peerHubShareProject, peerHub.shareProject(input), {
             "rpc.aggregate": "peerHub",

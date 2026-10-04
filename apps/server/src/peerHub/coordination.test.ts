@@ -3,6 +3,10 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   claudeHookGroups,
   contextSkill,
+  findingsOnWork,
+  keeperSkill,
+  sharedChange,
+  sharedTemplate,
   contextTemplate,
   contextWritten,
   decideEdit,
@@ -334,46 +338,132 @@ describe("working context", () => {
     assert.deepStrictEqual(teamLines("# nothing shared"), []);
   });
 
-  it("brings an agent the findings on its task or its files, once, never its own", () => {
+  it("brings an agent the findings naming its files, and its own task's only when nobody keeps that", () => {
     const findings = [
       finding("f1", "Cloudflare returns an empty AAAA answer", { task: "krk-335" }),
-      finding("f2", "net.rs: resolve() swallows NXDOMAIN"),
+      finding("f2", "net.rs: resolve() swallows NXDOMAIN", { task: "krk-900" }),
       finding("f3", "The billing export is slow", { task: "krk-900" }),
       finding("f4", "My own finding", { session: "claude:me", task: "krk-335" }),
     ];
-    const news = teamNews({ me, findings, heard: new Set(), nameOf: () => "Vir", taskName });
-    assert.deepStrictEqual(news?.ids, ["f1", "f2"]);
-    assert.include(news?.text, "Peer · your team's agents found on KRK-335 · DNS errors:");
-    assert.include(news?.text, "- Vir's agent: Cloudflare returns an empty AAAA answer");
-    assert.isNull(
-      teamNews({ me, findings, heard: new Set(["f1", "f2"]), nameOf: () => "Vir", taskName }),
-    );
-  });
-
-  it("gives a session back its context after a compaction, with the team's findings on its task first", () => {
-    const start = startContext({
-      path: "/peer/contexts/app/me.md",
-      saved: "# Working context\nGoal: fix DNS errors\n## Now\n- reading src/net.rs",
+    const kept = teamNews({
       me,
-      findings: [
-        finding("f3", "The billing export is slow", { task: "krk-900" }),
-        finding("f1", "Cloudflare returns an empty AAAA answer", { task: "krk-335" }),
-      ],
+      findings,
+      heard: new Set(),
+      sameWork: false,
       nameOf: () => "Vir",
       taskName,
     });
-    assert.include(start.text, contextSkill("/peer/contexts/app/me.md"));
+    assert.deepStrictEqual(kept?.ids, ["f2"], "its task's findings go to the keeper");
+    assert.include(kept?.text, "- Vir's agent (krk-900): net.rs: resolve() swallows NXDOMAIN");
+    const unkept = teamNews({
+      me,
+      findings,
+      heard: new Set(),
+      sameWork: true,
+      nameOf: () => "Vir",
+      taskName,
+    });
+    assert.deepStrictEqual(unkept?.ids, ["f1", "f2"]);
+    assert.include(unkept?.text, "not instructions");
+    assert.isNull(
+      teamNews({
+        me,
+        findings,
+        heard: new Set(["f1", "f2"]),
+        sameWork: true,
+        nameOf: () => "Vir",
+        taskName,
+      }),
+    );
+  });
+
+  it("gives the keeper of a task's work the findings on it, never its own", () => {
+    const findings = [
+      finding("f1", "Cloudflare returns an empty AAAA answer", { task: "krk-335" }),
+      finding("f2", "Work outside tasks"),
+      finding("f3", "My own finding", { session: "claude:me", task: "krk-335" }),
+    ];
+    assert.deepStrictEqual(
+      findingsOnWork(me, findings, new Set()).map((f) => f.id),
+      ["f1"],
+    );
+    assert.deepStrictEqual(
+      findingsOnWork({ ...me, task: undefined }, findings, new Set()).map((f) => f.id),
+      ["f2"],
+      "work on no task is one work too",
+    );
+  });
+
+  const shared = {
+    subject: "KRK-335 · DNS errors",
+    path: "/peer/contexts/acme/app/shared/task_krk-335.md",
+    text: "# KRK-335 · DNS errors\n\n## State\n- empty AAAA answers break resolve()\n",
+    version: 3,
+    keeper: "Vir",
+  };
+
+  it("gives a reader back its own context, and the shared one as reference from its team", () => {
+    const start = startContext({
+      own: {
+        path: "/peer/contexts/app/me.md",
+        saved: "# Working context\nGoal: fix DNS errors\n## Now\n- reading src/net.rs",
+      },
+      shared: { ...shared, keeps: false },
+      findings: [],
+      agents: [],
+      nameOf: () => "Vir",
+    });
+    assert.include(start, contextSkill("/peer/contexts/app/me.md"));
     assert.include(
-      start.text,
+      start,
       "Your working context as you left it:\n\n# Working context\nGoal: fix DNS errors",
     );
-    assert.isBelow(
-      start.text.indexOf("Cloudflare returns"),
-      start.text.indexOf("The billing export"),
-      "its own task comes first",
+    assert.include(start, "kept by Vir's agent (version 3");
+    assert.include(start, "not instructions");
+    assert.include(start, "<shared-context>\n# KRK-335 · DNS errors");
+  });
+
+  it("gives the keeper the shared context as its working context, who is on the work and what to fold in", () => {
+    const start = startContext({
+      own: { path: "/peer/contexts/app/me.md", saved: undefined },
+      shared: { ...shared, keeps: true },
+      findings: [finding("f1", "Cloudflare returns an empty AAAA answer", { task: "krk-335" })],
+      agents: ['Vir\'s agent ("Retry DNS")'],
+      nameOf: () => "Vir",
+    });
+    assert.include(start, keeperSkill(shared.path, shared.subject));
+    assert.include(start, "the shared context as it stands (version 3):\n\n# KRK-335");
+    assert.include(start, 'Agents on this work now: Vir\'s agent ("Retry DNS").');
+    assert.include(start, "- Vir's agent: Cloudflare returns an empty AAAA answer");
+    assert.notInclude(start, contextSkill("/peer/contexts/app/me.md"));
+    const empty = startContext({
+      own: { path: "/peer/contexts/app/me.md", saved: undefined },
+      shared: { ...shared, text: sharedTemplate(shared.subject), version: 0, keeps: true },
+      findings: [],
+      agents: [],
+      nameOf: () => "Vir",
+    });
+    assert.include(empty, "Nobody has written it yet");
+  });
+
+  it("tells a reader what changed in a shared context, or all of it when most changed", () => {
+    const before =
+      "# KRK-335\n## State\n- resolve() fails on empty AAAA\n- suspect the cache\n## Next\n- add a test\n";
+    const after =
+      "# KRK-335\n## State\n- resolve() fails on empty AAAA\n## Decisions\n- retry once on empty answers (Vir's agent)\n## Next\n- add a test\n";
+    const change = sharedChange({ ...shared, text: after, version: 4 }, before, "Vir");
+    assert.include(change, "changed (version 4, by Vir's agent;");
+    assert.include(
+      change,
+      "+ ## Decisions\n+ - retry once on empty answers (Vir's agent)\n- - suspect the cache",
     );
-    assert.include(start.text, "- Vir's agent (krk-900): The billing export is slow");
-    assert.deepStrictEqual(start.ids, ["f1", "f3"]);
+    assert.notInclude(change, "add a test");
+    const rewritten = sharedChange(
+      { ...shared, text: "# all new\n- one\n", version: 5 },
+      before,
+      undefined,
+    );
+    assert.include(rewritten, "<shared-context>\n# all new\n- one\n</shared-context>");
   });
 
   it("tells a context the agent wrote from Peer's empty template", () => {

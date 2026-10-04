@@ -390,6 +390,40 @@ export const PeerFinding = Schema.Struct({
 });
 export type PeerFinding = typeof PeerFinding.Type;
 
+/** Who keeps a shared context: one agent session at a time. */
+export const PeerContextKeeper = Schema.Struct({
+  /** `claude:<session id>` */
+  session: Schema.String,
+  email: Schema.String,
+  environment: Schema.String,
+  since: Schema.String,
+});
+export type PeerContextKeeper = typeof PeerContextKeeper.Type;
+
+/**
+ * The shared context of a task, or of a project's work on no task: kept by one
+ * agent session (its keeper), read by the other agents on it and by people.
+ */
+export const PeerWorkContext = Schema.Struct({
+  workspace: Schema.String,
+  project: Schema.String,
+  /** `task:<id>`, or `project` for work on no task. */
+  scope: Schema.String,
+  /** 0 until its first keeper writes it. */
+  version: Schema.Number,
+  keeper: Schema.optional(PeerContextKeeper),
+  updatedAt: Schema.String,
+  /** Whose agent wrote this version. */
+  updatedBy: Schema.optional(Schema.String),
+});
+export type PeerWorkContext = typeof PeerWorkContext.Type;
+
+export const PeerWorkContextText = Schema.Struct({
+  ...PeerWorkContext.fields,
+  text: Schema.String,
+});
+export type PeerWorkContextText = typeof PeerWorkContextText.Type;
+
 export const PeerCoordinationState = Schema.Struct({
   enabled: Schema.Boolean,
   policy: PeerCoordinationPolicy,
@@ -401,6 +435,8 @@ export const PeerCoordinationState = Schema.Struct({
   overlaps: Schema.Array(PeerOverlap),
   /** What the agents on your projects found for the team, newest first. */
   findings: Schema.Array(PeerFinding),
+  /** The shared contexts of your projects' tasks, without their text. */
+  contexts: Schema.Array(PeerWorkContext),
 });
 export type PeerCoordinationState = typeof PeerCoordinationState.Type;
 
@@ -590,6 +626,15 @@ export const PeerHubObserveInput = Schema.Struct({
   thread: TrimmedNonEmptyString,
 });
 export type PeerHubObserveInput = typeof PeerHubObserveInput.Type;
+
+/** A shared context; `version` is the one the caller knows of, so a newer one reads again. */
+export const PeerHubContextInput = Schema.Struct({
+  workspace: TrimmedNonEmptyString,
+  project: TrimmedNonEmptyString,
+  scope: TrimmedNonEmptyString,
+  version: Schema.optional(Schema.Number),
+});
+export type PeerHubContextInput = typeof PeerHubContextInput.Type;
 
 export const PeerHubAgentInput = Schema.Struct({ agentId: TrimmedNonEmptyString });
 export type PeerHubAgentInput = typeof PeerHubAgentInput.Type;

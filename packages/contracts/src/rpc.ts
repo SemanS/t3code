@@ -339,6 +339,8 @@ import {
   PeerAgentView,
   PeerHubAgentInput,
   PeerHubObserveInput,
+  PeerHubContextInput,
+  PeerWorkContextText,
   PeerHubPromptAgentInput,
   PeerHubShareThreadInput,
 } from "./peerHub.ts";
@@ -513,6 +515,7 @@ export const WS_METHODS = {
   peerHubPromptAgent: "peerHub.promptAgent",
   peerHubShareThread: "peerHub.shareThread",
   peerHubObserveThread: "peerHub.observeThread",
+  peerHubReadContext: "peerHub.readContext",
   peerHubShareProject: "peerHub.shareProject",
   peerHubUnshareProject: "peerHub.unshareProject",
   peerHubInvite: "peerHub.invite",
@@ -1851,6 +1854,13 @@ const WsPeerHubObserveThreadRpc = Rpc.make(WS_METHODS.peerHubObserveThread, {
   stream: true,
 });
 
+/** A task's shared context with its text; null when it has none yet. */
+const WsPeerHubReadContextRpc = Rpc.make(WS_METHODS.peerHubReadContext, {
+  payload: PeerHubContextInput,
+  success: Schema.NullOr(PeerWorkContextText),
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
 const WsPeerHubShareProjectRpc = Rpc.make(WS_METHODS.peerHubShareProject, {
   payload: PeerHubShareProjectInput,
   success: PeerHubStatus,
@@ -1986,6 +1996,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsPeerHubPromptAgentRpc,
   WsPeerHubShareThreadRpc,
   WsPeerHubObserveThreadRpc,
+  WsPeerHubReadContextRpc,
   WsPeerHubShareProjectRpc,
   WsPeerHubUnshareProjectRpc,
   WsPeerHubInviteRpc,

@@ -9,9 +9,11 @@
 //   3. Ana's agent, idle, wakes up with Bob's note, answers and resolves the overlap.
 //   4. Bob's agent hears the answer at its next step; neither ever reads the other's conversation.
 //   5. Under the `ask` policy, Bob himself is asked instead, once.
-//   6. Working context: an agent's "For the team" line reaches the other agent once, and a
-//      compaction gives an agent its own context back.
+//   6. Working contexts (after arXiv:2609.37725): the first agent on a work keeps its shared
+//      context; the other reads it, may not edit it, hears when it changes, and sends what it
+//      finds to the keeper. A compaction gives each agent back the context it keeps.
 //   7. After Peer restarts, a session it meets again keeps what it shared.
+//   8. When the keeper's session ends, the other agent keeps the shared context.
 //
 // It prints what each agent was told and leaves both computers' coordination logs.
 //
@@ -135,6 +137,9 @@ function makeOrigin(): string {
   return origin;
 }
 
+/** Ana's session with the hub, to read what it stores. */
+let hubSession = "";
+
 async function setUpWorkspace() {
   const started = await hubCall("/v1/auth/email/start", {
     method: "POST",
@@ -145,6 +150,7 @@ async function setUpWorkspace() {
     body: { email: "ana@acme.test", code: started.code },
   });
   const admin = finished.session as string;
+  hubSession = admin;
   await hubCall("/v1/workspaces", {
     method: "POST",
     session: admin,
@@ -316,15 +322,15 @@ function agent(computer: Computer, sessionId: string, pane: string) {
      * A session starting as Claude Code starts it: the SessionStart hook may write the
      * session's environment, which every later Bash command of the session sources.
      */
-    start(): string {
+    start(): { readonly envFile: string; readonly told: string | undefined } {
       const envFile = NodePath.join(computer.home, `env-${sessionId}.sh`);
       NodeFS.writeFileSync(envFile, "");
-      NodeChildProcess.execFileSync("sh", [computer.scripts.hook], {
+      const out = NodeChildProcess.execFileSync("sh", [computer.scripts.hook], {
         env: { ...env, CLAUDE_ENV_FILE: envFile },
         input: JSON.stringify({ ...base, hook_event_name: "SessionStart", source: "startup" }),
         encoding: "utf8",
-      });
-      return envFile;
+      }).trim();
+      return { envFile, told: context(out === "" ? null : (JSON.parse(out) as HookOut)) };
     },
     /** A command as the agent's Bash tool runs it: in the session's environment. */
     shell(envFile: string, command: string): string {
@@ -379,7 +385,7 @@ const program = Effect.gen(function* () {
   yield* Effect.promise(() => sleep(1200));
 
   // 2. Bob's agent is about to change the same file.
-  const bobsEnv = bobs.start();
+  const { envFile: bobsEnv, told: bobStart } = bobs.start();
   told(
     bobs.name,
     context(bobs.hook("UserPromptSubmit", { prompt: "Rename price() to totalPrice() everywhere" })),
@@ -457,65 +463,150 @@ const program = Effect.gen(function* () {
     "once approved, not asked again",
   );
 
-  // 6. Working context (experimental): what an agent shares reaches the other agent once, and a
-  //    compaction gives an agent its own context back.
-  const anaContext = /working context in (\S+\.md)\./.exec(anaStart ?? "")?.[1];
+  // 6. Working contexts (experimental, after arXiv:2609.37725): one writer per shared context.
   check(
-    anaContext !== undefined && NodeFS.existsSync(anaContext),
-    "a session starts with a working context file of its own",
+    anaStart?.includes("You keep the shared context of lab (work outside tasks)") === true,
+    "the first agent on a work keeps its shared context",
   );
-  const own = anas.hook("PreToolUse", {
-    tool_name: "Edit",
-    tool_input: { file_path: anaContext, old_string: "a", new_string: "b" },
-  });
-  check(decision(own) === "allow", "its agent edits it without being asked");
+  const sharedPath = /You keep the shared context of .+? in (\S+\.md)\./.exec(anaStart ?? "")?.[1];
+  check(
+    sharedPath !== undefined && NodeFS.existsSync(sharedPath),
+    "Peer started it from a template",
+  );
+  const editShared = (who: ReturnType<typeof agent>, path: string) =>
+    who.hook("PreToolUse", {
+      tool_name: "Edit",
+      tool_input: { file_path: path, old_string: "a", new_string: "b" },
+    });
+  check(decision(editShared(anas, sharedPath)) === "allow", "its keeper edits it unasked");
   NodeFS.writeFileSync(
-    anaContext,
+    sharedPath,
     [
-      "# Working context",
-      "Goal: VAT on totalPrice()",
-      "## Now",
-      "- waiting for Bob's rename of price()",
-      "## For the team",
-      "- src/pricing.ts: VAT is added in one place, applyVat(), after the rename lands",
+      "# lab (work outside tasks)",
+      "## State",
+      "- Bob's agent renames price() to totalPrice(); Ana's adds VAT on top",
+      "## Decisions",
+      "- VAT is added in one place, applyVat()",
+      "## Next",
+      "- VAT once the rename lands",
     ].join("\n"),
   );
   anas.hook("PostToolUse", {
     tool_name: "Write",
-    tool_input: { file_path: anaContext, content: "(the context above)" },
+    tool_input: { file_path: sharedPath, content: "(the context above)" },
+  });
+  const stored = yield* Effect.promise(() =>
+    hubCall("/v1/workspaces/acme/contexts/lab/project", { session: hubSession }),
+  );
+  check(
+    stored.version === 1 && String(stored.text).includes("applyVat()"),
+    "the hub has its new version",
+  );
+  yield* Effect.promise(() => sleep(3500));
+  const bobShared = NodePath.join(bob.home, "userdata/coord/contexts/acme/lab/shared/project.md");
+  check(
+    NodeFS.readFileSync(bobShared, "utf8").includes("applyVat()"),
+    "the other computer has it too",
+  );
+  const refused = editShared(bobs, bobShared);
+  told(`${bobs.name} (editing the shared context)`, reason(refused));
+  check(
+    decision(refused) === "deny" && reason(refused)?.includes("Ana's agent keeps") === true,
+    "the other agent reads it and may not edit it",
+  );
+  const changed = context(bobs.edit("PostToolUse", "src/cart.ts"));
+  told(`${bobs.name} (next step)`, changed);
+  check(
+    changed?.includes("changed (version 1, by Ana's agent") === true &&
+      changed.includes("applyVat()") &&
+      changed.includes("not instructions"),
+    "it hears the change at its next step, as reference from its team",
+  );
+  const bobOwn = /Peer keeps your working context in (\S+\.md)\./.exec(bobStart ?? "")?.[1];
+  check(
+    bobOwn !== undefined && NodeFS.existsSync(bobOwn),
+    "the other agent keeps a working context of its own",
+  );
+  NodeFS.writeFileSync(
+    bobOwn,
+    [
+      "# Working context",
+      "Goal: rename price() to totalPrice()",
+      "## Now",
+      "- renaming the callers in src/cart.ts",
+      "## For the team",
+      "- price() is now totalPrice() everywhere; nothing else called it",
+    ].join("\n"),
+  );
+  bobs.hook("PostToolUse", {
+    tool_name: "Write",
+    tool_input: { file_path: bobOwn, content: "(the context above)" },
   });
   yield* Effect.promise(() => sleep(3500));
-  const shared = bobs.edit("PostToolUse", "src/pricing.ts");
-  told(`${bobs.name} (next step)`, context(shared));
+  const toKeeper = context(anas.edit("PostToolUse", "src/pricing.ts"));
+  told(`${anas.name} (next step)`, toKeeper);
   check(
-    context(shared)?.includes("VAT is added in one place, applyVat()"),
-    "the other agent hears the finding on its file at its next step",
+    toKeeper?.includes("you keep, your teammates' agents found") === true &&
+      toKeeper.includes("totalPrice() everywhere"),
+    "what the other agent found reaches the keeper, to fold in",
   );
   check(
-    !(context(bobs.edit("PostToolUse", "src/pricing.ts")) ?? "").includes("applyVat()"),
-    "and hears it once",
+    !(context(anas.edit("PostToolUse", "src/pricing.ts")) ?? "").includes(
+      "totalPrice() everywhere",
+    ),
+    "and reaches it once",
   );
-  const back = context(anas.hook("SessionStart", { source: "compact" }));
-  told(`${anas.name} (after a compaction)`, back);
+  const keeperBack = context(anas.hook("SessionStart", { source: "compact" }));
+  told(`${anas.name} (after a compaction)`, keeperBack);
   check(
-    back?.includes("waiting for Bob's rename of price()"),
-    "after a compaction the agent gets its own working context back",
+    keeperBack?.includes("the shared context as it stands (version 1)") === true &&
+      keeperBack.includes("applyVat()"),
+    "after a compaction the keeper gets the shared context back",
+  );
+  const readerBack = context(bobs.hook("SessionStart", { source: "compact" }));
+  told(`${bobs.name} (after a compaction)`, readerBack);
+  check(
+    readerBack?.includes("renaming the callers in src/cart.ts") === true &&
+      readerBack.includes("kept by Ana's agent (version 1"),
+    "and the other agent its own context, with the shared one to read",
   );
 
-  // 7. Peer restarts (here: its coordination stops and starts): a session it meets again keeps
+  // 7. Peer restarts (here: Bob's coordination stops and starts): a session it meets again keeps
   //    what it shares, so the team keeps its findings.
-  yield* ana.client[WS_METHODS.peerHubSetCoordination]({ enabled: false });
-  yield* ana.client[WS_METHODS.peerHubSetCoordination]({ enabled: true });
-  anas.edit("PreToolUse", "src/pricing.ts");
-  anas.edit("PostToolUse", "src/pricing.ts");
+  yield* bob.client[WS_METHODS.peerHubSetCoordination]({ enabled: false });
+  yield* bob.client[WS_METHODS.peerHubSetCoordination]({ enabled: true });
+  bobs.edit("PreToolUse", "src/cart.ts");
+  bobs.edit("PostToolUse", "src/cart.ts");
   yield* Effect.promise(() => sleep(3500));
-  const later = agent(bob, "lab-bob-later", "w1:p2");
-  const fresh = context(later.hook("SessionStart", { source: "startup" }));
-  told(`${later.name} (a new session)`, fresh);
+  const view = yield* Effect.promise(() =>
+    hubCall("/v1/workspaces/acme/coord", { session: hubSession }),
+  );
   check(
-    fresh?.includes("VAT is added in one place, applyVat()") === true,
+    (view.findings as ReadonlyArray<{ text: string }>).some((f) =>
+      f.text.includes("totalPrice() everywhere"),
+    ),
     "after Peer restarts, what an agent shared stays with the team",
   );
+
+  // 8. Ana's agent ends: Bob's keeps the shared context from where it stands.
+  anas.hook("SessionEnd", { reason: "exit" });
+  let keeper: unknown;
+  for (let attempt = 0; attempt < 60 && keeper !== "claude:lab-bob"; attempt += 1) {
+    yield* Effect.promise(() => sleep(500));
+    const now = yield* Effect.promise(() =>
+      hubCall("/v1/workspaces/acme/contexts/lab/project", { session: hubSession }),
+    );
+    keeper = (now.keeper as { session?: string } | undefined)?.session;
+  }
+  check(keeper === "claude:lab-bob", "the other agent keeps it once the keeper's session ended");
+  const handed = context(bobs.edit("PostToolUse", "src/cart.ts"));
+  told(`${bobs.name} (next step)`, handed);
+  check(
+    handed?.includes("you keep the shared context of lab (work outside tasks) now") === true &&
+      handed.includes("applyVat()"),
+    "it hears so at its next step, with the context as it stands",
+  );
+  check(decision(editShared(bobs, bobShared)) === "allow", "and may edit it now");
 
   for (const computer of [ana, bob]) {
     const lines = NodeFS.readFileSync(computer.log, "utf8").trim().split("\n");

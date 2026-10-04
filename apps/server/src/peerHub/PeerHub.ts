@@ -38,6 +38,7 @@ import {
   PeerAgentView,
   ThreadId,
   type PeerHubAgentInput,
+  type PeerHubContextInput,
   type PeerHubObserveInput,
   type PeerHubShareThreadInput,
   type PeerHubAssignThreadInput,
@@ -66,6 +67,7 @@ import {
   type PeerProjectState,
   type PeerTask,
   type PeerWorkStatus,
+  type PeerWorkContextText,
   type PeerWorkThread,
   type PeerWorkspaceState,
 } from "@t3tools/contracts";
@@ -411,6 +413,10 @@ export class PeerHub extends Context.Service<
     readonly observeThread: (
       input: PeerHubObserveInput,
     ) => Stream.Stream<PeerAgentView, PeerHubError>;
+    /** A task's shared context with its text; null when it has none yet. */
+    readonly readContext: (
+      input: PeerHubContextInput,
+    ) => Effect.Effect<PeerWorkContextText | null, PeerHubError>;
     /** Shares a local project's repository with a workspace, as a project everyone works on. */
     readonly shareProject: (
       input: PeerHubShareProjectInput,
@@ -782,7 +788,12 @@ const make = Effect.gen(function* () {
   /** Rebuilds the status, publishes it when it changed, and hands the policy its new state. */
   /** Coordination as people see it: the settings, and what the broker last heard. */
   const coordinationStatus = (s: RuntimeState): PeerHubStatus["coordination"] => {
-    const snapshot = broker?.snapshot() ?? { sessions: [], overlaps: [], findings: [] };
+    const snapshot = broker?.snapshot() ?? {
+      sessions: [],
+      overlaps: [],
+      findings: [],
+      contexts: [],
+    };
     return {
       enabled: s.persisted.coordination?.enabled ?? false,
       policy: s.persisted.coordination?.policy ?? "coordinate",
@@ -810,6 +821,15 @@ const make = Effect.gen(function* () {
         text: finding.text,
         email: finding.email,
         at: finding.at,
+      })),
+      contexts: snapshot.contexts.map((context) => ({
+        workspace: context.workspace,
+        project: context.project,
+        scope: context.scope,
+        version: context.version,
+        ...(context.keeper === undefined ? {} : { keeper: context.keeper }),
+        updatedAt: context.updatedAt,
+        ...(context.updatedBy === undefined ? {} : { updatedBy: context.updatedBy }),
       })),
       overlaps: snapshot.overlaps.map((overlap) => ({
         id: overlap.id,
@@ -1976,6 +1996,27 @@ const make = Effect.gen(function* () {
           if (found === undefined) return task;
           return found.key === undefined ? found.title : `${found.key} · ${found.title}`;
         },
+        readContext: (workspace, project, scope) =>
+          withHub((hubUrl, session) =>
+            hubApi.readContext(hubUrl, session, workspace, project, scope),
+          ),
+        keepContext: (workspace, project, scope, agentSession, release) =>
+          withHub((hubUrl, session) =>
+            hubApi.keepContext(hubUrl, session, workspace, project, scope, {
+              environment: environmentId,
+              session: agentSession,
+              ...(release ? { release: true } : {}),
+            }),
+          ),
+        writeContext: (workspace, project, scope, agentSession, baseVersion, text) =>
+          withHub((hubUrl, session) =>
+            hubApi.writeContext(hubUrl, session, workspace, project, scope, {
+              environment: environmentId,
+              session: agentSession,
+              baseVersion,
+              text,
+            }),
+          ),
       });
       await created.start();
       broker = created;
@@ -2395,6 +2436,16 @@ const make = Effect.gen(function* () {
       Stream.forever,
     );
 
+  const readContext: PeerHub["Service"]["readContext"] = (input) =>
+    requireSession.pipe(
+      Effect.flatMap(({ hubUrl, session }) =>
+        hubApi.readContext(hubUrl, session, input.workspace, input.project, input.scope),
+      ),
+      Effect.map((context) =>
+        context === null ? null : { ...context, workspace: input.workspace },
+      ),
+    );
+
   const watchAgent: PeerHub["Service"]["watchAgent"] = (input) =>
     Stream.tick("1 second").pipe(
       Stream.mapEffect(() => agentView(input.agentId)),
@@ -2745,6 +2796,7 @@ const make = Effect.gen(function* () {
     promptAgent,
     shareThread,
     observeThread,
+    readContext,
     shareProject,
     unshareProject,
   });

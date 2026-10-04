@@ -1151,6 +1151,11 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:peer-hub:observe-thread",
       tag: WS_METHODS.peerHubObserveThread,
     }),
+    /** A task's shared context with its text; the version in its input reads a newer one. */
+    peerHubReadContext: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:peer-hub:read-context",
+      tag: WS_METHODS.peerHubReadContext,
+    }),
     peerHubShareProject: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:peer-hub:share-project",
       tag: WS_METHODS.peerHubShareProject,

@@ -27,8 +27,8 @@ import {
   CircleDashedIcon,
   EllipsisIcon,
   EyeIcon,
+  FileTextIcon,
   GitBranchIcon,
-  LightbulbIcon,
   MessageCircleQuestionIcon,
   PlusIcon,
   Share2Icon,
@@ -89,10 +89,10 @@ import {
   taskLabel,
   taskMenuItems,
   threadMenuItems,
-  threadSections,
   type ActiveAgentNode,
   type AgentNeed,
   type WorkAgent,
+  type WorkContextNode,
   type WorkOpen,
   type WorkProjectNode,
   type WorkTaskNode,
@@ -253,7 +253,7 @@ interface Scope {
  * opening, renaming, archiving and deleting your threads, placing them on
  * tasks, and the tasks' own changes.
  */
-function useWorkActions(environmentId: EnvironmentId | null) {
+export function useWorkActions(environmentId: EnvironmentId | null) {
   const navigate = useNavigate();
   const focusAgent = useAtomCommand(serverEnvironment.peerHubFocusAgent, { reportFailure: false });
   const shareThread = useAtomCommand(serverEnvironment.peerHubShareThread, {
@@ -415,11 +415,13 @@ export function WorkPanel() {
     select: (params) =>
       params.agentId
         ? `agent:${params.agentId}`
-        : params.workspace && params.environment && params.thread
-          ? `observe:${params.workspace}:${params.environment}:${params.thread}`
-          : params.environmentId && params.threadId
-            ? `${params.environmentId}:${params.threadId}`
-            : null,
+        : params.workspace && params.project && params.scope
+          ? `context:${params.workspace}:${params.project}:${params.scope}`
+          : params.workspace && params.environment && params.thread
+            ? `observe:${params.workspace}:${params.environment}:${params.thread}`
+            : params.environmentId && params.threadId
+              ? `${params.environmentId}:${params.threadId}`
+              : null,
   });
   const tree = useMemo(
     () => (status === null ? [] : buildWorkTree({ status, localThreads: threads, now })),
@@ -791,12 +793,19 @@ function ProjectSection({
               )}
             </div>
           ))}
-          {project.unsorted.length > 0 ? (
+          {project.unsorted.some((thread) => thread.mine) || project.context !== undefined ? (
             <div>
               <p className="px-2 pt-1.5 pb-0.5 text-xs font-medium text-muted-foreground">
                 Not on a task
               </p>
               <ul className="flex flex-col">
+                {project.context === undefined ? null : (
+                  <ContextRow
+                    context={project.context}
+                    label="Shared context"
+                    activeThread={activeThread}
+                  />
+                )}
                 <ThreadList
                   scope={scope}
                   threads={project.unsorted}
@@ -989,7 +998,9 @@ function TaskRow({
           className={cn(
             "size-3 shrink-0 text-muted-foreground",
             expanded && "rotate-90",
-            task.threads.length === 0 && "invisible",
+            !task.threads.some((thread) => thread.mine) &&
+              task.context === undefined &&
+              "invisible",
           )}
         />
         <StatusGlyph status={task.status} />
@@ -1061,9 +1072,11 @@ function TaskRow({
           </span>
         </span>
       </div>
-      {expanded && task.findings.length > 0 ? <TeamContext findings={task.findings} /> : null}
-      {expanded && task.threads.length > 0 ? (
+      {expanded && (task.context !== undefined || task.threads.some((thread) => thread.mine)) ? (
         <ul className="mt-px mb-1 ml-3 flex flex-col border-l border-sidebar-border pl-1">
+          {task.context === undefined ? null : (
+            <ContextRow context={task.context} label="Task context" activeThread={activeThread} />
+          )}
           <ThreadList
             scope={scope}
             threads={task.threads}
@@ -1079,41 +1092,57 @@ function TaskRow({
 }
 
 /**
- * What the team's agents found on a task, folded until opened: shared context
- * instead of their threads, the lines their agents chose to share.
+ * The shared context of a task, or of the project's work on no task: who keeps
+ * it and what waits for them to fold in. It opens the page that shows it; the
+ * team's threads are there too, not in the tree.
  */
-function TeamContext({ findings }: { readonly findings: WorkTaskNode["findings"] }) {
-  const [open, setOpen] = useState(false);
+function ContextRow({
+  context,
+  label,
+  activeThread,
+}: {
+  readonly context: WorkContextNode;
+  readonly label: string;
+  readonly activeThread: string | null;
+}) {
+  const navigate = useNavigate();
+  const active =
+    activeThread === `context:${context.workspace}:${context.project}:${context.scope}`;
+  const detail = [
+    context.keeper === undefined ? "nobody keeps it now" : `${context.keeper}’s agent keeps it`,
+    context.reports.length > 0 ? `${context.reports.length} new` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
   return (
-    <div className="mt-px ml-3 border-l border-sidebar-border pl-1">
+    <li className="list-none">
       <button
         type="button"
-        aria-expanded={open}
-        className="flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left text-xs text-muted-foreground hover:bg-sidebar-row-hover"
-        onClick={() => setOpen((value) => !value)}
+        aria-current={active ? "page" : undefined}
+        className={cn(
+          "flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left text-xs text-muted-foreground",
+          active ? "bg-sidebar-row-active" : "hover:bg-sidebar-row-hover",
+        )}
+        onClick={() =>
+          void navigate({
+            to: "/context/$workspace/$project/$scope",
+            params: {
+              workspace: context.workspace,
+              project: context.project,
+              scope: context.scope,
+            },
+          })
+        }
       >
-        <ChevronRightIcon className={cn("size-3 shrink-0", open && "rotate-90")} />
-        <LightbulbIcon aria-hidden className="size-3.5 shrink-0" />
-        <span className="min-w-0 flex-1 truncate">Team context · {findings.length}</span>
+        <FileTextIcon aria-hidden className="size-3.5 shrink-0" />
+        <span className="shrink-0 font-medium text-sidebar-foreground">{label}</span>
+        <span className="min-w-0 flex-1 truncate">{detail}</span>
       </button>
-      {open ? (
-        <ul className="flex flex-col gap-1 px-2 pb-1">
-          {findings.map((finding) => (
-            <li key={finding.id} className="list-none text-xs text-sidebar-foreground">
-              <span className="text-muted-foreground">{finding.person}’s agent: </span>
-              {finding.text}
-            </li>
-          ))}
-        </ul>
-      ) : null}
-    </div>
+    </li>
   );
 }
 
-/**
- * A task's threads: yours, then a colleague's only when it concerns you, then
- * the rest of the team's folded into Team activity, by person, until opened.
- */
+/** A task's threads in the tree: yours. The team's are on the task's context page. */
 function ThreadList({
   scope,
   threads,
@@ -1129,53 +1158,21 @@ function ThreadList({
   readonly activeThread: string | null;
   readonly actions: WorkActions;
 }) {
-  const [teamOpen, setTeamOpen] = useState(false);
-  const sections = threadSections(threads);
-  const card = (thread: WorkThreadNode) => (
-    <ThreadCard
-      key={thread.key}
-      scope={scope}
-      thread={thread}
-      taskId={taskId}
-      tasks={tasks}
-      activeThread={activeThread}
-      actions={actions}
-    />
-  );
   return (
     <>
-      {sections.mine.map(card)}
-      {sections.surfaced.map(card)}
-      {sections.teamCount > 0 ? (
-        <li className="list-none">
-          <button
-            type="button"
-            aria-expanded={teamOpen}
-            className="flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left text-xs text-muted-foreground hover:bg-sidebar-row-hover"
-            onClick={() => setTeamOpen((value) => !value)}
-          >
-            <ChevronRightIcon className={cn("size-3 shrink-0", teamOpen && "rotate-90")} />
-            <span className="min-w-0 flex-1 truncate">Team activity · {sections.teamCount}</span>
-            <span className="flex shrink-0 items-center -space-x-1">
-              {sections.team.slice(0, 3).map((group) => (
-                <PersonMark key={group.person} name={group.person} mine={false} />
-              ))}
-            </span>
-          </button>
-          {teamOpen ? (
-            <ul className="flex flex-col">
-              {sections.team.map((group) => (
-                <li key={group.person} className="list-none">
-                  <p className="px-2 pt-1 text-2xs font-medium text-muted-foreground">
-                    {group.person}
-                  </p>
-                  <ul className="flex flex-col">{group.threads.map(card)}</ul>
-                </li>
-              ))}
-            </ul>
-          ) : null}
-        </li>
-      ) : null}
+      {threads
+        .filter((thread) => thread.mine)
+        .map((thread) => (
+          <ThreadCard
+            key={thread.key}
+            scope={scope}
+            thread={thread}
+            taskId={taskId}
+            tasks={tasks}
+            activeThread={activeThread}
+            actions={actions}
+          />
+        ))}
     </>
   );
 }

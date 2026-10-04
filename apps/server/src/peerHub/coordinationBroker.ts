@@ -25,10 +25,16 @@ import {
   decideEdit,
   editedFile,
   emptyMemory,
+  findingsForKeeper,
+  findingsOnWork,
   isPlainCliCall,
+  keeperSkill,
   mentionsCli,
   newsFor,
   repositoryPath,
+  scopeOf,
+  sharedChange,
+  sharedTemplate,
   shortId,
   startContext,
   statusText,
@@ -38,8 +44,13 @@ import {
   type ContextHolder,
   type CoordinationView,
   type SessionMemory,
+  type SharedContext,
 } from "./coordination.ts";
 import type {
+  ContextRefusal,
+  HubContext,
+  HubContextKeeper,
+  HubContextText,
   HubCoordSession,
   HubCoordView,
   HubFinding,
@@ -106,6 +117,29 @@ export interface BrokerDeps {
   ) => string | undefined;
   /** A task as people name it, e.g. `KRK-335 · DNS errors`. */
   readonly taskName: (workspace: string, project: string, task: string) => string;
+  /** A shared context with its text, or null when it has none. */
+  readonly readContext: (
+    workspace: string,
+    project: string,
+    scope: string,
+  ) => Promise<HubContextText | null>;
+  /** Asks for a session to keep a shared context, or gives it up (`release`). */
+  readonly keepContext: (
+    workspace: string,
+    project: string,
+    scope: string,
+    session: string,
+    release: boolean,
+  ) => Promise<HubContextText | ContextRefusal>;
+  /** A new version of a shared context from the session that keeps it. */
+  readonly writeContext: (
+    workspace: string,
+    project: string,
+    scope: string,
+    session: string,
+    baseVersion: number,
+    text: string,
+  ) => Promise<HubContextText | ContextRefusal>;
 }
 
 interface LocalSession {
@@ -129,8 +163,20 @@ interface LocalSession {
   readonly memory: SessionMemory;
   /** Files whose edit its person was asked about: the edit happening means they approved. */
   readonly asked: Map<string, ReadonlyArray<string>>;
-  /** The file the agent keeps its working context in. */
-  readonly contextPath: string;
+  /** The file the agent keeps its own working context in. */
+  readonly ownContextPath: string;
+  /** The file it keeps now: its own, or its work's shared context while it keeps that. */
+  contextPath: string;
+  /** It keeps the shared context of its work (task, or no task). */
+  keeps: boolean;
+  /** The shared context's version (and text) it last heard, or wrote on while keeping it. */
+  sharedHeard: number;
+  sharedHeardText: string;
+  sharedToldAt: number;
+  /** What Peer tells it at its next step, e.g. that it keeps the shared context now. */
+  readonly pending: string[];
+  /** Its SessionStart is being answered, which settles who keeps its work's context itself. */
+  starting: boolean;
   /** Its "For the team" lines as last read: what it shares with the project. */
   team: ReadonlyArray<string>;
   readonly startedAt: number;
@@ -144,6 +190,21 @@ interface LocalSession {
   task: string | undefined;
   /** Findings of other agents it has heard. */
   readonly heard: Set<string>;
+}
+
+/** A shared context as this computer has it: in memory, and in a file its agents read. */
+interface SharedMirror {
+  readonly workspace: string;
+  readonly project: string;
+  readonly scope: string;
+  readonly path: string;
+  version: number;
+  text: string;
+  keeper: HubContextKeeper | undefined;
+  updatedAt: string;
+  updatedBy: string | undefined;
+  /** Its keeper here changed it and the hub has not taken the change yet. */
+  unsent: boolean;
 }
 
 interface Waiter {
@@ -164,6 +225,10 @@ const LOG_ROTATE_BYTES = 20 * 1024 * 1024;
 const MAX_FILES = 200;
 /** An agent whose working context has not changed for this long, while it works, is reminded once. */
 const NUDGE_MS = 20 * 60 * 1000;
+/** A shared context nobody keeps is asked for at most this often per work. */
+const CLAIM_GAP_MS = 20_000;
+/** An agent reading a shared context hears its changes at most this often. */
+const SHARED_NEWS_GAP_MS = 5 * 60 * 1000;
 
 const clip = (text: string, max: number) => text.replace(/\s+/g, " ").trim().slice(0, max);
 
@@ -180,6 +245,9 @@ export class CoordinationBroker {
   private readonly announcedToPeople = new Set<string>();
   private readonly waiters = new Set<Waiter>();
   private readonly ignoredCwds = new Map<string, number>();
+  /** Shared contexts of the work this computer's agents are on, by `sharedKey`. */
+  private readonly shared = new Map<string, SharedMirror>();
+  private readonly claimedAt = new Map<string, number>();
   private lastCli: { readonly session: string; readonly at: number } | null = null;
   private dirtySince: number | null = null;
   private lastSync = 0;
@@ -237,6 +305,12 @@ export class CoordinationBroker {
     this.timer = null;
     for (const waiter of this.waiters) waiter.answer("");
     this.waiters.clear();
+    // The next agent on their work keeps what this computer's agents kept (the hub hands it
+    // over anyway once their sessions stop reporting, so an unreachable hub does not hold this up).
+    await Promise.race([
+      Promise.all([...this.sessions.values()].map((session) => this.release(session))),
+      new Promise((resolve) => setTimeout(resolve, 3000)),
+    ]);
     // Tell the hub this computer's agents are no longer coordinated.
     this.sessions.clear();
     for (const workspace of this.reported) {
@@ -262,18 +336,21 @@ export class CoordinationBroker {
     >;
     readonly overlaps: ReadonlyArray<HubOverlap & { readonly workspace: string }>;
     readonly findings: ReadonlyArray<HubFinding & { readonly workspace: string }>;
+    readonly contexts: ReadonlyArray<HubContext & { readonly workspace: string }>;
   } {
     const sessions = [];
     const overlaps = [];
     const findings = [];
+    const contexts = [];
     for (const [workspace, view] of this.views) {
       for (const session of this.merged(workspace, view).sessions) {
         sessions.push({ ...session, workspace, local: this.sessions.has(session.id) });
       }
       for (const overlap of view.overlaps) overlaps.push({ ...overlap, workspace });
       for (const finding of view.findings ?? []) findings.push({ ...finding, workspace });
+      for (const context of view.contexts ?? []) contexts.push({ ...context, workspace });
     }
-    return { sessions, overlaps, findings };
+    return { sessions, overlaps, findings, contexts };
   }
 
   /** A person's note on an overlap, from Peer. */
@@ -322,6 +399,7 @@ export class CoordinationBroker {
       environment: this.deps.environment,
       label: session.label,
       agent: session.agent,
+      ...(session.task === undefined ? {} : { task: session.task }),
       ...(session.branch === undefined ? {} : { branch: session.branch }),
       status: session.status,
       ...(session.intent === undefined ? {} : { intent: session.intent }),
@@ -366,6 +444,12 @@ export class CoordinationBroker {
     const title = pane === undefined ? undefined : this.deps.herdrTitle(pane);
     const branch = await this.deps.branchOf(place.root);
     const now = Date.now();
+    const ownContextPath = NodePath.join(
+      this.deps.contextsDir,
+      safePart(place.workspace),
+      safePart(place.project),
+      `${safePart(sid)}.md`,
+    );
     const session: LocalSession = {
       id,
       agent: "claude",
@@ -385,12 +469,14 @@ export class CoordinationBroker {
       lastActivity: now,
       memory: emptyMemory(),
       asked: new Map(),
-      contextPath: NodePath.join(
-        this.deps.contextsDir,
-        safePart(place.workspace),
-        safePart(place.project),
-        `${safePart(sid)}.md`,
-      ),
+      ownContextPath,
+      contextPath: ownContextPath,
+      keeps: false,
+      sharedHeard: 0,
+      sharedHeardText: "",
+      sharedToldAt: 0,
+      pending: [],
+      starting: false,
       team: [],
       startedAt: now,
       contextAt: now,
@@ -496,8 +582,13 @@ export class CoordinationBroker {
         return this.beforeTool(session, body);
       case "PostToolUse": {
         this.touch(session);
-        if (editedFile(body.tool_name, body.tool_input) === session.contextPath) {
+        const edited = editedFile(body.tool_name, body.tool_input);
+        if (edited === session.ownContextPath) {
           await this.readTeamLines(session);
+          return context(event, this.news(session));
+        }
+        if (session.keeps && edited === session.contextPath) {
+          await this.saveShared(session);
           return context(event, this.news(session));
         }
         const file = this.fileOf(session, body);
@@ -522,6 +613,7 @@ export class CoordinationBroker {
         this.markDirty();
         return null;
       case "SessionEnd":
+        void this.release(session);
         this.sessions.delete(session.id);
         this.log("session.ended", { session: session.id });
         this.markDirty();
@@ -568,12 +660,28 @@ export class CoordinationBroker {
       this.log("cli.unplain", { session: session.id, command });
       return null;
     }
-    if (editedFile(body.tool_name, body.tool_input) === session.contextPath) {
+    const edited = editedFile(body.tool_name, body.tool_input);
+    if (edited !== null && (edited === session.contextPath || edited === session.ownContextPath)) {
       return {
         hookSpecificOutput: {
           hookEventName: "PreToolUse",
           permissionDecision: "allow",
           permissionDecisionReason: "The agent's own working context",
+        },
+      };
+    }
+    const mirror = [...this.shared.values()].find((candidate) => candidate.path === edited);
+    if (mirror !== undefined) {
+      const keeper =
+        mirror.keeper === undefined
+          ? "another agent"
+          : `${this.deps.nameOf(mirror.workspace, mirror.keeper.email)}'s agent`;
+      this.log("shared.denied", { session: session.id, scope: mirror.scope });
+      return {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: `Peer: ${keeper} keeps the shared context of ${this.subjectOf(mirror.workspace, mirror.project, mirror.scope)}; the other agents on it only read it. Put what the work should know under "## For the team" in your working context (${session.ownContextPath}); Peer passes it to the keeper.`,
         },
       };
     }
@@ -645,7 +753,8 @@ export class CoordinationBroker {
 
   /**
    * What happened on the session's overlaps since it last heard, and (unless
-   * `team` is false) what other agents found that concerns it, marked as heard.
+   * `team` is false) what Peer has to tell it, what changed in its work's
+   * shared context and what other agents found that concerns it.
    */
   private news(session: LocalSession, options: { readonly team?: boolean } = {}): string | null {
     const news = newsFor({
@@ -665,22 +774,92 @@ export class CoordinationBroker {
         seen: news.seen,
       });
     }
-    const team =
-      options.team === false
-        ? null
-        : teamNews({
-            me: this.holder(session),
-            findings: this.findingsOf(session.workspace),
-            heard: session.heard,
-            nameOf: this.nameOf(session.workspace),
-            taskName: (task) => this.deps.taskName(session.workspace, session.project, task),
-          });
-    if (team !== null) {
-      for (const id of team.ids) session.heard.add(id);
-      this.log("finding.delivered", { session: session.id, findings: team.ids, text: team.text });
+    const parts = [news?.text ?? null];
+    // Findings and shared contexts wait for the agent's next step; they never wake it.
+    if (options.team !== false) {
+      parts.push(...session.pending.splice(0), this.sharedNews(session), this.findingNews(session));
     }
-    const parts = [news?.text ?? null, team?.text ?? null].filter((part) => part !== null);
-    return parts.length === 0 ? null : parts.join("\n\n");
+    const said = parts.filter((part) => part !== null);
+    return said.length === 0 ? null : said.join("\n\n");
+  }
+
+  /** What other agents found: for a keeper, what its work found; for anyone, what names its files. */
+  private findingNews(session: LocalSession): string | null {
+    const findings = this.findingsOf(session.workspace);
+    const parts: string[] = [];
+    const delivered: string[] = [];
+    if (session.keeps) {
+      const onWork = findingsOnWork(this.holder(session), findings, session.heard).slice(0, 8);
+      if (onWork.length > 0) {
+        parts.push(
+          findingsForKeeper({
+            subject: this.subjectOf(session.workspace, session.project, scopeOf(session.task)),
+            findings: onWork,
+            nameOf: this.nameOf(session.workspace),
+          }),
+        );
+        for (const finding of onWork) {
+          session.heard.add(finding.id);
+          delivered.push(finding.id);
+        }
+      }
+    }
+    const team = teamNews({
+      me: this.holder(session),
+      findings,
+      heard: session.heard,
+      // Findings on its own work go to whoever keeps the work's shared context, while somebody does.
+      sameWork: !session.keeps && this.keeperOf(session) === undefined,
+      nameOf: this.nameOf(session.workspace),
+      taskName: (task) => this.deps.taskName(session.workspace, session.project, task),
+    });
+    if (team !== null) {
+      parts.push(team.text);
+      for (const id of team.ids) {
+        session.heard.add(id);
+        delivered.push(id);
+      }
+    }
+    if (parts.length === 0) return null;
+    const text = parts.join("\n\n");
+    this.log("finding.delivered", {
+      session: session.id,
+      keeps: session.keeps,
+      findings: delivered,
+      text,
+    });
+    return text;
+  }
+
+  /** What changed in the shared context a session reads, at most every few minutes. */
+  private sharedNews(session: LocalSession): string | null {
+    if (session.keeps) return null;
+    const mirror = this.mirrorOf(session);
+    if (
+      mirror === undefined ||
+      mirror.version <= session.sharedHeard ||
+      !contextWritten(mirror.text) ||
+      Date.now() - session.sharedToldAt < SHARED_NEWS_GAP_MS
+    ) {
+      return null;
+    }
+    const text = sharedChange(
+      this.sharedOf(mirror),
+      session.sharedHeardText,
+      mirror.updatedBy === undefined
+        ? undefined
+        : this.deps.nameOf(mirror.workspace, mirror.updatedBy),
+    );
+    session.sharedHeard = mirror.version;
+    session.sharedHeardText = mirror.text;
+    session.sharedToldAt = Date.now();
+    this.log("shared.told", {
+      session: session.id,
+      scope: mirror.scope,
+      version: mirror.version,
+      text,
+    });
+    return text;
   }
 
   private holder(session: LocalSession): ContextHolder {
@@ -700,19 +879,29 @@ export class CoordinationBroker {
   // ---- working context (experimental) ----
 
   /**
-   * What a session hears when it starts: how to keep its working context (made
-   * now if it has none), the context itself after a compaction or a resume,
-   * and the team's findings on its task and project.
+   * What a session hears when it starts: how to keep its working context (its
+   * own, made now if it has none, or its work's shared one when it keeps that),
+   * the context itself after a compaction or a resume, the shared context of its
+   * work, and the findings it should hear now.
    */
   private async startContextFor(session: LocalSession, source: string): Promise<string> {
-    await NodeFSP.mkdir(NodePath.dirname(session.contextPath), { recursive: true });
+    session.starting = true;
+    try {
+      return await this.startedContext(session, source);
+    } finally {
+      session.starting = false;
+    }
+  }
+
+  private async startedContext(session: LocalSession, source: string): Promise<string> {
+    await NodeFSP.mkdir(NodePath.dirname(session.ownContextPath), { recursive: true });
     let saved: string | undefined;
     try {
-      saved = await NodeFSP.readFile(session.contextPath, "utf8");
-      session.contextAt = (await NodeFSP.stat(session.contextPath)).mtimeMs;
+      saved = await NodeFSP.readFile(session.ownContextPath, "utf8");
+      session.contextAt = (await NodeFSP.stat(session.ownContextPath)).mtimeMs;
     } catch {
       await NodeFSP.writeFile(
-        session.contextPath,
+        session.ownContextPath,
         contextTemplate(
           session.label,
           session.task === undefined
@@ -722,34 +911,62 @@ export class CoordinationBroker {
       );
     }
     session.team = saved === undefined ? [] : teamLines(saved);
-    // What the team found is worth a fresh look when a session starts.
+    // What the team found, and who keeps the work's shared context, are worth a fresh look now.
     await this.syncNow(session.workspace, 1500);
-    const start = startContext({
-      path: session.contextPath,
-      saved: source === "compact" || source === "resume" ? saved : undefined,
-      me: this.holder(session),
-      findings: this.findingsOf(session.workspace),
+    await this.takeUp(session);
+    // What it would be told at its next step is in what it hears now.
+    session.pending.length = 0;
+    const mirror = this.mirrorOf(session);
+    const onWork = findingsOnWork(
+      this.holder(session),
+      this.findingsOf(session.workspace),
+      session.heard,
+    );
+    let findings: HubFinding[] = [];
+    if (session.keeps) {
+      // What was found before the context last changed was there for the last keeper to fold in.
+      const since = mirror === undefined || mirror.version === 0 ? 0 : Date.parse(mirror.updatedAt);
+      findings = onWork.filter((finding) => Date.parse(finding.at) > since).slice(0, 10);
+      for (const finding of onWork) session.heard.add(finding.id);
+    } else if (this.keeperOf(session) === undefined) {
+      findings = onWork.slice(0, 8);
+      for (const finding of findings) session.heard.add(finding.id);
+    }
+    if (!session.keeps && mirror !== undefined) {
+      // It reads the context now; the first change after this is news at once.
+      session.sharedHeard = mirror.version;
+      session.sharedHeardText = mirror.text;
+      session.sharedToldAt = 0;
+    }
+    const text = startContext({
+      own: {
+        path: session.ownContextPath,
+        saved: source === "compact" || source === "resume" ? saved : undefined,
+      },
+      shared: mirror === undefined ? undefined : { ...this.sharedOf(mirror), keeps: session.keeps },
+      findings,
+      agents: this.agentsOn(session),
       nameOf: this.nameOf(session.workspace),
-      taskName: (task) => this.deps.taskName(session.workspace, session.project, task),
     });
-    for (const id of start.ids) session.heard.add(id);
     this.log("context.injected", {
       session: session.id,
       source,
       path: session.contextPath,
+      keeps: session.keeps,
+      shared: mirror === undefined ? undefined : { scope: mirror.scope, version: mirror.version },
       saved: saved?.length ?? 0,
-      findings: start.ids,
-      bytes: start.text.length,
+      findings: findings.map((finding) => finding.id),
+      bytes: text.length,
     });
-    return start.text;
+    return text;
   }
 
   /** What an existing working context already says, read when Peer meets its session. */
   private async restoreContext(session: LocalSession) {
     try {
       const [text, stat] = await Promise.all([
-        NodeFSP.readFile(session.contextPath, "utf8"),
-        NodeFSP.stat(session.contextPath),
+        NodeFSP.readFile(session.ownContextPath, "utf8"),
+        NodeFSP.stat(session.ownContextPath),
       ]);
       session.team = teamLines(text);
       session.contextAt = stat.mtimeMs;
@@ -776,16 +993,18 @@ export class CoordinationBroker {
     await walk(this.deps.contextsDir);
   }
 
-  /** The agent changed its working context: what it shares with the team may have changed. */
+  /** The agent changed its own working context: what it shares with the team may have changed. */
   private async readTeamLines(session: LocalSession) {
     let text: string;
     try {
-      text = await NodeFSP.readFile(session.contextPath, "utf8");
+      text = await NodeFSP.readFile(session.ownContextPath, "utf8");
     } catch {
       return;
     }
-    session.contextAt = Date.now();
-    session.contextKept = true;
+    if (!session.keeps) {
+      session.contextAt = Date.now();
+      session.contextKept = true;
+    }
     const team = teamLines(text);
     const changed = team.join("\n") !== session.team.join("\n");
     session.team = team;
@@ -802,7 +1021,9 @@ export class CoordinationBroker {
     if (changed !== null && !session.contextKept && !session.remindedAtStart) {
       session.remindedAtStart = true;
       this.log("context.nudged", { session: session.id, why: "first change", file: changed });
-      return `Peer: you changed ${changed} and your working context (${session.contextPath}) is still empty. Note there what you are doing and what you found; put what your teammates' agents should know under "## For the team".`;
+      return session.keeps
+        ? `Peer: you changed ${changed} and the shared context you keep (${session.contextPath}) is still empty. Note there where the work stands and what you found; your teammates' agents read it.`
+        : `Peer: you changed ${changed} and your working context (${session.contextPath}) is still empty. Note there what you are doing and what you found; put what your teammates' agents should know under "## For the team".`;
     }
     if (
       now - session.startedAt < NUDGE_MS ||
@@ -814,7 +1035,370 @@ export class CoordinationBroker {
     session.nudgedAt = now;
     const minutes = Math.round((now - session.contextAt) / 60_000);
     this.log("context.nudged", { session: session.id, why: "stale", minutes });
-    return `Peer: your working context (${session.contextPath}) has not changed for ${minutes} minutes. Update it if your goal, findings or plan moved.`;
+    return `Peer: ${session.keeps ? "the shared context you keep" : "your working context"} (${session.contextPath}) has not changed for ${minutes} minutes. Update it if ${session.keeps ? "where the work stands, its findings or the plan" : "your goal, findings or plan"} moved.`;
+  }
+
+  // ---- shared contexts of work (experimental) ----
+
+  private sharedKey(workspace: string, project: string, scope: string) {
+    return `${workspace}\u0000${project}\u0000${scope}`;
+  }
+
+  private mirrorOf(session: LocalSession): SharedMirror | undefined {
+    return this.shared.get(
+      this.sharedKey(session.workspace, session.project, scopeOf(session.task)),
+    );
+  }
+
+  /** What a work is called: its task's name, or the project's work outside tasks. */
+  private subjectOf(workspace: string, project: string, scope: string) {
+    return scope.startsWith("task:")
+      ? this.deps.taskName(workspace, project, scope.slice("task:".length))
+      : `${project} (work outside tasks)`;
+  }
+
+  private sharedOf(mirror: SharedMirror): SharedContext {
+    return {
+      subject: this.subjectOf(mirror.workspace, mirror.project, mirror.scope),
+      path: mirror.path,
+      text: mirror.text,
+      version: mirror.version,
+      keeper:
+        mirror.keeper === undefined
+          ? undefined
+          : this.deps.nameOf(mirror.workspace, mirror.keeper.email),
+    };
+  }
+
+  /** Who keeps the shared context of a session's work, when it is another session still at work. */
+  private keeperOf(session: LocalSession): HubContextKeeper | undefined {
+    const keeper = this.mirrorOf(session)?.keeper;
+    if (keeper === undefined || keeper.session === session.id) return undefined;
+    const atWork = this.merged(session.workspace, this.views.get(session.workspace)).sessions;
+    return atWork.some((s) => s.id === keeper.session) ? keeper : undefined;
+  }
+
+  /** The other agents at work on the same work, as people name them. */
+  private agentsOn(session: LocalSession): string[] {
+    return this.merged(session.workspace, this.views.get(session.workspace))
+      .sessions.filter(
+        (s) =>
+          s.id !== session.id &&
+          s.project === session.project &&
+          scopeOf(s.task) === scopeOf(session.task),
+      )
+      .map((s) => `${this.deps.nameOf(session.workspace, s.email)}'s agent ("${s.label}")`);
+  }
+
+  /**
+   * Takes in a shared context as the hub has it, in memory and in the file the
+   * agents here read: when it is newer than what is here, or with `force`.
+   */
+  private async mirror(
+    workspace: string,
+    context: HubContextText,
+    force = false,
+  ): Promise<SharedMirror> {
+    const key = this.sharedKey(workspace, context.project, context.scope);
+    const known = this.shared.get(key);
+    const mirror: SharedMirror = known ?? {
+      workspace,
+      project: context.project,
+      scope: context.scope,
+      path: NodePath.join(
+        this.deps.contextsDir,
+        safePart(workspace),
+        safePart(context.project),
+        "shared",
+        `${safePart(context.scope)}.md`,
+      ),
+      version: -1,
+      text: "",
+      keeper: undefined,
+      updatedAt: context.updatedAt,
+      updatedBy: undefined,
+      unsent: false,
+    };
+    this.shared.set(key, mirror);
+    mirror.keeper = context.keeper;
+    if (!force && context.version <= mirror.version) return mirror;
+    // Nobody wrote it yet: its keeper starts from a template, which is not news to anyone.
+    const file =
+      context.text.trim() === ""
+        ? sharedTemplate(this.subjectOf(workspace, context.project, context.scope))
+        : context.text;
+    mirror.version = context.version;
+    mirror.text = file;
+    mirror.updatedAt = context.updatedAt;
+    mirror.updatedBy = context.updatedBy;
+    mirror.unsent = false;
+    try {
+      await NodeFSP.mkdir(NodePath.dirname(mirror.path), { recursive: true });
+      await NodeFSP.writeFile(mirror.path, file);
+    } catch (error) {
+      this.log("shared.mirror.failed", { path: mirror.path, error: messageOf(error) });
+    }
+    return mirror;
+  }
+
+  /** Asks the hub for the session to keep its work's shared context; otherwise reads it. */
+  private async takeUp(session: LocalSession): Promise<void> {
+    const scope = scopeOf(session.task);
+    let answer: HubContextText | ContextRefusal;
+    try {
+      answer = await this.deps.keepContext(
+        session.workspace,
+        session.project,
+        scope,
+        session.id,
+        false,
+      );
+    } catch (error) {
+      this.log("shared.failed", { session: session.id, scope, error: messageOf(error) });
+      return;
+    }
+    if ("refused" in answer) {
+      const current =
+        answer.refused === "stale"
+          ? answer.current
+          : await this.deps
+              .readContext(session.workspace, session.project, scope)
+              .catch(() => null);
+      if (current !== null) await this.mirror(session.workspace, current);
+      if (session.keeps) await this.read(session);
+      this.log("shared.read", {
+        session: session.id,
+        scope,
+        keeper: answer.refused === "kept" ? answer.keeper?.session : undefined,
+        version: current?.version,
+      });
+      return;
+    }
+    this.keep(session, await this.mirror(session.workspace, answer));
+    this.log("shared.kept", { session: session.id, scope, version: answer.version });
+  }
+
+  private keep(session: LocalSession, mirror: SharedMirror) {
+    session.keeps = true;
+    session.contextPath = mirror.path;
+    session.sharedHeard = mirror.version;
+    session.sharedHeardText = mirror.text;
+    session.contextKept = contextWritten(mirror.text);
+    session.remindedAtStart = false;
+    session.contextAt = Date.now();
+    mirror.keeper = {
+      session: session.id,
+      email: this.deps.email() ?? "",
+      environment: this.deps.environment,
+      since: new Date().toISOString(),
+    };
+  }
+
+  /** The session no longer keeps the shared context: its own working context is its own again. */
+  private async read(session: LocalSession) {
+    session.keeps = false;
+    session.contextPath = session.ownContextPath;
+    session.contextKept = false;
+    await this.restoreContext(session);
+  }
+
+  /** Gives up the shared context a session keeps, so the next agent on the work keeps it at once. */
+  private async release(session: LocalSession): Promise<void> {
+    if (!session.keeps) return;
+    session.keeps = false;
+    session.contextPath = session.ownContextPath;
+    const scope = scopeOf(session.task);
+    this.log("shared.released", { session: session.id, scope });
+    await this.deps
+      .keepContext(session.workspace, session.project, scope, session.id, true)
+      .catch((error: unknown) =>
+        this.log("shared.release.failed", { session: session.id, scope, error: messageOf(error) }),
+      );
+  }
+
+  /** When the keeper changed the shared context, the hub gets the new version. */
+  private async saveShared(session: LocalSession) {
+    const mirror = this.mirrorOf(session);
+    if (mirror === undefined) return;
+    const text = await NodeFSP.readFile(mirror.path, "utf8").catch(() => null);
+    if (text === null || text === mirror.text) return;
+    session.contextAt = Date.now();
+    session.contextKept = contextWritten(text);
+    mirror.text = text;
+    mirror.unsent = true;
+    await this.pushShared(session, mirror);
+  }
+
+  private async pushShared(session: LocalSession, mirror: SharedMirror) {
+    let answer: HubContextText | ContextRefusal;
+    try {
+      answer = await this.deps.writeContext(
+        mirror.workspace,
+        mirror.project,
+        mirror.scope,
+        session.id,
+        mirror.version,
+        mirror.text,
+      );
+    } catch (error) {
+      // It goes again at the next sync.
+      this.log("shared.unsent", {
+        session: session.id,
+        scope: mirror.scope,
+        error: messageOf(error),
+      });
+      return;
+    }
+    const subject = this.subjectOf(mirror.workspace, mirror.project, mirror.scope);
+    if (!("refused" in answer)) {
+      mirror.version = answer.version;
+      mirror.updatedAt = answer.updatedAt;
+      mirror.updatedBy = answer.updatedBy;
+      mirror.unsent = false;
+      session.sharedHeard = answer.version;
+      session.sharedHeardText = mirror.text;
+      this.log("shared.written", {
+        session: session.id,
+        scope: mirror.scope,
+        version: answer.version,
+        bytes: mirror.text.length,
+      });
+      this.deps.changed();
+      return;
+    }
+    if (answer.refused === "stale") {
+      await this.mirror(mirror.workspace, answer.current, true);
+      const by = answer.current.updatedBy;
+      session.pending.push(
+        `Peer: the shared context of ${subject} changed meanwhile (version ${answer.current.version}${by === undefined ? "" : `, by ${this.deps.nameOf(mirror.workspace, by)}'s agent`}); ${mirror.path} now has that version. Make your change again on top of it.`,
+      );
+      this.log("shared.stale", {
+        session: session.id,
+        scope: mirror.scope,
+        version: answer.current.version,
+      });
+      return;
+    }
+    const current = await this.deps
+      .readContext(mirror.workspace, mirror.project, mirror.scope)
+      .catch(() => null);
+    if (current !== null) await this.mirror(mirror.workspace, current, true);
+    else mirror.unsent = false;
+    await this.read(session);
+    const who =
+      answer.keeper === undefined
+        ? "Another agent"
+        : `${this.deps.nameOf(mirror.workspace, answer.keeper.email)}'s agent`;
+    session.pending.push(
+      `Peer: ${who} keeps the shared context of ${subject} now, so your last change to it was not shared. Your working context is ${session.ownContextPath} again; put what the work should know under "## For the team" there.`,
+    );
+    this.log("shared.lost", {
+      session: session.id,
+      scope: mirror.scope,
+      keeper: answer.keeper?.session,
+    });
+  }
+
+  /**
+   * After a view: newer shared contexts are read, a keeper that lost its work's
+   * context hears so, one agent here asks to keep a context nobody keeps, and
+   * a keeper's unsent change goes again.
+   */
+  private async followShared(workspace: string) {
+    const view = this.views.get(workspace);
+    // A hub from before shared contexts lists none.
+    if (view?.contexts === undefined) return;
+    const atWork = new Set(view.sessions.map((s) => s.id));
+    const works = new Map<string, LocalSession[]>();
+    for (const session of this.sessions.values()) {
+      if (session.workspace !== workspace) continue;
+      const key = this.sharedKey(workspace, session.project, scopeOf(session.task));
+      works.set(key, [...(works.get(key) ?? []), session]);
+    }
+    for (const [key, sessions] of works) {
+      const first = sessions[0];
+      if (first === undefined) continue;
+      const scope = scopeOf(first.task);
+      const subject = this.subjectOf(workspace, first.project, scope);
+      const listed = view.contexts.find((c) => c.project === first.project && c.scope === scope);
+      let mirror = this.shared.get(key);
+      if (listed !== undefined && listed.version > (mirror?.version ?? -1)) {
+        const current = await this.deps
+          .readContext(workspace, first.project, scope)
+          .catch(() => null);
+        if (current !== null) mirror = await this.mirror(workspace, current);
+      }
+      if (mirror !== undefined && listed !== undefined) mirror.keeper = listed.keeper;
+      for (const session of sessions) {
+        if (
+          !session.keeps ||
+          listed?.keeper === undefined ||
+          listed.keeper.session === session.id
+        ) {
+          continue;
+        }
+        await this.read(session);
+        session.pending.push(
+          `Peer: ${this.deps.nameOf(workspace, listed.keeper.email)}'s agent keeps the shared context of ${subject} now. Your working context is ${session.ownContextPath} again; put what the work should know under "## For the team" there.`,
+        );
+        this.log("shared.lost", { session: session.id, scope, keeper: listed.keeper.session });
+      }
+      const keeper = sessions.find((s) => s.keeps);
+      if (keeper !== undefined) {
+        // An unsent change goes again; an edit its hooks did not see (through Bash, say) goes too.
+        const kept = this.mirrorOf(keeper);
+        if (kept?.unsent === true) await this.pushShared(keeper, kept);
+        else await this.saveShared(keeper);
+        continue;
+      }
+      if (listed?.keeper !== undefined && atWork.has(listed.keeper.session)) continue;
+      if (Date.now() - (this.claimedAt.get(key) ?? 0) < CLAIM_GAP_MS) continue;
+      this.claimedAt.set(key, Date.now());
+      // The agent most at work here takes it over; one starting takes it up as it starts.
+      const next = sessions
+        .filter((s) => !s.starting)
+        .toSorted(
+          (a, b) =>
+            Number(b.status === "working") - Number(a.status === "working") ||
+            b.lastActivity - a.lastActivity,
+        )[0];
+      if (next === undefined) continue;
+      await this.takeUp(next);
+      const kept = this.mirrorOf(next);
+      if (!next.keeps || kept === undefined) continue;
+      const before = listed?.keeper;
+      const since = kept.version === 0 ? 0 : Date.parse(kept.updatedAt);
+      const findings = findingsOnWork(this.holder(next), this.findingsOf(workspace), next.heard);
+      for (const finding of findings) next.heard.add(finding.id);
+      const fresh = findings.filter((finding) => Date.parse(finding.at) > since).slice(0, 10);
+      next.pending.push(
+        [
+          `Peer: you keep the shared context of ${subject} now${before === undefined ? "" : `; ${this.deps.nameOf(workspace, before.email)}'s agent kept it before`}. It is your working context from now on: carry over what matters from ${next.ownContextPath}, then keep it current.`,
+          keeperSkill(kept.path, subject),
+          contextWritten(kept.text)
+            ? `It reads now (version ${kept.version}):\n\n${kept.text.trim().slice(0, 12_000)}`
+            : "Nobody has written it yet: Peer started it from a template.",
+          ...(fresh.length === 0
+            ? []
+            : [findingsForKeeper({ subject, findings: fresh, nameOf: this.nameOf(workspace) })]),
+        ].join("\n\n"),
+      );
+      this.log("shared.handed", {
+        session: next.id,
+        scope,
+        from: before?.session,
+        version: kept.version,
+      });
+    }
+  }
+
+  /** The task a session works on now: the one its herdr agent was put on, or the one its branch names. */
+  private taskFor(session: LocalSession) {
+    const title = session.pane === undefined ? undefined : this.deps.herdrTitle(session.pane);
+    return this.deps.taskOf(session.workspace, session.project, `herdr:${session.id}`, [
+      session.branch,
+      title,
+    ]);
   }
 
   // ---- waking idle agents ----
@@ -1153,8 +1737,19 @@ export class CoordinationBroker {
       const now = Date.now();
       for (const [id, session] of this.sessions) {
         if (now - session.lastActivity > SESSION_TTL_MS) {
+          void this.release(session);
           this.sessions.delete(id);
           this.log("session.expired", { session: id });
+          continue;
+        }
+        // Put on another task (or taken off one): its work, and the shared context with it, change.
+        const task = this.taskFor(session);
+        if (task !== session.task) {
+          await this.release(session);
+          this.log("session.task", { session: id, from: session.task, to: task });
+          session.task = task;
+          session.sharedHeard = 0;
+          session.sharedHeardText = "";
         }
       }
       const workspaces = new Set<string>([
@@ -1192,6 +1787,7 @@ export class CoordinationBroker {
             ms: Date.now() - started,
           });
           this.afterViewChange(workspace);
+          await this.followShared(workspace);
         } catch (error) {
           this.log("sync.failed", {
             workspace,
@@ -1277,6 +1873,10 @@ function realPath(path: string): string {
       existing = parent;
     }
   }
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function headerOf(headers: NodeHttp.IncomingHttpHeaders, name: string): string | undefined {
