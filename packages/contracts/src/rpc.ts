@@ -341,6 +341,9 @@ import {
   PeerHubObserveInput,
   PeerHubContextInput,
   PeerHubContextVersionInput,
+  PeerHubCandidatesInput,
+  PeerHubDecideCandidateInput,
+  PeerKnowledgeCandidate,
   PeerContextVersion,
   PeerContextVersionText,
   PeerWorkContextText,
@@ -522,6 +525,8 @@ export const WS_METHODS = {
   peerHubContextVersions: "peerHub.contextVersions",
   peerHubReadContextVersion: "peerHub.readContextVersion",
   peerHubRestoreContext: "peerHub.restoreContext",
+  peerHubKnowledgeCandidates: "peerHub.knowledgeCandidates",
+  peerHubDecideCandidate: "peerHub.decideCandidate",
   peerHubShareProject: "peerHub.shareProject",
   peerHubUnshareProject: "peerHub.unshareProject",
   peerHubInvite: "peerHub.invite",
@@ -1887,6 +1892,20 @@ const WsPeerHubRestoreContextRpc = Rpc.make(WS_METHODS.peerHubRestoreContext, {
   error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
 });
 
+/** A project's knowledge candidates: proposed first, most independent finders first. */
+const WsPeerHubKnowledgeCandidatesRpc = Rpc.make(WS_METHODS.peerHubKnowledgeCandidates, {
+  payload: PeerHubCandidatesInput,
+  success: Schema.Array(PeerKnowledgeCandidate),
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
+/** A person dismisses a knowledge candidate, promotes it, or proposes it again. */
+const WsPeerHubDecideCandidateRpc = Rpc.make(WS_METHODS.peerHubDecideCandidate, {
+  payload: PeerHubDecideCandidateInput,
+  success: PeerHubStatus,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
 const WsPeerHubShareProjectRpc = Rpc.make(WS_METHODS.peerHubShareProject, {
   payload: PeerHubShareProjectInput,
   success: PeerHubStatus,
@@ -2026,6 +2045,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsPeerHubContextVersionsRpc,
   WsPeerHubReadContextVersionRpc,
   WsPeerHubRestoreContextRpc,
+  WsPeerHubKnowledgeCandidatesRpc,
+  WsPeerHubDecideCandidateRpc,
   WsPeerHubShareProjectRpc,
   WsPeerHubUnshareProjectRpc,
   WsPeerHubInviteRpc,

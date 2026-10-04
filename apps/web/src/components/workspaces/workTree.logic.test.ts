@@ -178,6 +178,7 @@ function status(project: PeerProjectState, role: "owner" | "member" = "owner"): 
       overlaps: [],
       findings: [],
       contexts: [],
+      candidates: [],
     },
     sharedThreads: ["peer:t1"],
     syncing: false,

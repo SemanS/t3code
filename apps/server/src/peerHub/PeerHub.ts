@@ -40,6 +40,9 @@ import {
   type PeerHubAgentInput,
   type PeerHubContextInput,
   type PeerHubContextVersionInput,
+  type PeerHubCandidatesInput,
+  type PeerHubDecideCandidateInput,
+  type PeerKnowledgeCandidate,
   type PeerContextVersion,
   type PeerContextVersionText,
   type PeerHubObserveInput,
@@ -431,6 +434,14 @@ export class PeerHub extends Context.Service<
     readonly restoreContext: (
       input: PeerHubContextVersionInput,
     ) => Effect.Effect<PeerHubStatus, PeerHubError>;
+    /** What agents found that a project may want to keep, weighed by independent finders. */
+    readonly knowledgeCandidates: (
+      input: PeerHubCandidatesInput,
+    ) => Effect.Effect<ReadonlyArray<PeerKnowledgeCandidate>, PeerHubError>;
+    /** A person dismisses a knowledge candidate, promotes it, or proposes it again. */
+    readonly decideCandidate: (
+      input: PeerHubDecideCandidateInput,
+    ) => Effect.Effect<PeerHubStatus, PeerHubError>;
     /** Shares a local project's repository with a workspace, as a project everyone works on. */
     readonly shareProject: (
       input: PeerHubShareProjectInput,
@@ -807,6 +818,7 @@ const make = Effect.gen(function* () {
       overlaps: [],
       findings: [],
       contexts: [],
+      candidates: [],
     };
     return {
       enabled: s.persisted.coordination?.enabled ?? false,
@@ -836,6 +848,7 @@ const make = Effect.gen(function* () {
         text: finding.text,
         email: finding.email,
         at: finding.at,
+        ...(finding.scope === undefined ? {} : { scope: finding.scope }),
       })),
       contexts: snapshot.contexts.map((context) => ({
         workspace: context.workspace,
@@ -849,6 +862,11 @@ const make = Effect.gen(function* () {
         ...(context.restoredFrom === undefined ? {} : { restoredFrom: context.restoredFrom }),
         ...(context.gist === undefined ? {} : { gist: context.gist }),
         bytes: context.bytes ?? 0,
+      })),
+      candidates: snapshot.candidates.map((waiting) => ({
+        workspace: waiting.workspace,
+        project: waiting.project,
+        proposed: waiting.proposed,
       })),
       overlaps: snapshot.overlaps.map((overlap) => ({
         id: overlap.id,
@@ -2513,6 +2531,30 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const knowledgeCandidates: PeerHub["Service"]["knowledgeCandidates"] = (input) =>
+    requireSession.pipe(
+      Effect.flatMap(({ hubUrl, session }) =>
+        hubApi.candidates(hubUrl, session, input.workspace, input.project),
+      ),
+    );
+
+  const decideCandidate: PeerHub["Service"]["decideCandidate"] = Effect.fn(
+    "PeerHub.decideCandidate",
+  )(function* (input) {
+    const { hubUrl, session } = yield* requireSession;
+    yield* hubApi.decideCandidate(
+      hubUrl,
+      session,
+      input.workspace,
+      input.project,
+      input.id,
+      input.status,
+    );
+    // The count waiting in Work follows from the next view.
+    broker?.hubChanged();
+    return yield* publish;
+  });
+
   const watchAgent: PeerHub["Service"]["watchAgent"] = (input) =>
     Stream.tick("1 second").pipe(
       Stream.mapEffect(() => agentView(input.agentId)),
@@ -2867,6 +2909,8 @@ const make = Effect.gen(function* () {
     contextVersions,
     readContextVersion,
     restoreContext,
+    knowledgeCandidates,
+    decideCandidate,
     shareProject,
     unshareProject,
   });

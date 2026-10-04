@@ -28,6 +28,7 @@ import {
   EllipsisIcon,
   EyeIcon,
   FileTextIcon,
+  LightbulbIcon,
   GitBranchIcon,
   MessageCircleQuestionIcon,
   PlusIcon,
@@ -418,11 +419,13 @@ export function WorkPanel() {
         ? `agent:${params.agentId}`
         : params.workspace && params.project && params.scope
           ? `context:${params.workspace}:${params.project}:${params.scope}`
-          : params.workspace && params.environment && params.thread
-            ? `observe:${params.workspace}:${params.environment}:${params.thread}`
-            : params.environmentId && params.threadId
-              ? `${params.environmentId}:${params.threadId}`
-              : null,
+          : params.workspace && params.project
+            ? `knowledge:${params.workspace}:${params.project}`
+            : params.workspace && params.environment && params.thread
+              ? `observe:${params.workspace}:${params.environment}:${params.thread}`
+              : params.environmentId && params.threadId
+                ? `${params.environmentId}:${params.threadId}`
+                : null,
   });
   const tree = useMemo(
     () => (status === null ? [] : buildWorkTree({ status, localThreads: threads, now })),
@@ -759,6 +762,14 @@ function ProjectSection({
               scope={scope}
               areas={project.areas.flatMap((a) => (a.name === null ? [] : [a.name]))}
               onDone={() => setAdding(false)}
+            />
+          ) : null}
+          {project.candidates > 0 ? (
+            <KnowledgeRow
+              workspace={project.workspace}
+              project={project.projectId}
+              count={project.candidates}
+              activeThread={activeThread}
             />
           ) : null}
           {checkout !== undefined && checkout.projectId === undefined ? (
@@ -1160,6 +1171,41 @@ function ContextRow({
         </TooltipPopup>
       </Tooltip>
     </li>
+  );
+}
+
+/** What agents found that the project may want to keep, waiting for people to decide. */
+function KnowledgeRow({
+  workspace,
+  project,
+  count,
+  activeThread,
+}: {
+  readonly workspace: string;
+  readonly project: string;
+  readonly count: number;
+  readonly activeThread: string | null;
+}) {
+  const navigate = useNavigate();
+  const active = activeThread === `knowledge:${workspace}:${project}`;
+  return (
+    <button
+      type="button"
+      aria-current={active ? "page" : undefined}
+      className={cn(
+        "flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left text-xs text-muted-foreground",
+        active ? "bg-sidebar-row-active" : "hover:bg-sidebar-row-hover",
+      )}
+      onClick={() =>
+        void navigate({ to: "/knowledge/$workspace/$project", params: { workspace, project } })
+      }
+    >
+      <LightbulbIcon aria-hidden className="size-3.5 shrink-0" />
+      <span className="min-w-0 flex-1 truncate font-medium text-sidebar-foreground">
+        Knowledge to keep
+      </span>
+      <span className="shrink-0 text-info tabular-nums">{count}</span>
+    </button>
   );
 }
 

@@ -389,8 +389,47 @@ export const PeerFinding = Schema.Struct({
   /** Whose agent found it. */
   email: Schema.String,
   at: Schema.String,
+  /** `project` when its agent marked it as holding beyond its task. */
+  scope: Schema.optional(Schema.Literals(["task", "project"])),
 });
 export type PeerFinding = typeof PeerFinding.Type;
+
+/** One finding behind a knowledge candidate. */
+export const PeerCandidateSource = Schema.Struct({
+  finding: Schema.String,
+  email: Schema.String,
+  session: Schema.String,
+  task: Schema.optional(Schema.String),
+  text: Schema.String,
+  /** Its agent marked it for the project. */
+  tagged: Schema.Boolean,
+  /** It found this on its own: on another work, without having heard it first. */
+  independent: Schema.Boolean,
+  at: Schema.String,
+});
+export type PeerCandidateSource = typeof PeerCandidateSource.Type;
+
+/**
+ * Something agents found that the project may want to keep: a finding its agent
+ * marked for the project, or findings that match across works. People dismiss
+ * it or promote it into the project's knowledge.
+ */
+export const PeerKnowledgeCandidate = Schema.Struct({
+  id: Schema.String,
+  project: Schema.String,
+  text: Schema.String,
+  sources: Schema.Array(PeerCandidateSource),
+  /** Agents that found it on their own. */
+  finders: Schema.Number,
+  status: Schema.Literals(["proposed", "dismissed", "promoted"]),
+  decidedBy: Schema.optional(Schema.String),
+  decidedAt: Schema.optional(Schema.String),
+  /** Found again, on its own, after people dismissed it. */
+  reopened: Schema.optional(Schema.Boolean),
+  firstAt: Schema.String,
+  lastAt: Schema.String,
+});
+export type PeerKnowledgeCandidate = typeof PeerKnowledgeCandidate.Type;
 
 /** Who keeps a shared context: one agent session at a time. */
 export const PeerContextKeeper = Schema.Struct({
@@ -472,6 +511,10 @@ export const PeerCoordinationState = Schema.Struct({
   findings: Schema.Array(PeerFinding),
   /** The shared contexts of your projects' tasks, without their text. */
   contexts: Schema.Array(PeerWorkContext),
+  /** How many knowledge candidates wait for people, per project. */
+  candidates: Schema.Array(
+    Schema.Struct({ workspace: Schema.String, project: Schema.String, proposed: Schema.Number }),
+  ),
 });
 export type PeerCoordinationState = typeof PeerCoordinationState.Type;
 
@@ -670,6 +713,22 @@ export const PeerHubContextInput = Schema.Struct({
   version: Schema.optional(Schema.Number),
 });
 export type PeerHubContextInput = typeof PeerHubContextInput.Type;
+
+/** A project's knowledge candidates; `waiting` is the count the caller knows of, so a new one reads again. */
+export const PeerHubCandidatesInput = Schema.Struct({
+  workspace: TrimmedNonEmptyString,
+  project: TrimmedNonEmptyString,
+  waiting: Schema.optional(Schema.Number),
+});
+export type PeerHubCandidatesInput = typeof PeerHubCandidatesInput.Type;
+
+export const PeerHubDecideCandidateInput = Schema.Struct({
+  workspace: TrimmedNonEmptyString,
+  project: TrimmedNonEmptyString,
+  id: TrimmedNonEmptyString,
+  status: Schema.Literals(["proposed", "dismissed", "promoted"]),
+});
+export type PeerHubDecideCandidateInput = typeof PeerHubDecideCandidateInput.Type;
 
 /** One kept version of a shared context. */
 export const PeerHubContextVersionInput = Schema.Struct({

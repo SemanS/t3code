@@ -15,6 +15,7 @@
 //      versions, a person can bring one back, and a compaction gives each agent back its context.
 //   7. After Peer restarts, a session it meets again keeps what it shared.
 //   8. When the keeper's session ends, the other agent keeps the shared context.
+//   9. A line the keeper marks [project] becomes a knowledge candidate that a person dismisses.
 //
 // It prints what each agent was told and leaves both computers' coordination logs.
 //
@@ -670,6 +671,41 @@ const program = Effect.gen(function* () {
   );
   check(decision(editShared(bobs, bobShared)) === "allow", "and may edit it now");
 
+  // 9. What an agent marks for the project becomes a knowledge candidate people decide on.
+  NodeFS.writeFileSync(
+    bobShared,
+    `${NodeFS.readFileSync(bobShared, "utf8")}\n## Findings\n- [project] totalPrice() is the only way into pricing; price() is gone\n`,
+  );
+  bobs.hook("PostToolUse", {
+    tool_name: "Write",
+    tool_input: { file_path: bobShared, content: "(the context above)" },
+  });
+  yield* Effect.promise(() => sleep(3500));
+  const candidates = yield* ana.client[WS_METHODS.peerHubKnowledgeCandidates]({
+    workspace: "acme",
+    project: "lab",
+  });
+  told("Ana's Peer (knowledge candidates)", JSON.stringify(candidates, null, 2));
+  const candidate = candidates.find((c) => c.text.startsWith("totalPrice() is the only way"));
+  check(
+    candidate !== undefined && candidate.finders === 1 && candidate.sources[0]?.tagged === true,
+    "a line the keeper marked for the project is a knowledge candidate, its mark taken off",
+  );
+  yield* ana.client[WS_METHODS.peerHubDecideCandidate]({
+    workspace: "acme",
+    project: "lab",
+    id: candidate.id,
+    status: "dismissed",
+  });
+  const decided = yield* bob.client[WS_METHODS.peerHubKnowledgeCandidates]({
+    workspace: "acme",
+    project: "lab",
+  });
+  check(
+    decided.find((c) => c.id === candidate.id)?.status === "dismissed",
+    "a person dismisses it, for everyone on the project",
+  );
+
   for (const computer of [ana, bob]) {
     const lines = NodeFS.readFileSync(computer.log, "utf8").trim().split("\n");
     const events = lines.map((line) => (JSON.parse(line) as { event: string }).event);
@@ -869,7 +905,17 @@ try {
   say("FAIL", error instanceof Error ? error.message : String(error));
   process.exitCode = 1;
 } finally {
-  for (const child of children) if (child.exitCode === null) child.kill("SIGTERM");
+  // The computers first: as their Peers stop, their brokers hand back the contexts their agents
+  // kept, which needs the hub still up. Then the hub.
+  const running = (child: NodeChildProcess.ChildProcess) =>
+    child.exitCode === null && child.signalCode === null;
+  const peers = children.filter((child) => child !== hub.child && running(child));
+  const stopped = peers.map(
+    (child) => new Promise<void>((resolve) => child.once("exit", () => resolve())),
+  );
+  for (const child of peers) child.kill("SIGTERM");
+  await Promise.race([Promise.all(stopped), sleep(5000)]);
+  if (running(hub.child)) hub.child.kill("SIGTERM");
   await sleep(500);
   if (process.env.KEEP_LAB === "1") say("kept", lab);
   else NodeFS.rmSync(lab, { recursive: true, force: true });

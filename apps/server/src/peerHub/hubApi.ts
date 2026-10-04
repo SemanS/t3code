@@ -136,6 +136,8 @@ const HubFinding = Schema.Struct({
   session: Schema.String,
   environment: Schema.String,
   at: Schema.String,
+  /** `project` when its agent marked it as holding beyond its task. */
+  scope: Schema.optional(Schema.Literals(["task", "project"])),
 });
 export type HubFinding = typeof HubFinding.Type;
 
@@ -206,8 +208,39 @@ const CoordView = Schema.Struct({
   findings: Schema.optional(Schema.Array(HubFinding)),
   /** Nor before shared contexts. */
   contexts: Schema.optional(Schema.Array(HubContext)),
+  /** How many knowledge candidates wait for people, per project. */
+  candidates: Schema.optional(
+    Schema.Array(Schema.Struct({ project: Schema.String, proposed: Schema.Number })),
+  ),
   at: Schema.String,
 });
+
+const HubCandidateSource = Schema.Struct({
+  finding: Schema.String,
+  email: Schema.String,
+  session: Schema.String,
+  task: Schema.optional(Schema.String),
+  text: Schema.String,
+  tagged: Schema.Boolean,
+  independent: Schema.Boolean,
+  at: Schema.String,
+});
+
+/** Something agents found that the project may want to keep, weighed by independent finders. */
+const HubKnowledgeCandidate = Schema.Struct({
+  id: Schema.String,
+  project: Schema.String,
+  text: Schema.String,
+  sources: Schema.Array(HubCandidateSource),
+  finders: Schema.Number,
+  status: Schema.Literals(["proposed", "dismissed", "promoted"]),
+  decidedBy: Schema.optional(Schema.String),
+  decidedAt: Schema.optional(Schema.String),
+  reopened: Schema.optional(Schema.Boolean),
+  firstAt: Schema.String,
+  lastAt: Schema.String,
+});
+export type HubKnowledgeCandidate = typeof HubKnowledgeCandidate.Type;
 export type HubCoordView = typeof CoordView.Type;
 
 /** One agent session as this environment reports it for coordination. */
@@ -226,6 +259,8 @@ export interface ReportedSession {
   readonly findings?: ReadonlyArray<string>;
   /** When its agent last did something: an idle keeper gives way to an agent at work. */
   readonly activeAt?: string;
+  /** The findings it heard: saying one of them again is no independent discovery. */
+  readonly heard?: ReadonlyArray<string>;
 }
 
 const Ok = Schema.Struct({});
@@ -571,6 +606,32 @@ export const make = Effect.gen(function* () {
         path: workspacePath(slug, `/contexts/${segment(project)}/${segment(scope)}`),
         session,
         notFound: { value: null },
+      }),
+
+    /** A project's knowledge candidates: proposed first, most independent finders first. */
+    candidates: (hubUrl: string, session: string, slug: string, project: string) =>
+      request(Schema.Array(HubKnowledgeCandidate), {
+        hubUrl,
+        path: workspacePath(slug, `/candidates/${segment(project)}`),
+        session,
+        notFound: { value: [] },
+      }),
+
+    /** A person dismisses a candidate, promotes it, or proposes it again. */
+    decideCandidate: (
+      hubUrl: string,
+      session: string,
+      slug: string,
+      project: string,
+      id: string,
+      status: "proposed" | "dismissed" | "promoted",
+    ) =>
+      request(HubKnowledgeCandidate, {
+        hubUrl,
+        path: workspacePath(slug, `/candidates/${segment(project)}/${segment(id)}`),
+        method: "POST",
+        session,
+        body: { status },
       }),
 
     /** The versions of a shared context the hub keeps, newest first. */

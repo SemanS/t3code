@@ -2078,6 +2078,16 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.peerHubRestoreContext, peerHub.restoreContext(input), {
             "rpc.aggregate": "peerHub",
           }),
+        [WS_METHODS.peerHubKnowledgeCandidates]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.peerHubKnowledgeCandidates,
+            peerHub.knowledgeCandidates(input),
+            { "rpc.aggregate": "peerHub" },
+          ),
+        [WS_METHODS.peerHubDecideCandidate]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubDecideCandidate, peerHub.decideCandidate(input), {
+            "rpc.aggregate": "peerHub",
+          }),
         [WS_METHODS.peerHubShareProject]: (input) =>
           observeRpcEffect(WS_METHODS.peerHubShareProject, peerHub.shareProject(input), {
             "rpc.aggregate": "peerHub",

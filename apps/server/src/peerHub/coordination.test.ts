@@ -17,6 +17,7 @@ import {
   isPlainCliCall,
   mentionsCli,
   newsFor,
+  projectLines,
   repositoryPath,
   rosterChange,
   startContext,
@@ -502,6 +503,23 @@ describe("working context", () => {
       undefined,
     );
     assert.include(rewritten, "<shared-context>\n# all new\n- one\n</shared-context>");
+  });
+
+  it("reads the lines an agent marked for the project, anywhere in its context", () => {
+    const markdown = [
+      "# KRK-335",
+      "## Findings",
+      "- [project] Callers map every `checked_addr` error to url_not_public",
+      "- the resolver has no timeout of its own",
+      "## For the team",
+      "* [Project] worker.rs uses a plain reqwest client, outside the net.rs guard",
+      "- [projector] is not a mark",
+    ].join("\n");
+    assert.deepStrictEqual(projectLines(markdown), [
+      "[project] Callers map every `checked_addr` error to url_not_public",
+      "[Project] worker.rs uses a plain reqwest client, outside the net.rs guard",
+    ]);
+    assert.include(contextSkill("/peer/me.md"), "Start a line with [project]");
   });
 
   it("tells a context the agent wrote from Peer's empty template", () => {

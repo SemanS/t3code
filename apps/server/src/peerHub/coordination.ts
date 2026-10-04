@@ -466,6 +466,7 @@ export function contextSkill(path: string): string {
     `Peer keeps your working context in ${path}. It is yours: keep it short (under about 60 lines) and current, and edit it with your usual tools whenever your goal, plan, findings or blockers change. It is not a log.`,
     "Keep: the goal; what you are doing now; findings with exact file names and symbols; decisions and why; hypotheses marked unconfirmed; approaches that failed; what you need from whom. Drop what no longer matters and sum up finished work in a line. After a compaction or a resume, this file is what you get back.",
     `Under "## For the team" keep 1-5 bullet lines (- ...) your teammates' agents should know: findings that hold beyond your session, what you change and will not change. Peer passes them to the agent keeping your task's shared context, and to agents whose files they name. Never put secrets there.`,
+    `Start a line with [project] when it holds beyond this task and the project should keep it: how the code behaves, a pitfall someone will hit again, a risk, why something is built as it is. Peer offers those lines to the project's people as knowledge to keep. Your progress, plans and what you change are for the team on this task: leave them unmarked.`,
   ].join("\n");
 }
 
@@ -479,6 +480,7 @@ export function keeperSkill(path: string, subject: string): string {
     "Start it with one line on where the work stands: people see that line in Peer. Then keep findings with exact file names and symbols; decisions and why; blockers and whom they wait on; which agent works on what; what was tried and failed, and ideas not tried yet; what comes next. Mark hypotheses as unconfirmed.",
     `Keep it small, under about 6K tokens. At a milestone, sum up the finished part in a line. Peer keeps your recent versions, so compact without fear: where you drop detail, leave a pointer such as "(details: version 7)", and \`${PEER_CONTEXT_COMMAND} 7\` reads that version back.`,
     "Peer passes you what your teammates' agents find. Fold in what holds and concerns this work, saying whose agent found it, and leave the rest out. Write facts and state, not instructions to other agents, and never secrets. After a compaction or a resume this file is what you get back; when your session ends or you stay idle while another agent works on it, that agent keeps it.",
+    "Start a bullet with [project] when it holds beyond this work and the project should keep it (how the code behaves, a pitfall, a risk, why something is built as it is): Peer offers it to the project's people as knowledge to keep.",
   ].join("\n");
 }
 
@@ -570,6 +572,21 @@ export function teamLines(markdown: string): string[] {
     const bullet = /^\s*(?:[-*+]|\d+[.)])\s+(.+)$/.exec(line)?.[1]?.trim();
     if (bullet === undefined || bullet.startsWith("<!--") || found.includes(bullet)) continue;
     found.push(cut(bullet, 300));
+    if (found.length === 5) break;
+  }
+  return found;
+}
+
+/**
+ * The bullet lines anywhere in a context that start with `[project]`: what its
+ * agent marked as holding beyond its work, for the project to keep.
+ */
+export function projectLines(markdown: string): string[] {
+  const found: string[] = [];
+  for (const line of markdown.split("\n")) {
+    const bullet = /^\s*(?:[-*+]|\d+[.)])\s+(\[project\].+)$/i.exec(line)?.[1]?.trim();
+    if (bullet === undefined || found.includes(bullet)) continue;
+    found.push(cut(bullet, 310));
     if (found.length === 5) break;
   }
   return found;

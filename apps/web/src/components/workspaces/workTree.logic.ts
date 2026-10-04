@@ -140,6 +140,8 @@ export interface WorkProjectNode {
   readonly unsorted: ReadonlyArray<WorkThreadNode>;
   /** The shared context of the project's work on no task. */
   readonly context: WorkContextNode | undefined;
+  /** Knowledge candidates waiting for people to keep or dismiss. */
+  readonly candidates: number;
   readonly tasks: ReadonlyArray<PeerTask>;
 }
 
@@ -448,6 +450,10 @@ function projectTree(input: {
       .map((entry) => keeping(projectContext)(entry.node))
       .toSorted(byActivity),
     context: projectContext,
+    candidates:
+      status.coordination.candidates.find(
+        (waiting) => waiting.workspace === workspace.slug && waiting.project === state.project.id,
+      )?.proposed ?? 0,
     tasks: work.tasks,
   };
 }

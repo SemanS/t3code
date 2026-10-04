@@ -243,6 +243,7 @@ const SIGNED_OUT: PeerHubStatus = {
     overlaps: [],
     findings: [],
     contexts: [],
+    candidates: [],
   },
   sharedThreads: [],
   syncing: false,

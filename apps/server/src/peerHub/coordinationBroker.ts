@@ -32,6 +32,7 @@ import {
   keeperSkill,
   mentionsCli,
   newsFor,
+  projectLines,
   repositoryPath,
   rosterChange,
   scopeOf,
@@ -368,11 +369,17 @@ export class CoordinationBroker {
     readonly overlaps: ReadonlyArray<HubOverlap & { readonly workspace: string }>;
     readonly findings: ReadonlyArray<HubFinding & { readonly workspace: string }>;
     readonly contexts: ReadonlyArray<HubContext & { readonly workspace: string }>;
+    readonly candidates: ReadonlyArray<{
+      readonly workspace: string;
+      readonly project: string;
+      readonly proposed: number;
+    }>;
   } {
     const sessions = [];
     const overlaps = [];
     const findings = [];
     const contexts = [];
+    const candidates = [];
     for (const [workspace, view] of this.views) {
       for (const session of this.merged(workspace, view).sessions) {
         sessions.push({ ...session, workspace, local: this.sessions.has(session.id) });
@@ -380,8 +387,9 @@ export class CoordinationBroker {
       for (const overlap of view.overlaps) overlaps.push({ ...overlap, workspace });
       for (const finding of view.findings ?? []) findings.push({ ...finding, workspace });
       for (const context of view.contexts ?? []) contexts.push({ ...context, workspace });
+      for (const waiting of view.candidates ?? []) candidates.push({ ...waiting, workspace });
     }
-    return { sessions, overlaps, findings, contexts };
+    return { sessions, overlaps, findings, contexts, candidates };
   }
 
   /** A person's note on an overlap, from Peer. */
@@ -1340,6 +1348,7 @@ export class CoordinationBroker {
         session.pending.push(compactionNudge(mirror.path, bytes));
         this.log("shared.compact", { session: session.id, scope: mirror.scope, bytes });
       }
+      this.markDirty();
       this.log("shared.written", {
         session: session.id,
         scope: mirror.scope,
@@ -1391,7 +1400,6 @@ export class CoordinationBroker {
     const view = this.views.get(workspace);
     // A hub from before shared contexts lists none.
     if (view?.contexts === undefined) return;
-    const atWork = new Set(view.sessions.map((s) => s.id));
     const works = new Map<string, LocalSession[]>();
     for (const session of this.sessions.values()) {
       if (session.workspace !== workspace) continue;
@@ -1894,7 +1902,14 @@ export class CoordinationBroker {
         ...(s.task === undefined ? {} : { task: s.task }),
         files: s.files,
         claims: s.claims,
-        findings: s.team,
+        // A keeper's lines marked for the project are in the shared context it keeps.
+        findings: s.keeps
+          ? [...new Set([...projectLines(this.mirrorOf(s)?.text ?? ""), ...s.team])]
+          : s.team,
+        // When it was last at work: an idle keeper gives way to an agent that works.
+        activeAt: new Date(s.lastActivity).toISOString(),
+        // What it has heard is no independent discovery when it says the same.
+        heard: [...s.heard].slice(-300),
       }));
   }
 
