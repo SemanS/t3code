@@ -1,10 +1,14 @@
-import type {
-  ContextMenuItem,
-  EnvironmentId,
-  PeerHubStatus,
-  PeerTask,
-  ProjectId,
+import {
+  isProviderDriverKind,
+  ProviderDriverKind,
+  type ContextMenuItem,
+  type EnvironmentId,
+  type EnvironmentMachineKind,
+  type PeerHubStatus,
+  type PeerTask,
+  type ProjectId,
 } from "@t3tools/contracts";
+import { useAtomValue } from "@effect/atom-react";
 import {
   scopedThreadKey,
   scopeProjectRef,
@@ -31,7 +35,15 @@ import {
   ShieldQuestionIcon,
   type LucideIcon,
 } from "lucide-react";
-import { useCallback, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 
 import { useNewThreadHandler } from "../../hooks/useHandleNewThread";
 import { useScratchProject } from "../../hooks/useScratchProject";
@@ -40,8 +52,17 @@ import { useThreadActions } from "../../hooks/useThreadActions";
 import { cn } from "../../lib/utils";
 import { readLocalApi } from "../../localApi";
 import { readThreadShell, useProjects, useThreadShells } from "../../state/entities";
-import { usePrimaryEnvironment } from "../../state/environments";
-import { serverEnvironment } from "../../state/server";
+import {
+  deriveProviderEntriesByEnvironment,
+  type ProviderInstanceEntry,
+} from "../../providerInstances";
+import { useEnvironmentMachines, usePrimaryEnvironment } from "../../state/environments";
+import { environmentServerConfigsAtom, serverEnvironment } from "../../state/server";
+import { formatRelativeTimeLabel } from "../../timestampFormat";
+import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
+import { getTriggerDisplayModelLabel } from "../chat/providerIconUtils";
+import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
+import { ThreadHoverCard, ThreadHoverCardPopup } from "../ThreadHoverCard";
 import { threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { buildThreadRouteParams } from "../../threadRoutes";
@@ -71,6 +92,7 @@ import {
   threadSections,
   type ActiveAgentNode,
   type AgentNeed,
+  type WorkAgent,
   type WorkOpen,
   type WorkProjectNode,
   type WorkTaskNode,
@@ -92,6 +114,93 @@ function PersonMark({ name, mine }: { readonly name: string; readonly mine: bool
       {name.trim().charAt(0).toUpperCase() || "?"}
     </span>
   );
+}
+
+/** What a card needs to know of this computer: its provider instances, and its name and kind. */
+interface WorkHere {
+  readonly providers: ReadonlyMap<string, ProviderInstanceEntry>;
+  readonly label: string | null;
+  readonly machine: EnvironmentMachineKind;
+}
+
+const WorkHereContext = createContext<WorkHere>({
+  providers: new Map(),
+  label: null,
+  machine: "laptop",
+});
+
+/** Harness names agents report, as the drivers whose icons the Threads list draws. */
+const HARNESS_DRIVER: Readonly<Record<string, string>> = {
+  claude: "claudeAgent",
+  "claude-code": "claudeAgent",
+  codex: "codex",
+  cursor: "cursor",
+  "cursor-agent": "cursor",
+  opencode: "opencode",
+  grok: "grok",
+  antigravity: "antigravity",
+  pi: "pi",
+};
+
+interface AgentLook {
+  readonly driverKind: ProviderDriverKind;
+  readonly displayName: string;
+  readonly accentColor?: string | undefined;
+  readonly acpRegistryAgentId?: string | undefined;
+  readonly acpRegistryIconUrl?: string | undefined;
+  /** The model, as the Threads list names it. */
+  readonly model: string | undefined;
+}
+
+/** How a thread's agent looks: this computer's provider instance, or a reported harness. */
+function agentLook(
+  agent: WorkAgent | undefined,
+  providers: ReadonlyMap<string, ProviderInstanceEntry>,
+): AgentLook | null {
+  if (agent === undefined) return null;
+  if ("instanceId" in agent) {
+    const entry = providers.get(agent.instanceId);
+    if (entry === undefined) return null;
+    const model = entry.models.find((candidate) => candidate.slug === agent.model);
+    return {
+      driverKind: entry.driverKind,
+      displayName: entry.displayName,
+      accentColor: entry.accentColor,
+      acpRegistryAgentId: entry.acpRegistryAgentId,
+      acpRegistryIconUrl: entry.acpRegistryIconUrl,
+      model: model === undefined ? agent.model : getTriggerDisplayModelLabel(model),
+    };
+  }
+  const name = agent.harness.trim().toLowerCase();
+  const slug = HARNESS_DRIVER[name] ?? name;
+  return {
+    driverKind: isProviderDriverKind(slug) ? slug : ProviderDriverKind.make("agent"),
+    displayName: agent.harness,
+    model: undefined,
+  };
+}
+
+/** The agent's mark, where the Threads list draws it. */
+function AgentMark({ look }: { readonly look: AgentLook | null }) {
+  if (look === null) return null;
+  return (
+    <ProviderInstanceIcon
+      driverKind={look.driverKind}
+      displayName={look.displayName}
+      accentColor={look.accentColor}
+      acpRegistryAgentId={look.acpRegistryAgentId}
+      acpRegistryIconUrl={look.acpRegistryIconUrl}
+      iconClassName="size-3.5 opacity-60"
+    />
+  );
+}
+
+/** "17h", "now": when a thread was last active, as the Threads list says it. */
+function activeLabel(at: string | undefined): string | null {
+  if (at === undefined) return null;
+  const label = formatRelativeTimeLabel(at);
+  if (label === "just now") return "now";
+  return label.endsWith(" ago") ? label.slice(0, -4) : label;
 }
 
 function reportFailure(title: string, result: AtomCommandResult<unknown, unknown>): boolean {
@@ -320,6 +429,23 @@ export function WorkPanel() {
     () => new Map(projects.map((p) => [`${p.environmentId}:${p.id}`, p.title] as const)),
     [projects],
   );
+  const serverConfigs = useAtomValue(environmentServerConfigsAtom);
+  const machines = useEnvironmentMachines();
+  const here = useMemo<WorkHere>(
+    () => ({
+      providers:
+        environmentId === null
+          ? new Map()
+          : (deriveProviderEntriesByEnvironment(
+              [...serverConfigs].map(
+                ([id, config]) => [id, config.providers, config.settings] as const,
+              ),
+            ).get(environmentId) ?? new Map()),
+      label: primary?.label ?? null,
+      machine: (environmentId === null ? undefined : machines.get(environmentId)) ?? "laptop",
+    }),
+    [environmentId, machines, primary?.label, serverConfigs],
+  );
   const visited = useUiStateStore((state) => state.threadLastVisitedAtById);
   const unseen = useCallback(
     (thread: EnvironmentThreadShell) =>
@@ -359,43 +485,45 @@ export function WorkPanel() {
   );
 
   return (
-    <div className="flex flex-col gap-4 pb-6">
-      {environmentId !== null && status !== null && status.signedIn ? (
-        <OverlapList environmentId={environmentId} status={status} />
-      ) : null}
-      <NeedsYou
-        agents={agents}
-        herdr={status?.agents.herdr ?? null}
-        activeThread={activeThread}
-        onOpen={actions.open}
-      />
-      {environmentId === null || status === null ? (
-        <p className="px-2 text-xs text-muted-foreground">Connecting…</p>
-      ) : !status.signedIn ? (
-        <NotSignedIn />
-      ) : tree.length === 0 ? (
-        <p className="px-2 text-xs leading-relaxed text-muted-foreground">
-          {status.workspaces.length === 0
-            ? "Join or create a workspace in Settings → Workspaces to work with your team."
-            : "No projects yet. Share one below, and everyone in the workspace can work on it."}
-        </p>
-      ) : (
-        tree.map((project) => (
-          <ProjectSection
-            key={`${project.workspace}/${project.projectId}`}
-            environmentId={environmentId}
-            status={status}
-            project={project}
-            showWorkspace={status.workspaces.length > 1}
-            activeThread={activeThread}
-            actions={actions}
-          />
-        ))
-      )}
-      {environmentId !== null && status?.signedIn && status.workspaces.length > 0 ? (
-        <ShareProject environmentId={environmentId} status={status} />
-      ) : null}
-    </div>
+    <WorkHereContext.Provider value={here}>
+      <div className="flex flex-col gap-4 pb-6">
+        {environmentId !== null && status !== null && status.signedIn ? (
+          <OverlapList environmentId={environmentId} status={status} />
+        ) : null}
+        <NeedsYou
+          agents={agents}
+          herdr={status?.agents.herdr ?? null}
+          activeThread={activeThread}
+          onOpen={actions.open}
+        />
+        {environmentId === null || status === null ? (
+          <p className="px-2 text-xs text-muted-foreground">Connecting…</p>
+        ) : !status.signedIn ? (
+          <NotSignedIn />
+        ) : tree.length === 0 ? (
+          <p className="px-2 text-xs leading-relaxed text-muted-foreground">
+            {status.workspaces.length === 0
+              ? "Join or create a workspace in Settings → Workspaces to work with your team."
+              : "No projects yet. Share one below, and everyone in the workspace can work on it."}
+          </p>
+        ) : (
+          tree.map((project) => (
+            <ProjectSection
+              key={`${project.workspace}/${project.projectId}`}
+              environmentId={environmentId}
+              status={status}
+              project={project}
+              showWorkspace={status.workspaces.length > 1}
+              activeThread={activeThread}
+              actions={actions}
+            />
+          ))
+        )}
+        {environmentId !== null && status?.signedIn && status.workspaces.length > 0 ? (
+          <ShareProject environmentId={environmentId} status={status} />
+        ) : null}
+      </div>
+    </WorkHereContext.Provider>
   );
 }
 
@@ -518,12 +646,11 @@ function NeedCard({
   readonly active: boolean;
   readonly onOpen: (open: WorkOpen) => void;
 }) {
+  const here = useContext(WorkHereContext);
   if (agent.needs === undefined) return null;
   const need = NEED[agent.needs];
   const Icon = need.icon;
-  const harness = [agent.harness, agent.open.kind === "herdr" ? "herdr" : null]
-    .filter(Boolean)
-    .join(" · ");
+  const look = agentLook(agent.agent, here.providers);
   return (
     <li className="list-none py-px">
       <button
@@ -540,8 +667,11 @@ function NeedCard({
             <Icon aria-hidden className="size-3.5 shrink-0" />
             {need.label}
           </span>
-          <span className="min-w-0 flex-1 truncate text-right text-muted-foreground">
-            {harness}
+          <span aria-hidden className="ml-auto inline-flex shrink-0 items-center gap-1.5">
+            {agent.open.kind === "herdr" ? (
+              <span className="text-2xs text-muted-foreground/70">herdr</span>
+            ) : null}
+            <AgentMark look={look} />
           </span>
         </span>
         <span className="mt-0.5 block truncate text-sm font-medium text-foreground">
@@ -1077,15 +1207,24 @@ function ThreadCard({
   const local = open?.kind === "thread" ? open : undefined;
   const actionable = thread.mine && (open?.kind === "thread" || open?.kind === "herdr");
   const active = open !== undefined && activeThread === openKey(open);
-  const who = thread.mine ? (open === undefined ? "You · other computer" : "You") : thread.person;
-  const agent = [thread.harness, thread.source === "herdr" ? "herdr" : null]
-    .filter(Boolean)
-    .join(" · ");
+  const here = useContext(WorkHereContext);
+  const look = agentLook(thread.agent, here.providers);
+  const elsewhere = !actionable;
+  const who = thread.mine ? (elsewhere ? "You · other computer" : "You") : thread.person;
+  const machine = !thread.mine
+    ? `${thread.person}’s computer`
+    : elsewhere
+      ? "Your other computer"
+      : (here.label ?? "This computer");
   const details = [
     thread.mine
-      ? open === undefined
-        ? "Yours, on another computer: open it there"
-        : null
+      ? elsewhere
+        ? thread.observable
+          ? "Yours on another computer: open it to watch it"
+          : "Yours on another computer: open it there"
+        : thread.observable
+          ? "The team can watch it"
+          : null
       : thread.observable
         ? `${thread.person} shares it: open it to watch it live`
         : `${thread.person}’s thread: only they change it`,
@@ -1122,7 +1261,9 @@ function ThreadCard({
 
   const statusLabel = thread.stale ? (
     <span className="text-muted-foreground">Away</span>
-  ) : thread.status === "idle" || thread.status === "unknown" ? null : (
+  ) : thread.status === "idle" || thread.status === "unknown" ? (
+    <span className="text-secondary-label tabular-nums">{activeLabel(thread.activeAt)}</span>
+  ) : (
     <span className={cn("inline-flex items-center gap-1 font-medium", STATUS_TONE[thread.status])}>
       <StatusIcon status={thread.status} />
       {STATUS_LABEL[thread.status]}
@@ -1246,30 +1387,58 @@ function ThreadCard({
           {thread.concerns === undefined ? null : (
             <p className="mt-0.5 truncate text-xs text-warning-foreground">{thread.concerns}</p>
           )}
-          {thread.branch !== undefined || agent !== "" ? (
-            <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+          {thread.branch !== undefined || look !== null || thread.source === "herdr" ? (
+            <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-secondary-label">
               {thread.branch !== undefined ? (
                 <>
-                  <GitBranchIcon aria-hidden className="size-3 shrink-0 opacity-60" />
-                  <span className="flex min-w-0 flex-1 opacity-70">
+                  <GitBranchIcon aria-hidden className="size-3 shrink-0 opacity-50" />
+                  <span className="flex min-w-0 flex-1 text-muted-foreground/60">
                     <MiddleTruncate value={thread.branch} showTitle={false} />
                   </span>
                 </>
               ) : (
                 <span className="flex-1" />
               )}
-              {agent !== "" ? <span className="shrink-0">{agent}</span> : null}
+              <span aria-hidden className="ml-auto inline-flex shrink-0 items-center gap-1.5">
+                {thread.source === "herdr" ? (
+                  <span className="text-2xs text-muted-foreground/70">herdr</span>
+                ) : null}
+                <AgentMark look={look} />
+              </span>
             </div>
           ) : null}
         </TooltipTrigger>
-        <TooltipPopup side="right">
-          <p className="font-medium">{thread.title}</p>
-          {details.map((line) => (
-            <p key={line} className="text-muted-foreground">
-              {line}
-            </p>
-          ))}
-        </TooltipPopup>
+        <ThreadHoverCardPopup side="right" align="start" sideOffset={4}>
+          <ThreadHoverCard title={thread.title}>
+            <div className="flex min-w-0 items-center gap-2">
+              <EnvironmentMachineIcon
+                kind={elsewhere ? "laptop" : here.machine}
+                className="size-3 shrink-0 stroke-muted-foreground"
+              />
+              <div className="min-w-0 truncate text-foreground/75">{machine}</div>
+            </div>
+            {thread.branch === undefined ? null : (
+              <div className="flex min-w-0 items-center gap-2">
+                <GitBranchIcon className="size-3 shrink-0 stroke-muted-foreground" />
+                <MiddleTruncate value={thread.branch} className="flex" />
+              </div>
+            )}
+            {look === null ? null : (
+              <div className="flex min-w-0 items-center gap-2">
+                <AgentMark look={look} />
+                <div className="min-w-0 truncate text-foreground/75">
+                  {look.model ?? look.displayName}
+                  {thread.source === "herdr" ? " in herdr" : ""}
+                </div>
+              </div>
+            )}
+            {details.map((line) => (
+              <div key={line} className="min-w-0 text-foreground/75">
+                {line}
+              </div>
+            ))}
+          </ThreadHoverCard>
+        </ThreadHoverCardPopup>
       </Tooltip>
     </li>
   );

@@ -59,7 +59,18 @@ export interface WorkThreadNode {
   readonly concerns: string | undefined;
   /** Its owner lets the team watch it live: yours when you shared it, a colleague's to observe. */
   readonly observable: boolean;
+  /**
+   * The agent that runs it: this computer's provider instance and model for a
+   * Peer thread here, else the harness name (claude, codex, …) it reported.
+   */
+  readonly agent: WorkAgent | undefined;
+  /** When it was last active, for threads on this computer. */
+  readonly activeAt: string | undefined;
 }
+
+export type WorkAgent =
+  | { readonly instanceId: string; readonly model: string }
+  | { readonly harness: string };
 
 export interface WorkTaskNode {
   readonly id: string;
@@ -200,6 +211,11 @@ function projectTree(input: {
         placeable: true,
         concerns: undefined,
         observable: shared.has(key),
+        agent: {
+          instanceId: thread.runtime?.providerInstanceId ?? thread.modelSelection.instanceId,
+          model: thread.modelSelection.model,
+        },
+        activeAt: thread.latestUserMessageAt ?? thread.updatedAt,
       },
     });
   }
@@ -221,6 +237,8 @@ function projectTree(input: {
         placeable: true,
         concerns: undefined,
         observable: shared.has(agent.id),
+        agent: agent.agent === undefined ? undefined : { harness: agent.agent },
+        activeAt: undefined,
       },
     });
   }
@@ -278,6 +296,8 @@ function projectTree(input: {
             ? undefined
             : `Its agent and yours both change ${files}`,
         observable: thread.observable === true,
+        agent: thread.harness === undefined ? undefined : { harness: thread.harness },
+        activeAt: undefined,
       },
     });
   }
@@ -371,6 +391,7 @@ export interface ActiveAgentNode {
   readonly open: WorkOpen;
   /** Set while it waits on you; unset while it just works. */
   readonly needs: AgentNeed | undefined;
+  readonly agent: WorkAgent | undefined;
 }
 
 const NEED_ORDER: Readonly<Record<AgentNeed, number>> = { approval: 0, input: 1, review: 2 };
@@ -418,6 +439,7 @@ export function activeAgents(input: {
       ),
       open: { kind: "herdr", agentId: agent.id, paneId: agent.paneId },
       needs,
+      agent: agent.agent === undefined ? undefined : { harness: agent.agent },
     });
   }
   for (const thread of input.localThreads) {
@@ -443,6 +465,10 @@ export function activeAgents(input: {
       where: place(key, input.projectNames.get(`${thread.environmentId}:${thread.projectId}`)),
       open: { kind: "thread", environmentId: thread.environmentId, threadId: thread.id },
       needs,
+      agent: {
+        instanceId: thread.runtime?.providerInstanceId ?? thread.modelSelection.instanceId,
+        model: thread.modelSelection.model,
+      },
     });
   }
   const rank = (agent: ActiveAgentNode) =>

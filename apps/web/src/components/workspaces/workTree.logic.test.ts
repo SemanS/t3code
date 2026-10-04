@@ -53,6 +53,9 @@ function shell(
     settledAt: null,
     archivedAt: null,
     deletedAt: null,
+    modelSelection: { instanceId: "claudeAgent", model: "claude-sonnet-5-5" },
+    latestUserMessageAt: null,
+    updatedAt: "2026-10-03T11:00:00Z",
     ...overrides,
   } as unknown as EnvironmentThreadShell;
 }
