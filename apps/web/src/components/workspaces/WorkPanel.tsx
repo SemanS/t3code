@@ -66,6 +66,7 @@ import {
   taskLabel,
   taskMenuItems,
   threadMenuItems,
+  threadSections,
   type ActiveAgentNode,
   type AgentNeed,
   type WorkOpen,
@@ -642,17 +643,14 @@ function ProjectSection({
                 Not on a task
               </p>
               <ul className="flex flex-col">
-                {project.unsorted.map((thread) => (
-                  <ThreadCard
-                    key={thread.key}
-                    scope={scope}
-                    thread={thread}
-                    taskId={null}
-                    tasks={project.tasks}
-                    activeThread={activeThread}
-                    actions={actions}
-                  />
-                ))}
+                <ThreadList
+                  scope={scope}
+                  threads={project.unsorted}
+                  taskId={null}
+                  tasks={project.tasks}
+                  activeThread={activeThread}
+                  actions={actions}
+                />
               </ul>
             </div>
           ) : null}
@@ -911,20 +909,87 @@ function TaskRow({
       </div>
       {expanded && task.threads.length > 0 ? (
         <ul className="mt-px mb-1 ml-3 flex flex-col border-l border-sidebar-border pl-1">
-          {task.threads.map((thread) => (
-            <ThreadCard
-              key={thread.key}
-              scope={scope}
-              thread={thread}
-              taskId={task.id}
-              tasks={tasks}
-              activeThread={activeThread}
-              actions={actions}
-            />
-          ))}
+          <ThreadList
+            scope={scope}
+            threads={task.threads}
+            taskId={task.id}
+            tasks={tasks}
+            activeThread={activeThread}
+            actions={actions}
+          />
         </ul>
       ) : null}
     </li>
+  );
+}
+
+/**
+ * A task's threads: yours, then a colleague's only when it concerns you, then
+ * the rest of the team's folded into Team activity, by person, until opened.
+ */
+function ThreadList({
+  scope,
+  threads,
+  taskId,
+  tasks,
+  activeThread,
+  actions,
+}: {
+  readonly scope: Scope;
+  readonly threads: ReadonlyArray<WorkThreadNode>;
+  readonly taskId: string | null;
+  readonly tasks: ReadonlyArray<PeerTask>;
+  readonly activeThread: string | null;
+  readonly actions: WorkActions;
+}) {
+  const [teamOpen, setTeamOpen] = useState(false);
+  const sections = threadSections(threads);
+  const card = (thread: WorkThreadNode) => (
+    <ThreadCard
+      key={thread.key}
+      scope={scope}
+      thread={thread}
+      taskId={taskId}
+      tasks={tasks}
+      activeThread={activeThread}
+      actions={actions}
+    />
+  );
+  return (
+    <>
+      {sections.mine.map(card)}
+      {sections.surfaced.map(card)}
+      {sections.teamCount > 0 ? (
+        <li className="list-none">
+          <button
+            type="button"
+            aria-expanded={teamOpen}
+            className="flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left text-xs text-muted-foreground hover:bg-sidebar-row-hover"
+            onClick={() => setTeamOpen((value) => !value)}
+          >
+            <ChevronRightIcon className={cn("size-3 shrink-0", teamOpen && "rotate-90")} />
+            <span className="min-w-0 flex-1 truncate">Team activity · {sections.teamCount}</span>
+            <span className="flex shrink-0 items-center -space-x-1">
+              {sections.team.slice(0, 3).map((group) => (
+                <PersonMark key={group.person} name={group.person} mine={false} />
+              ))}
+            </span>
+          </button>
+          {teamOpen ? (
+            <ul className="flex flex-col">
+              {sections.team.map((group) => (
+                <li key={group.person} className="list-none">
+                  <p className="px-2 pt-1 text-2xs font-medium text-muted-foreground">
+                    {group.person}
+                  </p>
+                  <ul className="flex flex-col">{group.threads.map(card)}</ul>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </li>
+      ) : null}
+    </>
   );
 }
 
@@ -1111,6 +1176,9 @@ function ThreadCard({
               </span>
             )}
           </div>
+          {thread.concerns === undefined ? null : (
+            <p className="mt-0.5 truncate text-xs text-warning-foreground">{thread.concerns}</p>
+          )}
           {thread.branch !== undefined || agent !== "" ? (
             <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
               {thread.branch !== undefined ? (

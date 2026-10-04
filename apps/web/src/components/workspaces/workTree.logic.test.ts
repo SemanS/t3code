@@ -15,6 +15,7 @@ import {
   taskMenuItems,
   taskNamedIn,
   threadMenuItems,
+  threadSections,
 } from "./workTree.logic";
 
 const HERE = EnvironmentId.make("env-here");
@@ -283,6 +284,74 @@ describe("buildWorkTree", () => {
       ["mine", true],
       ["theirs", true],
     ]);
+  });
+});
+
+describe("threadSections", () => {
+  it("lists your threads, brings out a colleague's that overlaps with yours, folds the rest by person", () => {
+    const project = kirkwood();
+    const yevAgent = {
+      id: "herdr:claude:s-yev",
+      task: "krk-812",
+      title: "Pay form validation",
+      email: "yev@acme.test",
+      status: "working" as const,
+      source: "herdr" as const,
+      environment: "yev-laptop",
+      seenAt: "2026-10-03T11:59:30Z",
+    };
+    const chino = { ...yevAgent, id: "peer:c1", title: "Payment copy", email: "chino@acme.test" };
+    const base = status({
+      ...project,
+      work: { ...project.work, threads: [...project.work.threads, yevAgent, chino] },
+    });
+    const session = (id: string, email: string) => ({
+      id,
+      workspace: "acme",
+      project: "kirkwood",
+      email,
+      label: "work",
+      status: "working" as const,
+      files: ["src/pay.ts"],
+      claims: [],
+      local: email === "slavo@acme.test",
+    });
+    const withOverlap = {
+      ...base,
+      coordination: {
+        ...base.coordination,
+        sessions: [
+          session("claude:s-me", "slavo@acme.test"),
+          session("claude:s-yev", "yev@acme.test"),
+        ],
+        overlaps: [
+          {
+            id: "o1",
+            workspace: "acme",
+            project: "kirkwood",
+            sessions: ["claude:s-me", "claude:s-yev"],
+            files: ["src/pay.ts"],
+            state: "open" as const,
+            notes: [],
+            updatedAt: "2026-10-03T11:59:00Z",
+          },
+        ],
+      },
+    };
+    const [tree] = buildWorkTree({ status: withOverlap, localThreads: LOCAL, now: NOW });
+    const sections = threadSections(tree?.areas[0]?.tasks[0]?.threads ?? []);
+    expect(sections.mine.map((t) => t.title)).toEqual([
+      "Investigation for KRK-812",
+      "Main implementation",
+    ]);
+    expect(sections.surfaced.map((t) => [t.title, t.concerns])).toEqual([
+      ["Pay form validation", "Its agent and yours both change src/pay.ts"],
+    ]);
+    expect(sections.team.map((g) => [g.person, g.threads.map((t) => t.title)])).toEqual([
+      ["Chino", ["Payment copy"]],
+      ["Yev", ["UI adjustments"]],
+    ]);
+    expect(sections.teamCount).toBe(2);
   });
 });
 

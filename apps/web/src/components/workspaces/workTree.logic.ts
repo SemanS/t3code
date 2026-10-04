@@ -45,6 +45,11 @@ export interface WorkThreadNode {
   readonly open: WorkOpen | undefined;
   /** This computer's threads can be placed under a task. */
   readonly placeable: boolean;
+  /**
+   * Why a colleague's thread concerns you, e.g. its agent overlaps with yours;
+   * such a thread shows with yours instead of folded into Team activity.
+   */
+  readonly concerns: string | undefined;
 }
 
 export interface WorkTaskNode {
@@ -177,6 +182,7 @@ function projectTree(input: {
         stale: false,
         open: { kind: "thread", environmentId: thread.environmentId, threadId: thread.id },
         placeable: true,
+        concerns: undefined,
       },
     });
   }
@@ -196,11 +202,34 @@ function projectTree(input: {
         stale: false,
         open: { kind: "herdr", agentId: agent.id, paneId: agent.paneId },
         placeable: true,
+        concerns: undefined,
       },
     });
   }
+  // A colleague's agent in an open overlap with one of yours concerns you.
+  const yours = new Set(
+    status.coordination.sessions
+      .filter((session) => session.email === me)
+      .map((session) => session.id),
+  );
+  const overlapping = new Map<string, string>();
+  for (const overlap of status.coordination.overlaps) {
+    if (
+      overlap.state !== "open" ||
+      overlap.workspace !== workspace.slug ||
+      overlap.project !== state.project.id
+    ) {
+      continue;
+    }
+    const [a, b] = overlap.sessions;
+    if (a === undefined || b === undefined || yours.has(a) === yours.has(b)) continue;
+    overlapping.set(yours.has(a) ? b : a, overlap.files.join(", "));
+  }
   for (const thread of work.threads) {
     const seenAt = Date.parse(thread.seenAt);
+    // A herdr agent known by its session reports `herdr:<agent>:<session>`; coordination says `<agent>:<session>`.
+    const session = /^herdr:([^:]+:.+)$/.exec(thread.id)?.[1];
+    const files = session === undefined ? undefined : overlapping.get(session);
     placed.push({
       task:
         thread.task !== undefined && work.tasks.some((t) => t.id === thread.task)
@@ -218,6 +247,10 @@ function projectTree(input: {
         stale: Number.isFinite(seenAt) && input.now - seenAt > STALE_AFTER_MS,
         open: undefined,
         placeable: false,
+        concerns:
+          files === undefined || thread.email === me
+            ? undefined
+            : `Its agent and yours both change ${files}`,
       },
     });
   }
@@ -376,6 +409,44 @@ export function activeAgents(input: {
   const rank = (agent: ActiveAgentNode) =>
     agent.needs === undefined ? 3 + STATUS_ORDER[agent.status] : NEED_ORDER[agent.needs];
   return agents.toSorted((a, b) => rank(a) - rank(b) || a.title.localeCompare(b.title));
+}
+
+export interface ThreadSections {
+  /** Your threads, on any computer. */
+  readonly mine: ReadonlyArray<WorkThreadNode>;
+  /** Colleagues' threads that concern you, shown with yours. */
+  readonly surfaced: ReadonlyArray<WorkThreadNode>;
+  /** Everyone else's, by person, folded into Team activity. */
+  readonly team: ReadonlyArray<{
+    readonly person: string;
+    readonly threads: ReadonlyArray<WorkThreadNode>;
+  }>;
+  readonly teamCount: number;
+}
+
+/**
+ * Shared context, not shared clutter: a task lists your threads, plus a
+ * colleague's only when it concerns you; the rest of the team's work waits,
+ * by person, until you open Team activity.
+ */
+export function threadSections(threads: ReadonlyArray<WorkThreadNode>): ThreadSections {
+  const mine = threads.filter((thread) => thread.mine);
+  const surfaced = threads.filter((thread) => !thread.mine && thread.concerns !== undefined);
+  const rest = threads.filter((thread) => !thread.mine && thread.concerns === undefined);
+  const people = new Map<string, WorkThreadNode[]>();
+  for (const thread of rest) {
+    const list = people.get(thread.person);
+    if (list === undefined) people.set(thread.person, [thread]);
+    else list.push(thread);
+  }
+  return {
+    mine,
+    surfaced,
+    team: [...people]
+      .map(([person, list]) => ({ person, threads: list }))
+      .toSorted((a, b) => a.person.localeCompare(b.person)),
+    teamCount: rest.length,
+  };
 }
 
 /** A task the way lists and menus name it: `KRK-812 · Split Payments`. */
