@@ -478,6 +478,14 @@ export function contextTemplate(goal: string, task: string | undefined): string 
   ].join("\n");
 }
 
+/** Whether the agent has written anything into its working context beyond Peer's template. */
+export function contextWritten(markdown: string): boolean {
+  return markdown
+    .split("\n")
+    .map((line) => line.trim())
+    .some((line) => line !== "" && !line.startsWith("#") && !line.startsWith("Goal:"));
+}
+
 /** The bullet lines under "## For the team": what the agent shares with its project. */
 export function teamLines(markdown: string): string[] {
   const lines = markdown.split("\n");

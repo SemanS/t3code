@@ -20,6 +20,7 @@ import {
   announcementKey,
   contestKey,
   contextTemplate,
+  contextWritten,
   coordinationScripts,
   decideEdit,
   editedFile,
@@ -136,6 +137,10 @@ interface LocalSession {
   /** When the agent last changed its working context, or when Peer created it. */
   contextAt: number;
   nudgedAt: number;
+  /** The agent wrote its working context this session, or found one it had written before. */
+  contextKept: boolean;
+  /** It was reminded once, at its first change, that its working context was still empty. */
+  remindedAtStart: boolean;
   task: string | undefined;
   /** Findings of other agents it has heard. */
   readonly heard: Set<string>;
@@ -224,6 +229,7 @@ export class CoordinationBroker {
     this.server = server;
     this.timer = setInterval(() => void this.tick(), 500);
     this.log("broker.started", { socket: this.deps.socketPath, policy: this.deps.policy() });
+    void this.forgetOldContexts();
   }
 
   async stop(): Promise<void> {
@@ -389,12 +395,17 @@ export class CoordinationBroker {
       startedAt: now,
       contextAt: now,
       nudgedAt: 0,
+      contextKept: false,
+      remindedAtStart: false,
       task: this.deps.taskOf(place.workspace, place.project, `herdr:claude:${sid}`, [
         branch,
         title,
       ]),
       heard: new Set(),
     };
+    // A session Peer meets again (Peer restarted, or the session outlived its TTL) keeps what
+    // it shares: reporting it without its lines would take its findings back.
+    await this.restoreContext(session);
     this.sessions.set(id, session);
     this.log("session.started", {
       session: id,
@@ -502,7 +513,7 @@ export class CoordinationBroker {
           this.markDirty();
         }
         const news = this.news(session);
-        const nudge = this.nudge(session);
+        const nudge = this.nudge(session, file);
         return context(event, [news, nudge].filter((part) => part !== null).join("\n\n") || null);
       }
       case "Stop":
@@ -733,6 +744,38 @@ export class CoordinationBroker {
     return start.text;
   }
 
+  /** What an existing working context already says, read when Peer meets its session. */
+  private async restoreContext(session: LocalSession) {
+    try {
+      const [text, stat] = await Promise.all([
+        NodeFSP.readFile(session.contextPath, "utf8"),
+        NodeFSP.stat(session.contextPath),
+      ]);
+      session.team = teamLines(text);
+      session.contextAt = stat.mtimeMs;
+      session.contextKept = contextWritten(text);
+    } catch {
+      // No working context yet: SessionStart makes one.
+    }
+  }
+
+  /** Working contexts of sessions nobody has touched for a month go. */
+  private async forgetOldContexts() {
+    const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    const walk = async (dir: string): Promise<void> => {
+      const entries = await NodeFSP.readdir(dir, { withFileTypes: true }).catch(() => []);
+      for (const entry of entries) {
+        const path = NodePath.join(dir, entry.name);
+        if (entry.isDirectory()) await walk(path);
+        else if (entry.name.endsWith(".md")) {
+          const stat = await NodeFSP.stat(path).catch(() => null);
+          if (stat !== null && stat.mtimeMs < cutoff) await NodeFSP.rm(path, { force: true });
+        }
+      }
+    };
+    await walk(this.deps.contextsDir);
+  }
+
   /** The agent changed its working context: what it shares with the team may have changed. */
   private async readTeamLines(session: LocalSession) {
     let text: string;
@@ -742,6 +785,7 @@ export class CoordinationBroker {
       return;
     }
     session.contextAt = Date.now();
+    session.contextKept = true;
     const team = teamLines(text);
     const changed = team.join("\n") !== session.team.join("\n");
     session.team = team;
@@ -749,9 +793,17 @@ export class CoordinationBroker {
     if (changed) this.markDirty();
   }
 
-  /** A working agent whose context went stale is reminded once in a while, in a line. */
-  private nudge(session: LocalSession): string | null {
+  /**
+   * A reminder in a line: at an agent's first change while its working context
+   * is still empty, and when it has gone stale while the agent works.
+   */
+  private nudge(session: LocalSession, changed: string | null): string | null {
     const now = Date.now();
+    if (changed !== null && !session.contextKept && !session.remindedAtStart) {
+      session.remindedAtStart = true;
+      this.log("context.nudged", { session: session.id, why: "first change", file: changed });
+      return `Peer: you changed ${changed} and your working context (${session.contextPath}) is still empty. Note there what you are doing and what you found; put what your teammates' agents should know under "## For the team".`;
+    }
     if (
       now - session.startedAt < NUDGE_MS ||
       now - session.contextAt < NUDGE_MS ||
@@ -761,7 +813,7 @@ export class CoordinationBroker {
     }
     session.nudgedAt = now;
     const minutes = Math.round((now - session.contextAt) / 60_000);
-    this.log("context.nudged", { session: session.id, minutes });
+    this.log("context.nudged", { session: session.id, why: "stale", minutes });
     return `Peer: your working context (${session.contextPath}) has not changed for ${minutes} minutes. Update it if your goal, findings or plan moved.`;
   }
 

@@ -3,6 +3,8 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   claudeHookGroups,
   contextSkill,
+  contextTemplate,
+  contextWritten,
   decideEdit,
   editedFile,
   emptyMemory,
@@ -372,6 +374,13 @@ describe("working context", () => {
     );
     assert.include(start.text, "- Vir's agent (krk-900): The billing export is slow");
     assert.deepStrictEqual(start.ids, ["f1", "f3"]);
+  });
+
+  it("tells a context the agent wrote from Peer's empty template", () => {
+    assert.isFalse(contextWritten(contextTemplate("Fix DNS errors", "KRK-335 · DNS errors")));
+    assert.isTrue(
+      contextWritten(`${contextTemplate("Fix DNS errors", undefined)}- reading net.rs`),
+    );
   });
 
   it("names a task by its key as a whole token", () => {

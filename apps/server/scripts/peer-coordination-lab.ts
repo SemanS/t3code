@@ -11,6 +11,7 @@
 //   5. Under the `ask` policy, Bob himself is asked instead, once.
 //   6. Working context: an agent's "For the team" line reaches the other agent once, and a
 //      compaction gives an agent its own context back.
+//   7. After Peer restarts, a session it meets again keeps what it shared.
 //
 // It prints what each agent was told and leaves both computers' coordination logs.
 //
@@ -408,9 +409,16 @@ const program = Effect.gen(function* () {
     piped.includes("Peer · project lab · you: Bob's agent"),
     "peer works in any command, and knows which session calls",
   );
-  bobs.edit("PostToolUse", "src/pricing.ts");
+  const firstChange = bobs.edit("PostToolUse", "src/pricing.ts");
+  check(
+    context(firstChange)?.includes("your working context") === true,
+    "at its first change it is reminded, once, that its working context is still empty",
+  );
   bobs.edit("PreToolUse", "src/cart.ts");
-  bobs.edit("PostToolUse", "src/cart.ts");
+  check(
+    !(context(bobs.edit("PostToolUse", "src/cart.ts")) ?? "").includes("working context"),
+    "and not again",
+  );
 
   // 3. Ana's agent went idle; Bob's note wakes it up.
   const woke = yield* Effect.promise(() =>
@@ -492,6 +500,21 @@ const program = Effect.gen(function* () {
   check(
     back?.includes("waiting for Bob's rename of price()"),
     "after a compaction the agent gets its own working context back",
+  );
+
+  // 7. Peer restarts (here: its coordination stops and starts): a session it meets again keeps
+  //    what it shares, so the team keeps its findings.
+  yield* ana.client[WS_METHODS.peerHubSetCoordination]({ enabled: false });
+  yield* ana.client[WS_METHODS.peerHubSetCoordination]({ enabled: true });
+  anas.edit("PreToolUse", "src/pricing.ts");
+  anas.edit("PostToolUse", "src/pricing.ts");
+  yield* Effect.promise(() => sleep(3500));
+  const later = agent(bob, "lab-bob-later", "w1:p2");
+  const fresh = context(later.hook("SessionStart", { source: "startup" }));
+  told(`${later.name} (a new session)`, fresh);
+  check(
+    fresh?.includes("VAT is added in one place, applyVat()") === true,
+    "after Peer restarts, what an agent shared stays with the team",
   );
 
   for (const computer of [ana, bob]) {
