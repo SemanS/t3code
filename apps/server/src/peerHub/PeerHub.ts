@@ -67,11 +67,13 @@ import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as FiberMap from "effect/FiberMap";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
@@ -1130,22 +1132,46 @@ const make = Effect.gen(function* () {
         }
         continue;
       }
-      for (const [projectId, projectWork] of Object.entries(fetched.value.projects)) {
-        work.set(sharedKey(workspace.slug, projectId), {
-          areas: projectWork.areas,
-          tasks: projectWork.tasks,
-          // This computer's own threads show live from its thread list.
-          threads: projectWork.threads.filter(
-            (thread) =>
-              !(thread.environment === environmentId && thread.email === s.persisted.email),
-          ),
-        });
+      for (const [key, value] of workOf(workspace.slug, fetched.value, s.persisted.email)) {
+        work.set(key, value);
       }
     }
     yield* updateRuntime((current) => ({ ...current, work }));
   });
 
   const refreshWork = refreshWorkUnlocked.pipe(lock.withPermits(1));
+
+  /** One workspace's work as the hub gave it, keyed like `RuntimeState.work`. */
+  const workOf = (slug: string, fetched: HubApi.HubWork, email: string | null) =>
+    Object.entries(fetched.projects).map(
+      ([projectId, projectWork]) =>
+        [
+          sharedKey(slug, projectId),
+          {
+            areas: projectWork.areas,
+            tasks: projectWork.tasks,
+            // This computer's own threads show live from its thread list.
+            threads: projectWork.threads.filter(
+              (thread) => !(thread.environment === environmentId && thread.email === email),
+            ),
+          },
+        ] as const,
+    );
+
+  /** Reads one workspace's work again, without reporting, once the hub says it changed. */
+  const readWork = (slug: string) =>
+    Effect.gen(function* () {
+      const sessionInfo = yield* requireSession.pipe(Effect.option);
+      if (Option.isNone(sessionInfo)) return;
+      const { hubUrl, session } = sessionInfo.value;
+      const fetched = yield* hubApi.work(hubUrl, session, slug);
+      const email = (yield* Ref.get(stateRef)).persisted.email;
+      yield* updateRuntime((current) => {
+        const work = new Map([...current.work].filter(([key]) => !key.startsWith(`${slug}/`)));
+        for (const [key, value] of workOf(slug, fetched, email)) work.set(key, value);
+        return { ...current, work };
+      });
+    });
 
   const branchOf = (cwd: string | undefined, nowMillis: number) =>
     Effect.gen(function* () {
@@ -2208,6 +2234,95 @@ const make = Effect.gen(function* () {
     lock.withPermits(1),
   );
 
+  /**
+   * Listens to the hub's change pings for every workspace while signed in and
+   * reads what changed right away: a workspace's work (tasks, colleagues'
+   * threads), its coordination, or its projects. Pings this computer caused
+   * are skipped. The periodic reads stay as the fallback, so a hub without
+   * pings, or a lost connection, only means slower news.
+   */
+  const followHub = Effect.gen(function* () {
+    const listeners = yield* FiberMap.make<string>();
+    const listening = new Set<string>();
+    const workChanged = yield* Queue.unbounded<string>();
+
+    const onPing = (slug: string, ping: HubApi.HubPing) =>
+      Effect.gen(function* () {
+        if (ping.origin === environmentId) return;
+        if (ping.change === "work" || ping.change === "resync") {
+          yield* Queue.offer(workChanged, slug);
+        }
+        if (ping.change === "coord" || ping.change === "resync") broker?.hubChanged();
+        if (ping.change === "projects" || ping.change === "resync") {
+          yield* background(sync);
+        }
+      });
+
+    const listen = (slug: string) =>
+      Effect.gen(function* () {
+        let failures = 0;
+        while (true) {
+          const signedIn = yield* requireSession.pipe(Effect.option);
+          if (Option.isNone(signedIn)) return;
+          const { hubUrl, session } = signedIn.value;
+          const ended = yield* hubApi.events(hubUrl, session, slug).pipe(
+            Stream.runForEach((ping) => {
+              failures = 0;
+              return onPing(slug, ping);
+            }),
+            Effect.result,
+          );
+          if (Result.isSuccess(ended)) {
+            // The hub ends a stream every 15 minutes; one that ends at once must not spin.
+            yield* Effect.sleep("1 second");
+            continue;
+          }
+          if (HubApi.isSessionEnded(ended.failure)) return;
+          if (HubApi.isWithoutEvents(ended.failure)) {
+            yield* Effect.sleep("10 minutes");
+            continue;
+          }
+          failures += 1;
+          yield* Effect.logInfo("Peer lost the hub's change events; it reconnects", {
+            workspace: slug,
+            reason: ended.failure.detail,
+          });
+          yield* Effect.sleep(Math.min(60_000, 1_000 * 2 ** Math.min(failures, 6)));
+        }
+      }).pipe(Effect.ensuring(Effect.sync(() => listening.delete(slug))));
+
+    // A burst of pings (an agent's first steps) reads each workspace once.
+    yield* Effect.gen(function* () {
+      while (true) {
+        const first = yield* Queue.take(workChanged);
+        yield* Effect.sleep(300);
+        const rest = yield* Queue.clear(workChanged);
+        for (const slug of new Set([first, ...rest])) {
+          yield* readWork(slug).pipe(Effect.ignoreCause({ log: true }));
+        }
+        yield* publish;
+      }
+    }).pipe(Effect.forkScoped);
+
+    while (true) {
+      const signedIn = Option.isSome(yield* requireSession.pipe(Effect.option));
+      const slugs = signedIn
+        ? (yield* Ref.get(stateRef)).persisted.workspaces.map((workspace) => workspace.slug)
+        : [];
+      for (const slug of slugs) {
+        if (listening.has(slug)) continue;
+        listening.add(slug);
+        yield* FiberMap.run(listeners, slug, listen(slug));
+      }
+      for (const slug of listening) {
+        if (slugs.includes(slug)) continue;
+        listening.delete(slug);
+        yield* FiberMap.remove(listeners, slug);
+      }
+      yield* Effect.sleep("15 seconds");
+    }
+  });
+
   // Keep the manifests fresh and colleagues' presence current.
   yield* Effect.forever(
     Effect.sleep(MANIFEST_INTERVAL).pipe(
@@ -2225,6 +2340,7 @@ const make = Effect.gen(function* () {
     ),
   ).pipe(Effect.forkScoped);
   yield* followHerdr.pipe(Effect.forkScoped);
+  yield* followHub.pipe(Effect.forkScoped);
   yield* background(refreshGitHub);
   if ((yield* Ref.get(stateRef)).persisted.coordination?.enabled === true) {
     yield* background(startBroker);

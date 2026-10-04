@@ -869,6 +869,11 @@ export class CoordinationBroker {
       }));
   }
 
+  /** The hub says a workspace's coordination changed: read it within a moment. */
+  hubChanged(): void {
+    this.dirtySince ??= Date.now();
+  }
+
   /** Reports and refreshes now (one workspace, or all), waiting at most `budgetMs`. */
   private async syncNow(workspace?: string, budgetMs = 5000): Promise<void> {
     const run = this.sync(workspace);

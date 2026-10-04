@@ -15,7 +15,10 @@ import {
   PeerWorkStatus,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
+import * as Sse from "effect/unstable/encoding/Sse";
 import { HttpClient, HttpClientRequest } from "effect/unstable/http";
 
 const SignInStarted = Schema.Struct({
@@ -150,6 +153,28 @@ const SESSION_ENDED = "Your session with the hub ended. Sign in again.";
 
 /** The hub no longer accepts the stored session (signed out elsewhere, expired). */
 export const isSessionEnded = (error: PeerHubError) => error.detail === SESSION_ENDED;
+
+/** What a workspace's event stream pings about; `resync` follows pings it missed. */
+export type HubChange = "work" | "coord" | "projects" | "resync";
+
+export interface HubPing {
+  readonly change: HubChange;
+  /** The environment whose report caused it, so that environment can skip its own echo. */
+  readonly origin: string | null;
+}
+
+const CHANGES: ReadonlySet<string> = new Set<HubChange>(["work", "coord", "projects", "resync"]);
+const PingData = Schema.Struct({ origin: Schema.optional(Schema.NullOr(Schema.String)) });
+const decodePingData = Schema.decodeUnknownOption(Schema.fromJsonString(PingData));
+
+const NO_EVENTS = "The hub sends no change events.";
+/** The hub predates push (or the workspace is not the caller's): ask again much later. */
+export const isWithoutEvents = (error: PeerHubError) => error.detail === NO_EVENTS;
+
+const isPeerHubError = Schema.is(PeerHubError);
+
+/** The hub's keep-alive comes every 20 s; this long without a byte means the stream is gone. */
+const EVENTS_SILENT_AFTER = "70 seconds";
 
 const segment = (value: string) => encodeURIComponent(value);
 
@@ -506,5 +531,64 @@ export const make = Effect.gen(function* () {
         method: "DELETE",
         session,
       }),
+
+    /**
+     * The workspace's change pings as they come. Ends when the hub closes the
+     * stream (it does every 15 minutes); fails when the hub refuses it or the
+     * stream goes silent past the hub's keep-alive.
+     */
+    events: (hubUrl: string, session: string, slug: string): Stream.Stream<HubPing, PeerHubError> =>
+      client
+        .execute(
+          HttpClientRequest.get(
+            `${hubUrl.replace(/\/+$/, "")}${workspacePath(slug, "/events")}`,
+          ).pipe(
+            HttpClientRequest.setHeader("Authorization", `Bearer ${session}`),
+            HttpClientRequest.setHeader("Accept", "text/event-stream"),
+          ),
+        )
+        .pipe(
+          Effect.mapError(
+            () => new PeerHubError({ detail: `Could not reach the hub at ${hubUrl}.` }),
+          ),
+          Effect.filterOrFail(
+            (response) => response.status === 200,
+            (response) =>
+              new PeerHubError({
+                detail:
+                  response.status === 404
+                    ? NO_EVENTS
+                    : response.status === 401
+                      ? SESSION_ENDED
+                      : `The hub refused its event stream (HTTP ${response.status}).`,
+              }),
+          ),
+          Effect.map((response) =>
+            response.stream.pipe(
+              Stream.timeoutOrElse({
+                duration: EVENTS_SILENT_AFTER,
+                orElse: () =>
+                  Stream.fail(new PeerHubError({ detail: "The hub's event stream went silent." })),
+              }),
+              Stream.decodeText,
+              Stream.pipeThroughChannel(Sse.decode()),
+              Stream.mapError((error) =>
+                isPeerHubError(error)
+                  ? error
+                  : new PeerHubError({ detail: "The hub's event stream broke off." }),
+              ),
+              Stream.map((event): HubPing | null =>
+                CHANGES.has(event.event)
+                  ? {
+                      change: event.event as HubChange,
+                      origin: Option.getOrUndefined(decodePingData(event.data))?.origin ?? null,
+                    }
+                  : null,
+              ),
+              Stream.filter((ping): ping is HubPing => ping !== null),
+            ),
+          ),
+          Stream.unwrap,
+        ),
   };
 });
