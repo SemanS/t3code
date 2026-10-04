@@ -34,6 +34,7 @@ import { Input } from "../ui/input";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { stackedThreadToast, toastManager } from "../ui/toast";
+import { OverlapList } from "./Coordination";
 import { GitHubConnect } from "./GitHubConnect";
 import {
   projectCheckout,
@@ -148,6 +149,9 @@ export function WorkPanel() {
 
   return (
     <div className="flex flex-col gap-4 pb-6">
+      {environmentId !== null && status !== null && status.signedIn ? (
+        <OverlapList environmentId={environmentId} status={status} />
+      ) : null}
       <ActiveAgents agents={running} herdr={status?.agents.herdr ?? null} onOpen={open} />
       {environmentId === null || status === null ? (
         <p className="px-2 text-xs text-muted-foreground">Connecting…</p>

@@ -26,6 +26,7 @@ import * as NodePath from "node:path";
 
 import {
   CommandId,
+  PeerCoordinationPolicy,
   PeerHubError,
   PeerHubStatus,
   PeerJoinableWorkspace,
@@ -42,7 +43,10 @@ import {
   type PeerHubFinishSignInInput,
   type PeerHubFocusAgentInput,
   type PeerHubInviteInput,
+  type PeerHubOverlapNoteInput,
   type PeerHubProjectInput,
+  type PeerHubResolveOverlapInput,
+  type PeerHubSetCoordinationInput,
   type PeerHubProjectUsage,
   type PeerHubShareProjectInput,
   type PeerHubSharedCapacityInput,
@@ -78,6 +82,14 @@ import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as Settings from "../serverSettings.ts";
 import { explainCloneFailure, explainGitHubCloneFailure } from "./cloneFailure.ts";
+import { claudeHookGroups, hasClaudeHooks, withClaudeHooks } from "./coordination.ts";
+import {
+  CoordinationBroker,
+  readJsonSettings,
+  socketPathFits,
+  writeJsonSettings,
+  type CheckoutPlace,
+} from "./coordinationBroker.ts";
 import { GIT_ALLOWED_PROTOCOLS, isSafeGitRef, isSafeGitRemote } from "./gitSafety.ts";
 import {
   activeGitHubAccount,
@@ -140,6 +152,10 @@ const PersistedState = Schema.Struct({
   ),
   /** "workspace/project/repository" → a checkout this computer shared from where it already was. */
   localCheckouts: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+  /** Agents on the same project staying out of each other's way, on this computer (experimental). */
+  coordination: Schema.optional(
+    Schema.Struct({ enabled: Schema.Boolean, policy: PeerCoordinationPolicy }),
+  ),
 });
 type PersistedState = typeof PersistedState.Type;
 
@@ -308,6 +324,17 @@ export class PeerHub extends Context.Service<
     /** Starts signing GitHub CLI in to GitHub; the status carries the code to enter. */
     readonly connectGitHub: Effect.Effect<PeerHubStatus, PeerHubError>;
     readonly cancelGitHubSignIn: Effect.Effect<PeerHubStatus>;
+    /** Agent coordination on or off, its policy, and Peer's hooks in Claude Code. */
+    readonly setCoordination: (
+      input: PeerHubSetCoordinationInput,
+    ) => Effect.Effect<PeerHubStatus, PeerHubError>;
+    /** A person's note on an overlap; both agents hear it. */
+    readonly noteOverlap: (
+      input: PeerHubOverlapNoteInput,
+    ) => Effect.Effect<PeerHubStatus, PeerHubError>;
+    readonly resolveOverlap: (
+      input: PeerHubResolveOverlapInput,
+    ) => Effect.Effect<PeerHubStatus, PeerHubError>;
     readonly setSharedCapacity: (
       input: PeerHubSharedCapacityInput,
     ) => Effect.Effect<PeerHubStatus, PeerHubError>;
@@ -508,6 +535,27 @@ const make = Effect.gen(function* () {
   /** cwd → its git branch, refreshed every 30 s, for herdr agents. */
   const branches = new Map<string, { readonly branch: string | undefined; readonly at: number }>();
 
+  // Agents on the same project staying out of each other's way (experimental): Peer's scripts
+  // for agents, the socket they talk to, and the log of every coordination event.
+  const coordinationDir = NodePath.join(config.stateDir, "coord");
+  const preferredSocket = NodePath.join(config.stateDir, "coord.sock");
+  const coordinationSocket = socketPathFits(preferredSocket)
+    ? preferredSocket
+    : NodePath.join(
+        NodeOS.tmpdir(),
+        `peer-coord-${NodeCrypto.createHash("sha256").update(config.stateDir).digest("hex").slice(0, 12)}.sock`,
+      );
+  const coordinationLog = NodePath.join(config.logsDir, "coordination.jsonl");
+  const claudeSettingsPath = NodePath.join(
+    process.env.CLAUDE_CONFIG_DIR?.trim() || NodePath.join(NodeOS.homedir(), ".claude"),
+    "settings.json",
+  );
+  let broker: CoordinationBroker | null = null;
+  let claudeHooksInstalled = hasClaudeHooks(
+    (yield* Effect.promise(() => readJsonSettings(claudeSettingsPath))) ?? {},
+    coordinationDir,
+  );
+
   const persist = (persisted: PersistedState) =>
     Effect.tryPromise(async () => {
       await NodeFSP.mkdir(NodePath.dirname(statePath), { recursive: true });
@@ -650,6 +698,48 @@ const make = Effect.gen(function* () {
   };
 
   /** Rebuilds the status, publishes it when it changed, and hands the policy its new state. */
+  /** Coordination as people see it: the settings, and what the broker last heard. */
+  const coordinationStatus = (s: RuntimeState): PeerHubStatus["coordination"] => {
+    const snapshot = broker?.snapshot() ?? { sessions: [], overlaps: [] };
+    return {
+      enabled: s.persisted.coordination?.enabled ?? false,
+      policy: s.persisted.coordination?.policy ?? "coordinate",
+      claudeHooks: claudeHooksInstalled,
+      logPath: coordinationLog,
+      sessions: snapshot.sessions.map((session) => ({
+        id: session.id,
+        workspace: session.workspace,
+        project: session.project,
+        email: session.email,
+        label: session.label,
+        ...(session.agent === undefined ? {} : { agent: session.agent }),
+        ...(session.task === undefined ? {} : { task: session.task }),
+        ...(session.branch === undefined ? {} : { branch: session.branch }),
+        status: session.status,
+        files: session.files,
+        claims: session.claims,
+        local: session.local,
+      })),
+      overlaps: snapshot.overlaps.map((overlap) => ({
+        id: overlap.id,
+        workspace: overlap.workspace,
+        project: overlap.project,
+        sessions: overlap.sessions,
+        files: overlap.files,
+        state: overlap.state,
+        ...(overlap.resolution === undefined ? {} : { resolution: overlap.resolution }),
+        notes: overlap.notes.map((note) => ({
+          id: note.id,
+          ...(note.session === undefined ? {} : { session: note.session }),
+          email: note.email,
+          text: note.text,
+          at: note.at,
+        })),
+        updatedAt: overlap.updatedAt,
+      })),
+    };
+  };
+
   const publish = Effect.gen(function* () {
     const s = yield* Ref.get(stateRef);
     const session = yield* readSession;
@@ -735,6 +825,7 @@ const make = Effect.gen(function* () {
         signIn: s.github.signIn,
         error: s.github.error,
       },
+      coordination: coordinationStatus(s),
       syncing: s.syncing,
       lastSyncAt: s.persisted.lastSyncAt,
       error: s.error,
@@ -1054,7 +1145,6 @@ const make = Effect.gen(function* () {
       return branch;
     });
 
-  /** What herdr runs on this computer, with each agent's git branch. */
   /** GitHub CLI and its active account, read again: what github.com clones sign in with. */
   const refreshGitHub = Effect.gen(function* () {
     const gh = commandPath("gh");
@@ -1071,6 +1161,7 @@ const make = Effect.gen(function* () {
     return { gh, account };
   });
 
+  /** What herdr runs on this computer, with each agent's git branch. */
   const refreshHerdr = Effect.gen(function* () {
     const agents = yield* Effect.promise(() => Herdr.listHerdrAgents());
     const nowMillis = DateTime.toEpochMillis(yield* DateTime.now);
@@ -1170,6 +1261,7 @@ const make = Effect.gen(function* () {
         ? {}
         : { localCheckouts: persisted.localCheckouts }),
       ...(persisted.assignments === undefined ? {} : { assignments: persisted.assignments }),
+      ...(persisted.coordination === undefined ? {} : { coordination: persisted.coordination }),
     }));
     yield* updateRuntime((s) => ({
       ...s,
@@ -1468,6 +1560,203 @@ const make = Effect.gen(function* () {
     yield* updateRuntime((s) => ({ ...s, github: { ...s.github, signIn: null } }));
     return yield* publish;
   });
+
+  // ---- agent coordination (experimental) ----
+
+  const currentState = () => Effect.runSync(Ref.get(stateRef));
+
+  /** The workspace project a directory is in, and the repository working tree around it. */
+  const placeOf = async (cwd: string): Promise<CheckoutPlace | null> => {
+    const toplevel = await run("git", ["-C", cwd, "rev-parse", "--show-toplevel"]).catch(
+      () => null,
+    );
+    if (toplevel === null || toplevel === "") return null;
+    const s = currentState();
+    // A worktree of a workspace checkout counts as that checkout.
+    const common = await run("git", [
+      "-C",
+      cwd,
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-common-dir",
+    ]).catch(() => null);
+    const place =
+      projectOfPath(s, toplevel) ??
+      (common === null ? undefined : projectOfPath(s, NodePath.dirname(common)));
+    return place === undefined
+      ? null
+      : { workspace: place.workspace, project: place.projectId, root: realpathOrSelf(toplevel) };
+  };
+
+  /** What the workspace calls a person. */
+  const nameIn = (slug: string, email: string) => {
+    const workspace = currentState().persisted.workspaces.find((w) => w.slug === slug);
+    for (const project of workspace?.manifest?.projects ?? []) {
+      const name = project.members.find((member) => member.email === email)?.name;
+      if (name !== undefined && name !== "") return name;
+    }
+    // Someone the manifest does not name yet: ana.novak@… reads as Ana.
+    const local = email.split("@")[0]?.split(/[._-]/)[0] ?? email;
+    return local === "" ? email : `${local[0]?.toUpperCase() ?? ""}${local.slice(1)}`;
+  };
+
+  const withHub = <A>(
+    call: (hubUrl: string, session: string) => Effect.Effect<A, PeerHubError>,
+  ): Promise<A> =>
+    Effect.runPromise(
+      requireSession.pipe(Effect.flatMap(({ hubUrl, session }) => call(hubUrl, session))),
+    );
+
+  const startBroker = Effect.tryPromise({
+    try: async () => {
+      if (broker !== null) return;
+      const created = new CoordinationBroker({
+        socketPath: coordinationSocket,
+        scriptsDir: coordinationDir,
+        logPath: coordinationLog,
+        environment: environmentId,
+        placeOf,
+        branchOf: async (root) => {
+          const name = await run("git", ["-C", root, "rev-parse", "--abbrev-ref", "HEAD"]).catch(
+            () => "",
+          );
+          return name === "" || name === "HEAD" ? undefined : name;
+        },
+        herdrTitle: (pane) => currentState().herdr?.find((agent) => agent.paneId === pane)?.title,
+        nameOf: nameIn,
+        email: () => currentState().persisted.email,
+        policy: () => currentState().persisted.coordination?.policy ?? "coordinate",
+        report: (workspace, sessions) =>
+          withHub((hubUrl, session) =>
+            hubApi.reportCoordination(hubUrl, session, workspace, {
+              environment: environmentId,
+              sessions,
+            }),
+          ),
+        view: (workspace) =>
+          withHub((hubUrl, session) => hubApi.coordination(hubUrl, session, workspace)),
+        note: (workspace, project, overlap, text, author) =>
+          withHub((hubUrl, session) =>
+            hubApi.noteOverlap(hubUrl, session, workspace, project, overlap, {
+              ...(author === undefined ? {} : { session: author }),
+              text,
+            }),
+          ),
+        resolve: (workspace, project, overlap, resolution, author) =>
+          withHub((hubUrl, session) =>
+            hubApi.resolveOverlap(hubUrl, session, workspace, project, overlap, {
+              ...(author === undefined ? {} : { session: author }),
+              resolution,
+            }),
+          ),
+        workspaces: () => {
+          const s = currentState();
+          return s.persisted.email === null ? [] : s.persisted.workspaces.map((w) => w.slug);
+        },
+        notify: (title, body) => void Herdr.notifyHerdr(title, body),
+        changed: () => void Effect.runFork(publish.pipe(Effect.ignore)),
+      });
+      await created.start();
+      broker = created;
+    },
+    catch: (failure) =>
+      hubError(
+        `Agent coordination could not start: ${failure instanceof Error ? failure.message : String(failure)}`,
+      ),
+  });
+
+  const stopBroker = Effect.promise(async () => {
+    const running = broker;
+    broker = null;
+    await running?.stop();
+  });
+  yield* Effect.addFinalizer(() => stopBroker);
+
+  const setCoordination: PeerHub["Service"]["setCoordination"] = Effect.fn(
+    "PeerHub.setCoordination",
+  )(function* (input) {
+    const current = (yield* Ref.get(stateRef)).persisted.coordination ?? {
+      enabled: false,
+      policy: "coordinate" as const,
+    };
+    // Hooks run Peer's scripts, which coordination writes: installing them turns it on.
+    const next = {
+      enabled: input.claudeHooks === true ? true : (input.enabled ?? current.enabled),
+      policy: input.policy ?? current.policy,
+    };
+    yield* updatePersisted((p) => ({ ...p, coordination: next }));
+    if (next.enabled) yield* startBroker;
+    else yield* stopBroker;
+    if (input.claudeHooks !== undefined) {
+      const install = input.claudeHooks;
+      yield* Effect.tryPromise({
+        try: async () => {
+          const settings = await readJsonSettings(claudeSettingsPath);
+          if (settings === null) {
+            throw new Error(`${claudeSettingsPath} is not valid JSON; fix it first`);
+          }
+          const groups = claudeHookGroups({
+            hook: NodePath.join(coordinationDir, "hook"),
+            wait: NodePath.join(coordinationDir, "wait"),
+          });
+          await writeJsonSettings(
+            claudeSettingsPath,
+            withClaudeHooks(settings, groups, coordinationDir, install),
+          );
+          claudeHooksInstalled = install;
+        },
+        catch: (failure) =>
+          hubError(
+            `Claude Code's settings could not change: ${failure instanceof Error ? failure.message : String(failure)}`,
+          ),
+      });
+    }
+    return yield* publish;
+  });
+
+  const noteOverlap: PeerHub["Service"]["noteOverlap"] = Effect.fn("PeerHub.noteOverlap")(
+    function* (input) {
+      const running = broker;
+      if (running !== null) {
+        yield* Effect.tryPromise({
+          try: () => running.personNote(input.workspace, input.project, input.overlap, input.text),
+          catch: (failure) =>
+            hubError(failure instanceof Error ? failure.message : String(failure)),
+        });
+      } else {
+        const { hubUrl, session } = yield* requireSession;
+        yield* hubApi.noteOverlap(hubUrl, session, input.workspace, input.project, input.overlap, {
+          text: input.text,
+        });
+      }
+      return yield* publish;
+    },
+  );
+
+  const resolveOverlap: PeerHub["Service"]["resolveOverlap"] = Effect.fn("PeerHub.resolveOverlap")(
+    function* (input) {
+      const running = broker;
+      if (running !== null) {
+        yield* Effect.tryPromise({
+          try: () =>
+            running.personResolve(input.workspace, input.project, input.overlap, input.resolution),
+          catch: (failure) =>
+            hubError(failure instanceof Error ? failure.message : String(failure)),
+        });
+      } else {
+        const { hubUrl, session } = yield* requireSession;
+        yield* hubApi.resolveOverlap(
+          hubUrl,
+          session,
+          input.workspace,
+          input.project,
+          input.overlap,
+          { resolution: input.resolution },
+        );
+      }
+      return yield* publish;
+    },
+  );
 
   const enableSharedCapacity = (workspace: PersistedWorkspace, project: PeerProject) =>
     Effect.gen(function* () {
@@ -1844,6 +2133,9 @@ const make = Effect.gen(function* () {
     Effect.forkScoped,
   );
   yield* background(refreshGitHub);
+  if ((yield* Ref.get(stateRef)).persisted.coordination?.enabled === true) {
+    yield* background(startBroker);
+  }
   // Publish the persisted state right away so policy and tools apply before the first sync.
   yield* publish.pipe(
     Effect.andThen(requireSession.pipe(Effect.option)),
@@ -1877,6 +2169,9 @@ const make = Effect.gen(function* () {
     openProject,
     connectGitHub,
     cancelGitHubSignIn,
+    setCoordination,
+    noteOverlap,
+    resolveOverlap,
     setSharedCapacity,
     projectUsage,
     createTask,

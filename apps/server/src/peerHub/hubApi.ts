@@ -12,7 +12,7 @@ import {
   PeerTask,
   PeerWorkThread,
   PeerWorkspaceRole,
-  type PeerWorkStatus,
+  PeerWorkStatus,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -78,6 +78,66 @@ export interface ReportedThread {
   readonly harness?: string;
   readonly branch?: string;
   readonly source: "peer" | "herdr";
+}
+
+const HubCoordSession = Schema.Struct({
+  id: Schema.String,
+  project: Schema.String,
+  email: Schema.String,
+  environment: Schema.String,
+  label: Schema.String,
+  agent: Schema.optional(Schema.String),
+  task: Schema.optional(Schema.String),
+  branch: Schema.optional(Schema.String),
+  status: PeerWorkStatus,
+  intent: Schema.optional(Schema.String),
+  files: Schema.Array(Schema.String),
+  claims: Schema.Array(Schema.String),
+  seenAt: Schema.String,
+});
+export type HubCoordSession = typeof HubCoordSession.Type;
+
+const HubOverlap = Schema.Struct({
+  id: Schema.String,
+  project: Schema.String,
+  sessions: Schema.Array(Schema.String),
+  files: Schema.Array(Schema.String),
+  state: Schema.Literals(["open", "resolved"]),
+  resolution: Schema.optional(Schema.String),
+  resolvedFiles: Schema.optional(Schema.Array(Schema.String)),
+  notes: Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      session: Schema.optional(Schema.String),
+      email: Schema.String,
+      text: Schema.String,
+      at: Schema.String,
+    }),
+  ),
+  openedAt: Schema.String,
+  updatedAt: Schema.String,
+});
+export type HubOverlap = typeof HubOverlap.Type;
+
+const CoordView = Schema.Struct({
+  sessions: Schema.Array(HubCoordSession),
+  overlaps: Schema.Array(HubOverlap),
+  at: Schema.String,
+});
+export type HubCoordView = typeof CoordView.Type;
+
+/** One agent session as this environment reports it for coordination. */
+export interface ReportedSession {
+  readonly id: string;
+  readonly project: string;
+  readonly label: string;
+  readonly agent?: string;
+  readonly task?: string;
+  readonly branch?: string;
+  readonly status: PeerWorkStatus;
+  readonly intent?: string;
+  readonly files: ReadonlyArray<string>;
+  readonly claims: ReadonlyArray<string>;
 }
 
 const Ok = Schema.Struct({});
@@ -311,6 +371,57 @@ export const make = Effect.gen(function* () {
         hubUrl,
         path: workspacePath(slug, "/threads"),
         method: "PUT",
+        session,
+        body,
+      }),
+
+    /** The agent sessions at work on the caller's projects and their overlaps. */
+    coordination: (hubUrl: string, session: string, slug: string) =>
+      request(CoordView, { hubUrl, path: workspacePath(slug, "/coord"), session }),
+
+    /** This environment's agent sessions, replacing what it reported before; answers the view. */
+    reportCoordination: (
+      hubUrl: string,
+      session: string,
+      slug: string,
+      body: { readonly environment: string; readonly sessions: ReadonlyArray<ReportedSession> },
+    ) =>
+      request(CoordView, {
+        hubUrl,
+        path: workspacePath(slug, "/coord"),
+        method: "PUT",
+        session,
+        body,
+      }),
+
+    noteOverlap: (
+      hubUrl: string,
+      session: string,
+      slug: string,
+      project: string,
+      overlap: string,
+      body: { readonly session?: string; readonly text: string },
+    ) =>
+      request(HubOverlap, {
+        hubUrl,
+        path: workspacePath(slug, `/coord/${segment(project)}/${segment(overlap)}/notes`),
+        method: "POST",
+        session,
+        body,
+      }),
+
+    resolveOverlap: (
+      hubUrl: string,
+      session: string,
+      slug: string,
+      project: string,
+      overlap: string,
+      body: { readonly session?: string; readonly resolution: string },
+    ) =>
+      request(HubOverlap, {
+        hubUrl,
+        path: workspacePath(slug, `/coord/${segment(project)}/${segment(overlap)}/resolve`),
+        method: "POST",
         session,
         body,
       }),

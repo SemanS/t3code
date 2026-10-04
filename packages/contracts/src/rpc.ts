@@ -322,6 +322,9 @@ import {
   PeerHubCreateTaskInput,
   PeerHubFindWorkspaceInput,
   PeerHubFocusAgentInput,
+  PeerHubOverlapNoteInput,
+  PeerHubResolveOverlapInput,
+  PeerHubSetCoordinationInput,
   PeerHubShareProjectInput,
   PeerHubTaskInput,
   PeerHubUpdateTaskInput,
@@ -507,6 +510,9 @@ export const WS_METHODS = {
   peerHubOpenProject: "peerHub.openProject",
   peerHubConnectGitHub: "peerHub.connectGitHub",
   peerHubCancelGitHubSignIn: "peerHub.cancelGitHubSignIn",
+  peerHubSetCoordination: "peerHub.setCoordination",
+  peerHubNoteOverlap: "peerHub.noteOverlap",
+  peerHubResolveOverlap: "peerHub.resolveOverlap",
   peerHubSetSharedCapacity: "peerHub.setSharedCapacity",
   peerHubProjectUsage: "peerHub.projectUsage",
 
@@ -1754,6 +1760,24 @@ const WsPeerHubCancelGitHubSignInRpc = Rpc.make(WS_METHODS.peerHubCancelGitHubSi
   error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
 });
 
+const WsPeerHubSetCoordinationRpc = Rpc.make(WS_METHODS.peerHubSetCoordination, {
+  payload: PeerHubSetCoordinationInput,
+  success: PeerHubStatus,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
+const WsPeerHubNoteOverlapRpc = Rpc.make(WS_METHODS.peerHubNoteOverlap, {
+  payload: PeerHubOverlapNoteInput,
+  success: PeerHubStatus,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
+const WsPeerHubResolveOverlapRpc = Rpc.make(WS_METHODS.peerHubResolveOverlap, {
+  payload: PeerHubResolveOverlapInput,
+  success: PeerHubStatus,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
 const WsPeerHubSetSharedCapacityRpc = Rpc.make(WS_METHODS.peerHubSetSharedCapacity, {
   payload: PeerHubSharedCapacityInput,
   success: PeerHubStatus,
@@ -1927,6 +1951,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsPeerHubOpenProjectRpc,
   WsPeerHubConnectGitHubRpc,
   WsPeerHubCancelGitHubSignInRpc,
+  WsPeerHubSetCoordinationRpc,
+  WsPeerHubNoteOverlapRpc,
+  WsPeerHubResolveOverlapRpc,
   WsPeerHubSetSharedCapacityRpc,
   WsPeerHubProjectUsageRpc,
   WsScheduledTasksListRpc,

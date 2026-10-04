@@ -156,3 +156,15 @@ export async function focusHerdrAgent(
 ): Promise<void> {
   await call(socketPath, "agent.focus", { target: paneId });
 }
+
+/** Shows a notification through herdr's attached client; nothing when herdr is not running. */
+export async function notifyHerdr(
+  title: string,
+  body: string,
+  socketPath: string = herdrSocketPath(),
+): Promise<void> {
+  if (!NodeFS.existsSync(socketPath)) return;
+  await call(socketPath, "notification.show", { title, body, sound: "request" }).catch(
+    () => undefined,
+  );
+}

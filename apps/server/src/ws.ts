@@ -2072,6 +2072,18 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.peerHubCancelGitHubSignIn, peerHub.cancelGitHubSignIn, {
             "rpc.aggregate": "peerHub",
           }),
+        [WS_METHODS.peerHubSetCoordination]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubSetCoordination, peerHub.setCoordination(input), {
+            "rpc.aggregate": "peerHub",
+          }),
+        [WS_METHODS.peerHubNoteOverlap]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubNoteOverlap, peerHub.noteOverlap(input), {
+            "rpc.aggregate": "peerHub",
+          }),
+        [WS_METHODS.peerHubResolveOverlap]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubResolveOverlap, peerHub.resolveOverlap(input), {
+            "rpc.aggregate": "peerHub",
+          }),
         [WS_METHODS.peerHubSetSharedCapacity]: (input) =>
           observeRpcEffect(WS_METHODS.peerHubSetSharedCapacity, peerHub.setSharedCapacity(input), {
             "rpc.aggregate": "peerHub",

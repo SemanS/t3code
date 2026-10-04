@@ -1161,6 +1161,18 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:peer-hub:cancel-github-sign-in",
       tag: WS_METHODS.peerHubCancelGitHubSignIn,
     }),
+    peerHubSetCoordination: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:set-coordination",
+      tag: WS_METHODS.peerHubSetCoordination,
+    }),
+    peerHubNoteOverlap: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:note-overlap",
+      tag: WS_METHODS.peerHubNoteOverlap,
+    }),
+    peerHubResolveOverlap: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:resolve-overlap",
+      tag: WS_METHODS.peerHubResolveOverlap,
+    }),
     peerHubSetSharedCapacity: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:peer-hub:shared-capacity",
       tag: WS_METHODS.peerHubSetSharedCapacity,

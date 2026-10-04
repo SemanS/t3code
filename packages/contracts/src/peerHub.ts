@@ -279,6 +279,74 @@ export const PeerJoinableWorkspace = Schema.Struct({
 export type PeerJoinableWorkspace = typeof PeerJoinableWorkspace.Type;
 
 /**
+ * What an agent about to change a file another agent on the project changed
+ * is told: `notify` gives a heads-up, `coordinate` has it write the other
+ * agent a note first, `ask` lets its person decide.
+ */
+export const PeerCoordinationPolicy = Schema.Literals(["notify", "coordinate", "ask"]);
+export type PeerCoordinationPolicy = typeof PeerCoordinationPolicy.Type;
+
+/** An agent session at work on a workspace project, as coordination sees it. */
+export const PeerCoordSession = Schema.Struct({
+  /** `claude:<session id>` */
+  id: Schema.String,
+  workspace: Schema.String,
+  project: Schema.String,
+  email: Schema.String,
+  label: Schema.String,
+  agent: Schema.optional(Schema.String),
+  task: Schema.optional(Schema.String),
+  branch: Schema.optional(Schema.String),
+  status: PeerWorkStatus,
+  /** Files it changed, relative to the repository. */
+  files: Schema.Array(Schema.String),
+  /** Files, or directories ending in `/`, it is about to change. */
+  claims: Schema.Array(Schema.String),
+  /** This computer runs it. */
+  local: Schema.Boolean,
+});
+export type PeerCoordSession = typeof PeerCoordSession.Type;
+
+/**
+ * Two agent sessions changing the same files. Its notes are the one thing
+ * both agents and both people read about it.
+ */
+export const PeerOverlap = Schema.Struct({
+  id: Schema.String,
+  workspace: Schema.String,
+  project: Schema.String,
+  sessions: Schema.Array(Schema.String),
+  files: Schema.Array(Schema.String),
+  state: Schema.Literals(["open", "resolved"]),
+  resolution: Schema.optional(Schema.String),
+  notes: Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      /** The agent session that wrote it; none when a person did. */
+      session: Schema.optional(Schema.String),
+      email: Schema.String,
+      text: Schema.String,
+      at: Schema.String,
+    }),
+  ),
+  updatedAt: Schema.String,
+});
+export type PeerOverlap = typeof PeerOverlap.Type;
+
+/** Agents on the same project staying out of each other's way (experimental). */
+export const PeerCoordinationState = Schema.Struct({
+  enabled: Schema.Boolean,
+  policy: PeerCoordinationPolicy,
+  /** Claude Code runs Peer's coordination hooks. */
+  claudeHooks: Schema.Boolean,
+  /** Every coordination event, one JSON object per line. */
+  logPath: Schema.String,
+  sessions: Schema.Array(PeerCoordSession),
+  overlaps: Schema.Array(PeerOverlap),
+});
+export type PeerCoordinationState = typeof PeerCoordinationState.Type;
+
+/**
  * GitHub on this computer, through GitHub CLI: workspace repositories on
  * github.com clone with its account, and Peer signs in to it from the app.
  */
@@ -321,6 +389,7 @@ export const PeerHubStatus = Schema.Struct({
     list: Schema.Array(PeerLocalAgent),
   }),
   github: PeerGitHubState,
+  coordination: PeerCoordinationState,
   syncing: Schema.Boolean,
   lastSyncAt: Schema.NullOr(Schema.String),
   error: Schema.NullOr(Schema.String),
@@ -419,6 +488,30 @@ export const PeerHubAssignThreadInput = Schema.Struct({
   taskId: Schema.NullOr(TrimmedNonEmptyString),
 });
 export type PeerHubAssignThreadInput = typeof PeerHubAssignThreadInput.Type;
+
+export const PeerHubSetCoordinationInput = Schema.Struct({
+  enabled: Schema.optional(Schema.Boolean),
+  policy: Schema.optional(PeerCoordinationPolicy),
+  /** Add Peer's hooks to Claude Code's user settings, or take them out. */
+  claudeHooks: Schema.optional(Schema.Boolean),
+});
+export type PeerHubSetCoordinationInput = typeof PeerHubSetCoordinationInput.Type;
+
+export const PeerHubOverlapNoteInput = Schema.Struct({
+  workspace: TrimmedNonEmptyString,
+  project: TrimmedNonEmptyString,
+  overlap: TrimmedNonEmptyString,
+  text: TrimmedNonEmptyString,
+});
+export type PeerHubOverlapNoteInput = typeof PeerHubOverlapNoteInput.Type;
+
+export const PeerHubResolveOverlapInput = Schema.Struct({
+  workspace: TrimmedNonEmptyString,
+  project: TrimmedNonEmptyString,
+  overlap: TrimmedNonEmptyString,
+  resolution: TrimmedNonEmptyString,
+});
+export type PeerHubResolveOverlapInput = typeof PeerHubResolveOverlapInput.Type;
 
 export const PeerHubFocusAgentInput = Schema.Struct({ paneId: TrimmedNonEmptyString });
 export type PeerHubFocusAgentInput = typeof PeerHubFocusAgentInput.Type;

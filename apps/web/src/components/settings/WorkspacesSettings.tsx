@@ -28,6 +28,7 @@ import {
   failureMessage,
   usePeerHubStatus,
 } from "../workspaces/WorkspaceAccess";
+import { CoordinationControls } from "../workspaces/Coordination";
 import { GitHubConnect } from "../workspaces/GitHubConnect";
 import { useOpenWorkspaceProject } from "../workspaces/useOpenWorkspaceProject";
 import { useSettingsScope } from "./SettingsScopeContext";
@@ -193,6 +194,12 @@ function SignedIn({
         <div className="pb-3">
           <GitHubConnect environmentId={environmentId} github={status.github} />
         </div>
+      </SettingsRow>
+      <SettingsRow
+        title="Agent coordination (experimental)"
+        description="Agents on the same project hear about each other only when they are about to change the same file, and settle it in a short note both read."
+      >
+        <CoordinationControls environmentId={environmentId} status={status} />
       </SettingsRow>
       <SettingsRow
         title="How capacity works"
