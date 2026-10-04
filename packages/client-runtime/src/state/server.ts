@@ -1142,6 +1142,15 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:peer-hub:prompt-agent",
       tag: WS_METHODS.peerHubPromptAgent,
     }),
+    peerHubShareThread: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:share-thread",
+      tag: WS_METHODS.peerHubShareThread,
+    }),
+    /** A colleague's shared thread as it happens, relayed by the hub while you watch. */
+    peerHubObserveThread: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:peer-hub:observe-thread",
+      tag: WS_METHODS.peerHubObserveThread,
+    }),
     peerHubShareProject: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:peer-hub:share-project",
       tag: WS_METHODS.peerHubShareProject,

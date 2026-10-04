@@ -22,6 +22,7 @@ import {
   CircleCheckIcon,
   CircleDashedIcon,
   EllipsisIcon,
+  EyeIcon,
   GitBranchIcon,
   MessageCircleQuestionIcon,
   PlusIcon,
@@ -145,6 +146,9 @@ interface Scope {
 function useWorkActions(environmentId: EnvironmentId | null) {
   const navigate = useNavigate();
   const focusAgent = useAtomCommand(serverEnvironment.peerHubFocusAgent, { reportFailure: false });
+  const shareThread = useAtomCommand(serverEnvironment.peerHubShareThread, {
+    reportFailure: false,
+  });
   const assignThread = useAtomCommand(serverEnvironment.peerHubAssignThread, {
     reportFailure: false,
   });
@@ -167,7 +171,22 @@ function useWorkActions(environmentId: EnvironmentId | null) {
         });
         return;
       }
+      if (open.kind === "observe") {
+        void navigate({
+          to: "/observe/$workspace/$environment/$thread",
+          params: { workspace: open.workspace, environment: open.environment, thread: open.thread },
+        });
+        return;
+      }
       void navigate({ to: "/agent/$agentId", params: { agentId: open.agentId } });
+    },
+    /** Lets the team watch one of your threads live, or stops it. */
+    shareThread: async (thread: string, shared: boolean) => {
+      if (environmentId === null) return;
+      reportFailure(
+        shared ? "Could not share the thread" : "Could not stop sharing the thread",
+        await shareThread({ environmentId, input: { thread, shared } }),
+      );
     },
     /** Brings a herdr agent's pane forward in herdr itself. */
     showInHerdr: (paneId: string) => {
@@ -262,7 +281,9 @@ type WorkActions = ReturnType<typeof useWorkActions>;
 function openKey(open: WorkOpen): string {
   return open.kind === "thread"
     ? `${open.environmentId}:${open.threadId}`
-    : `agent:${open.agentId}`;
+    : open.kind === "herdr"
+      ? `agent:${open.agentId}`
+      : `observe:${open.workspace}:${open.environment}:${open.thread}`;
 }
 
 /**
@@ -284,9 +305,11 @@ export function WorkPanel() {
     select: (params) =>
       params.agentId
         ? `agent:${params.agentId}`
-        : params.environmentId && params.threadId
-          ? `${params.environmentId}:${params.threadId}`
-          : null,
+        : params.workspace && params.environment && params.thread
+          ? `observe:${params.workspace}:${params.environment}:${params.thread}`
+          : params.environmentId && params.threadId
+            ? `${params.environmentId}:${params.threadId}`
+            : null,
   });
   const tree = useMemo(
     () => (status === null ? [] : buildWorkTree({ status, localThreads: threads, now })),
@@ -1018,7 +1041,7 @@ function ThreadCard({
   const [renaming, setRenaming] = useState(false);
   const open = thread.open;
   const local = open?.kind === "thread" ? open : undefined;
-  const actionable = thread.mine && open !== undefined;
+  const actionable = thread.mine && (open?.kind === "thread" || open?.kind === "herdr");
   const active = open !== undefined && activeThread === openKey(open);
   const who = thread.mine ? (open === undefined ? "You · other computer" : "You") : thread.person;
   const agent = [thread.harness, thread.source === "herdr" ? "herdr" : null]
@@ -1029,7 +1052,9 @@ function ThreadCard({
       ? open === undefined
         ? "Yours, on another computer: open it there"
         : null
-      : `${thread.person}’s thread: only they change it`,
+      : thread.observable
+        ? `${thread.person} shares it: open it to watch it live`
+        : `${thread.person}’s thread: only they change it`,
     thread.stale ? "Not reported for a few minutes" : null,
   ].filter((line) => line !== null);
 
@@ -1049,7 +1074,9 @@ function ThreadCard({
     );
     if (choice === null || choice === "move") return;
     if (choice === "rename") setRenaming(true);
-    else if (choice === "show-in-herdr") {
+    else if (choice === "share" || choice === "unshare") {
+      void actions.shareThread(thread.key, choice === "share");
+    } else if (choice === "show-in-herdr") {
       if (open?.kind === "herdr") actions.showInHerdr(open.paneId);
     } else if (choice === "archive") {
       if (local !== undefined) void actions.archiveThread(local, thread.title);
@@ -1127,6 +1154,12 @@ function ThreadCard({
             >
               {who}
             </span>
+            {thread.observable ? (
+              <EyeIcon
+                aria-label={thread.mine ? "The team can watch it" : "Shared to watch live"}
+                className="size-3 shrink-0 text-muted-foreground"
+              />
+            ) : null}
             {/* The state at rest; the thread's menu takes the slot on hover or keyboard focus. */}
             <span className="group/thread-slot relative flex h-5 min-w-5 shrink-0 items-center justify-end text-xs">
               <span

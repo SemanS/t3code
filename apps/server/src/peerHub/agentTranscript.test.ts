@@ -5,9 +5,12 @@ import * as NodePath from "node:path";
 
 import { assert, describe, it } from "@effect/vitest";
 
+import type { OrchestrationV2ProjectedTurnItem } from "@t3tools/contracts";
+
 import {
   findClaudeTranscript,
   readTranscriptTail,
+  timelineEntries,
   toolSummary,
   transcriptEntries,
 } from "./agentTranscript.ts";
@@ -129,5 +132,70 @@ describe("finding a transcript", () => {
     } finally {
       NodeFS.rmSync(config, { recursive: true, force: true });
     }
+  });
+});
+
+/** A timeline row with only what the view reads. */
+const row = (
+  item: Record<string, unknown>,
+  visibility: "local" | "inherited" = "local",
+): OrchestrationV2ProjectedTurnItem =>
+  ({ position: 0, visibility, item: { status: "completed", title: null, ...item } }) as never;
+
+describe("timelineEntries", () => {
+  it("reads a Peer thread's timeline like a transcript, leaving inherited history out", () => {
+    assert.deepStrictEqual(
+      timelineEntries(
+        [
+          row({ id: "old", type: "user_message", text: "forked from here" }, "inherited"),
+          row({ id: "u1", type: "user_message", text: "Fix the retry" }),
+          row({ id: "r1", type: "reasoning", text: "hmm" }),
+          row({
+            id: "t1",
+            type: "dynamic_tool",
+            toolName: "Read",
+            title: "Read src/net.rs",
+            input: {},
+          }),
+          row({
+            id: "c1",
+            type: "command_execution",
+            input: "cargo test",
+            output: "running 2 tests\ntest result: FAILED",
+            exitCode: 101,
+          }),
+          row({
+            id: "f1",
+            type: "file_change",
+            fileName: "/w/app/src/net.rs",
+            additions: 4,
+            deletions: 1,
+          }),
+          row({ id: "a1", type: "assistant_message", text: "Retries now back off." }),
+        ],
+        "/w/app",
+      ),
+      [
+        { id: "u1", kind: "prompt", text: "Fix the retry" },
+        { id: "t1", kind: "tool", name: "Read", summary: "Read src/net.rs", failed: false },
+        {
+          id: "c1",
+          kind: "tool",
+          name: "Bash",
+          summary: "$ cargo test",
+          failed: true,
+          result: "test result: FAILED",
+        },
+        {
+          id: "f1",
+          kind: "tool",
+          name: "Edit",
+          summary: "Edit src/net.rs",
+          failed: false,
+          result: "+4 −1",
+        },
+        { id: "a1", kind: "text", text: "Retries now back off." },
+      ],
+    );
   });
 });

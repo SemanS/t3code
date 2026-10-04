@@ -107,7 +107,14 @@ export function AgentView({ agentId }: { readonly agentId: string }) {
 }
 
 /** The agent's steps, following the newest unless the reader scrolled back. */
-function AgentTimeline({ view }: { readonly view: PeerAgentView | undefined }) {
+export function AgentTimeline({
+  view,
+  goneText = "This agent no longer runs in herdr.",
+}: {
+  readonly view: PeerAgentView | undefined;
+  /** What to say when the work is gone. */
+  readonly goneText?: string;
+}) {
   const scroller = useRef<HTMLDivElement>(null);
   const following = useRef(true);
   // Each new view of the agent scrolls to its newest step, unless the reader scrolled back.
@@ -129,7 +136,7 @@ function AgentTimeline({ view }: { readonly view: PeerAgentView | undefined }) {
         {view === undefined ? (
           <p className="text-sm text-muted-foreground">Connecting…</p>
         ) : view.gone ? (
-          <p className="text-sm text-muted-foreground">This agent no longer runs in herdr.</p>
+          <p className="text-sm text-muted-foreground">{goneText}</p>
         ) : view.entries !== undefined ? (
           view.entries.length === 0 ? (
             <p className="text-sm text-muted-foreground">Nothing yet.</p>

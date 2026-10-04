@@ -13,7 +13,11 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import type { PeerAgentEntry } from "@t3tools/contracts";
+import type {
+  OrchestrationV2ProjectedTurnItem,
+  OrchestrationV2TurnItem,
+  PeerAgentEntry,
+} from "@t3tools/contracts";
 
 /** Claude Code's configuration directory: CLAUDE_CONFIG_DIR, else ~/.claude. */
 export function claudeConfigDir(env: NodeJS.ProcessEnv = process.env): string {
@@ -214,4 +218,116 @@ export function transcriptEntries(
     }
   }
   return entries.slice(-(options.limit ?? 80));
+}
+
+function timelineEntry(item: OrchestrationV2TurnItem, cwd: string | undefined): PeerAgentEntry[] {
+  const id = item.id as string;
+  const failed = item.status === "failed";
+  switch (item.type) {
+    case "user_message": {
+      const text = item.text.trim();
+      return text === "" ? [] : [{ id, kind: "prompt", text: clip(text, 2_000) }];
+    }
+    case "assistant_message": {
+      const text = item.text.trim();
+      return text === "" ? [] : [{ id, kind: "text", text: clip(text, 4_000) }];
+    }
+    case "command_execution": {
+      const result = item.output === undefined ? undefined : lines(item.output).at(-1);
+      return [
+        {
+          id,
+          kind: "tool",
+          name: "Bash",
+          summary: `$ ${clip(lines(item.input)[0] ?? "", 200)}`,
+          failed:
+            failed ||
+            (item.exitCode !== undefined && item.exitCode !== 0) ||
+            item.outputIndicatesFailure === true,
+          ...(result === undefined ? {} : { result: clip(result, 200) }),
+        },
+      ];
+    }
+    case "file_change": {
+      const counts = [
+        item.additions === undefined ? null : `+${item.additions}`,
+        item.deletions === undefined ? null : `−${item.deletions}`,
+      ]
+        .filter((part) => part !== null)
+        .join(" ");
+      return [
+        {
+          id,
+          kind: "tool",
+          name: "Edit",
+          summary: `Edit ${relative(item.fileName, cwd)}`,
+          failed,
+          ...(counts === "" ? {} : { result: counts }),
+        },
+      ];
+    }
+    case "dynamic_tool": {
+      const name = item.toolName ?? "Tool";
+      return [
+        {
+          id,
+          kind: "tool",
+          name,
+          summary: item.title ?? toolSummary(name, item.input, cwd),
+          failed,
+        },
+      ];
+    }
+    case "file_search":
+      return [
+        {
+          id,
+          kind: "tool",
+          name: "Glob",
+          summary: `Find ${clip(item.pattern ?? "", 120)}`,
+          failed,
+        },
+      ];
+    case "web_search":
+      return [
+        {
+          id,
+          kind: "tool",
+          name: "WebSearch",
+          summary: `Search the web for ${clip((item.patterns ?? []).join(", "), 120)}`,
+          failed,
+        },
+      ];
+    case "subagent": {
+      const result = item.result === null ? undefined : lines(item.result)[0];
+      return [
+        {
+          id,
+          kind: "tool",
+          name: "Agent",
+          summary: `Agent: ${clip(lines(item.prompt)[0] ?? "", 120)}`,
+          failed,
+          ...(result === undefined ? {} : { result: clip(result, 200) }),
+        },
+      ];
+    }
+    case "error":
+      return [
+        { id, kind: "tool", name: "Error", summary: clip(item.failure.message, 200), failed: true },
+      ];
+    default:
+      return [];
+  }
+}
+
+/**
+ * A Peer thread's timeline as the steps a transcript gives: prompts, words,
+ * and tools with their outcome. History a thread inherited from the one it
+ * was forked from is left out; reasoning and bookkeeping are too.
+ */
+export function timelineEntries(
+  rows: ReadonlyArray<OrchestrationV2ProjectedTurnItem>,
+  cwd?: string,
+): PeerAgentEntry[] {
+  return rows.flatMap((row) => (row.visibility === "local" ? timelineEntry(row.item, cwd) : []));
 }

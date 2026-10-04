@@ -175,6 +175,7 @@ function status(project: PeerProjectState, role: "owner" | "member" = "owner"): 
       sessions: [],
       overlaps: [],
     },
+    sharedThreads: ["peer:t1"],
     syncing: false,
     lastSyncAt: null,
     error: null,
@@ -368,11 +369,13 @@ describe("menus", () => {
     expect(menu("Investigation for KRK-812").map((item) => item.id)).toEqual([
       "show-in-herdr",
       "move",
+      "share",
     ]);
     const mine = menu("Main implementation");
     expect(mine.map((item) => [item.id, item.disabled ?? false])).toEqual([
       ["rename", false],
       ["move", false],
+      ["unshare", false],
       ["archive", true],
       ["delete", false],
     ]);

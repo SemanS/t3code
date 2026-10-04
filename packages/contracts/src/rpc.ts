@@ -338,7 +338,9 @@ import {
   PeerHubWorkspaceInput,
   PeerAgentView,
   PeerHubAgentInput,
+  PeerHubObserveInput,
   PeerHubPromptAgentInput,
+  PeerHubShareThreadInput,
 } from "./peerHub.ts";
 import {
   ProjectCloneActionInput,
@@ -509,6 +511,8 @@ export const WS_METHODS = {
   peerHubFocusAgent: "peerHub.focusAgent",
   peerHubWatchAgent: "peerHub.watchAgent",
   peerHubPromptAgent: "peerHub.promptAgent",
+  peerHubShareThread: "peerHub.shareThread",
+  peerHubObserveThread: "peerHub.observeThread",
   peerHubShareProject: "peerHub.shareProject",
   peerHubUnshareProject: "peerHub.unshareProject",
   peerHubInvite: "peerHub.invite",
@@ -1833,6 +1837,20 @@ const WsPeerHubPromptAgentRpc = Rpc.make(WS_METHODS.peerHubPromptAgent, {
   error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
 });
 
+const WsPeerHubShareThreadRpc = Rpc.make(WS_METHODS.peerHubShareThread, {
+  payload: PeerHubShareThreadInput,
+  success: PeerHubStatus,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
+/** A colleague's shared thread as it happens, relayed by the hub while you watch. */
+const WsPeerHubObserveThreadRpc = Rpc.make(WS_METHODS.peerHubObserveThread, {
+  payload: PeerHubObserveInput,
+  success: PeerAgentView,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
 const WsPeerHubShareProjectRpc = Rpc.make(WS_METHODS.peerHubShareProject, {
   payload: PeerHubShareProjectInput,
   success: PeerHubStatus,
@@ -1966,6 +1984,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsPeerHubFocusAgentRpc,
   WsPeerHubWatchAgentRpc,
   WsPeerHubPromptAgentRpc,
+  WsPeerHubShareThreadRpc,
+  WsPeerHubObserveThreadRpc,
   WsPeerHubShareProjectRpc,
   WsPeerHubUnshareProjectRpc,
   WsPeerHubInviteRpc,

@@ -29,7 +29,14 @@ export const STALE_AFTER_MS = 3 * 60 * 1000;
 export type WorkOpen =
   | { readonly kind: "thread"; readonly environmentId: EnvironmentId; readonly threadId: ThreadId }
   /** A herdr agent opens in Peer's agent view; its pane is where herdr shows it. */
-  | { readonly kind: "herdr"; readonly agentId: string; readonly paneId: string };
+  | { readonly kind: "herdr"; readonly agentId: string; readonly paneId: string }
+  /** A thread on another computer whose owner shares it opens read-only, relayed by the hub. */
+  | {
+      readonly kind: "observe";
+      readonly workspace: string;
+      readonly environment: string;
+      readonly thread: string;
+    };
 
 export interface WorkThreadNode {
   readonly key: string;
@@ -50,6 +57,8 @@ export interface WorkThreadNode {
    * such a thread shows with yours instead of folded into Team activity.
    */
   readonly concerns: string | undefined;
+  /** Its owner lets the team watch it live: yours when you shared it, a colleague's to observe. */
+  readonly observable: boolean;
 }
 
 export interface WorkTaskNode {
@@ -157,6 +166,7 @@ function projectTree(input: {
       ? placed
       : taskNamedIn(work.tasks, texts)?.id) ?? null;
 
+  const shared = new Set(status.sharedThreads);
   const placed: Array<{ readonly task: string | null; readonly node: WorkThreadNode }> = [];
   for (const thread of input.localThreads) {
     if (
@@ -183,6 +193,7 @@ function projectTree(input: {
         open: { kind: "thread", environmentId: thread.environmentId, threadId: thread.id },
         placeable: true,
         concerns: undefined,
+        observable: shared.has(key),
       },
     });
   }
@@ -203,6 +214,7 @@ function projectTree(input: {
         open: { kind: "herdr", agentId: agent.id, paneId: agent.paneId },
         placeable: true,
         concerns: undefined,
+        observable: shared.has(agent.id),
       },
     });
   }
@@ -245,12 +257,21 @@ function projectTree(input: {
         branch: thread.branch,
         source: thread.source,
         stale: Number.isFinite(seenAt) && input.now - seenAt > STALE_AFTER_MS,
-        open: undefined,
+        open:
+          thread.observable === true
+            ? {
+                kind: "observe",
+                workspace: workspace.slug,
+                environment: thread.environment,
+                thread: thread.id,
+              }
+            : undefined,
         placeable: false,
         concerns:
           files === undefined || thread.email === me
             ? undefined
             : `Its agent and yours both change ${files}`,
+        observable: thread.observable === true,
       },
     });
   }
@@ -456,6 +477,8 @@ export function taskLabel(task: { readonly key?: string | undefined; readonly ti
 
 export type WorkThreadMenuId =
   | "rename"
+  | "share"
+  | "unshare"
   | "show-in-herdr"
   | "move"
   | `task:${string}`
@@ -477,7 +500,7 @@ export function threadMenuItems(input: {
   readonly running: boolean;
 }): ReadonlyArray<ContextMenuItem<WorkThreadMenuId>> {
   const { thread, taskId } = input;
-  if (!thread.mine || thread.open === undefined) return [];
+  if (!thread.mine || thread.open === undefined || thread.open.kind === "observe") return [];
   const local = thread.open.kind === "thread";
   const choices = input.tasks.filter((task) => task.status === "open" || task.id === taskId);
   return [
@@ -506,6 +529,9 @@ export function threadMenuItems(input: {
           },
         ]
       : []),
+    thread.observable
+      ? { id: "unshare" as const, label: "Stop letting the team watch" }
+      : { id: "share" as const, label: "Let the team watch" },
     ...(local
       ? [
           {

@@ -36,7 +36,10 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   PeerAgentView,
+  ThreadId,
   type PeerHubAgentInput,
+  type PeerHubObserveInput,
+  type PeerHubShareThreadInput,
   type PeerHubAssignThreadInput,
   type PeerHubCreateTaskInput,
   type PeerHubCreateWorkspaceInput,
@@ -170,6 +173,8 @@ const PersistedState = Schema.Struct({
   coordination: Schema.optional(
     Schema.Struct({ enabled: Schema.Boolean, policy: PeerCoordinationPolicy }),
   ),
+  /** This computer's threads (`peer:…`, `herdr:…`) whose owner lets the team watch them. */
+  sharedThreads: Schema.optional(Schema.Array(Schema.String)),
 });
 type PersistedState = typeof PersistedState.Type;
 
@@ -391,6 +396,14 @@ export class PeerHub extends Context.Service<
     readonly promptAgent: (
       input: PeerHubPromptAgentInput,
     ) => Effect.Effect<PeerHubStatus, PeerHubError>;
+    /** Lets the team watch one of this computer's threads live, or stops it. */
+    readonly shareThread: (
+      input: PeerHubShareThreadInput,
+    ) => Effect.Effect<PeerHubStatus, PeerHubError>;
+    /** A colleague's shared thread as it happens, relayed by the hub while you watch. */
+    readonly observeThread: (
+      input: PeerHubObserveInput,
+    ) => Stream.Stream<PeerAgentView, PeerHubError>;
     /** Shares a local project's repository with a workspace, as a project everyone works on. */
     readonly shareProject: (
       input: PeerHubShareProjectInput,
@@ -875,6 +888,7 @@ const make = Effect.gen(function* () {
         error: s.github.error,
       },
       coordination: coordinationStatus(s),
+      sharedThreads: s.persisted.sharedThreads ?? [],
       syncing: s.syncing,
       lastSyncAt: s.persisted.lastSyncAt,
       error: s.error,
@@ -1113,6 +1127,7 @@ const make = Effect.gen(function* () {
       }
 
       const s = yield* Ref.get(stateRef);
+      const shared = new Set(s.persisted.sharedThreads ?? []);
       const reported: HubApi.ReportedThread[] = [];
       for (const thread of threads) {
         const projectId = roots.get(thread.projectId);
@@ -1129,6 +1144,7 @@ const make = Effect.gen(function* () {
           ...(harness === undefined ? {} : { harness }),
           ...(thread.branch === null ? {} : { branch: thread.branch }),
           source: "peer",
+          ...(shared.has(id) ? { observable: true } : {}),
         });
       }
       for (const agent of s.herdr ?? []) {
@@ -1147,6 +1163,7 @@ const make = Effect.gen(function* () {
           ...(agent.agent === undefined ? {} : { harness: agent.agent }),
           ...(agent.branch === undefined ? {} : { branch: agent.branch }),
           source: "herdr",
+          ...(shared.has(id) ? { observable: true } : {}),
         });
       }
       yield* hubApi
@@ -1261,14 +1278,26 @@ const make = Effect.gen(function* () {
           ? [{ legacy, key, assignment }]
           : [];
       });
-      if (moves.length === 0) return;
+      const shared = (yield* Ref.get(stateRef)).persisted.sharedThreads ?? [];
+      const renamed = new Map(
+        agents.flatMap((agent) => {
+          const legacy = `herdr:${agent.terminalId}`;
+          const key = agentKey(agent);
+          return key !== legacy && shared.includes(legacy) ? [[legacy, key] as const] : [];
+        }),
+      );
+      if (moves.length === 0 && renamed.size === 0) return;
       yield* updatePersisted((p) => {
         const next = { ...p.assignments };
         for (const move of moves) {
           delete next[move.legacy];
           next[move.key] = move.assignment;
         }
-        return { ...p, assignments: next };
+        return {
+          ...p,
+          assignments: next,
+          sharedThreads: (p.sharedThreads ?? []).map((key) => renamed.get(key) ?? key),
+        };
       });
     });
 
@@ -2197,6 +2226,122 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const goneView = (agentId: string): PeerAgentView => ({
+    agentId,
+    title: "",
+    status: "unknown",
+    gone: true,
+  });
+
+  /** One of this computer's Peer threads as a view: its latest steps, from its own timeline. */
+  const peerThreadView = (key: string, threadId: ThreadId) =>
+    Effect.gen(function* () {
+      const shell = yield* projections.getThreadShell(threadId);
+      if (shell === null) return goneView(key);
+      const head = yield* projections.getTimelinePage(threadId, { view: "activity", limit: 0 });
+      const page = yield* projections.getTimelinePage(threadId, {
+        view: "activity",
+        limit: 80,
+        afterPosition: Math.max(-1, head.totalItems - 81),
+      });
+      return {
+        agentId: key,
+        title: shell.title,
+        status: shellStatus(shell),
+        gone: false,
+        entries: AgentTranscript.timelineEntries(page.items),
+      } satisfies PeerAgentView;
+    }).pipe(Effect.orElseSucceed(() => goneView(key)));
+
+  /** The view of one of this computer's threads, whichever runtime runs it. */
+  const ownThreadView = (key: string) =>
+    key.startsWith("peer:")
+      ? peerThreadView(key, ThreadId.make(key.slice("peer:".length)))
+      : agentView(key);
+
+  /** Shared threads whose views go to the hub now, because someone watches them. */
+  const publishing = new Map<string, { resend: boolean }>();
+
+  /**
+   * Sends a shared thread's view to the hub while someone watches it: at once,
+   * then on each change, and every 10 s to learn when the last watcher left.
+   */
+  const publishThread = (slug: string, key: string) =>
+    Effect.gen(function* () {
+      let last: PeerAgentView | null = null;
+      let sentAt = 0;
+      while (true) {
+        if (!((yield* Ref.get(stateRef)).persisted.sharedThreads ?? []).includes(key)) return;
+        const signedIn = yield* requireSession.pipe(Effect.option);
+        if (Option.isNone(signedIn)) return;
+        const { hubUrl, session } = signedIn.value;
+        const view = yield* ownThreadView(key);
+        const now = DateTime.toEpochMillis(yield* DateTime.now);
+        const asked = publishing.get(key);
+        if (
+          last === null ||
+          !sameAgentView(last, view) ||
+          asked?.resend === true ||
+          now - sentAt > 10_000
+        ) {
+          if (asked !== undefined) asked.resend = false;
+          const watchers = yield* hubApi
+            .publishView(hubUrl, session, slug, environmentId, key, view)
+            .pipe(Effect.orElseSucceed(() => 0));
+          last = view;
+          sentAt = now;
+          if (watchers === 0) return;
+        }
+        yield* Effect.sleep("1500 millis");
+      }
+    }).pipe(Effect.ensuring(Effect.sync(() => publishing.delete(key))));
+
+  /** Someone started watching one of this computer's shared threads. */
+  const startPublishing = (slug: string, key: string) =>
+    Effect.gen(function* () {
+      const active = publishing.get(key);
+      if (active !== undefined) {
+        // A new watcher needs the current view now, not at the next change.
+        active.resend = true;
+        return;
+      }
+      if (!((yield* Ref.get(stateRef)).persisted.sharedThreads ?? []).includes(key)) return;
+      publishing.set(key, { resend: false });
+      yield* publishThread(slug, key).pipe(
+        Effect.ignoreCause({ log: true }),
+        Effect.forkIn(layerScope),
+      );
+    });
+
+  const shareThread: PeerHub["Service"]["shareThread"] = Effect.fn("PeerHub.shareThread")(
+    function* (input) {
+      if (!/^(peer|herdr):/.test(input.thread)) {
+        return yield* hubError("Only this computer's threads and herdr agents can be shared.");
+      }
+      yield* updatePersisted((p) => {
+        const shared = new Set(p.sharedThreads ?? []);
+        if (input.shared) shared.add(input.thread);
+        else shared.delete(input.thread);
+        return { ...p, sharedThreads: [...shared] };
+      });
+      yield* refreshWorkUnlocked;
+      return yield* publish;
+    },
+    lock.withPermits(1),
+  );
+
+  const observeThread: PeerHub["Service"]["observeThread"] = (input) =>
+    Stream.unwrap(
+      requireSession.pipe(
+        Effect.map(({ hubUrl, session }) =>
+          hubApi.observe(hubUrl, session, input.workspace, input.environment, input.thread),
+        ),
+      ),
+    ).pipe(
+      // The hub ends a stream every 15 minutes; watching goes on.
+      Stream.forever,
+    );
+
   const watchAgent: PeerHub["Service"]["watchAgent"] = (input) =>
     Stream.tick("1 second").pipe(
       Stream.mapEffect(() => agentView(input.agentId)),
@@ -2404,6 +2549,13 @@ const make = Effect.gen(function* () {
         if (ping.change === "projects" || ping.change === "resync") {
           yield* background(sync);
         }
+        if (
+          ping.change === "observe" &&
+          ping.environment === environmentId &&
+          ping.thread !== undefined
+        ) {
+          yield* startPublishing(slug, ping.thread);
+        }
       });
 
     const listen = (slug: string) =>
@@ -2538,6 +2690,8 @@ const make = Effect.gen(function* () {
     focusAgent,
     watchAgent,
     promptAgent,
+    shareThread,
+    observeThread,
     shareProject,
     unshareProject,
   });

@@ -170,6 +170,8 @@ export const PeerWorkThread = Schema.Struct({
   source: Schema.Literals(["peer", "herdr"]),
   environment: Schema.String,
   seenAt: Schema.String,
+  /** Its owner lets the project's members watch it live (Observe). */
+  observable: Schema.optional(Schema.Boolean),
 });
 export type PeerWorkThread = typeof PeerWorkThread.Type;
 
@@ -431,6 +433,8 @@ export const PeerHubStatus = Schema.Struct({
   }),
   github: PeerGitHubState,
   coordination: PeerCoordinationState,
+  /** This computer's threads (`peer:…`, `herdr:…`) its owner lets the team watch. */
+  sharedThreads: Schema.Array(Schema.String),
   syncing: Schema.Boolean,
   lastSyncAt: Schema.NullOr(Schema.String),
   error: Schema.NullOr(Schema.String),
@@ -556,6 +560,21 @@ export type PeerHubResolveOverlapInput = typeof PeerHubResolveOverlapInput.Type;
 
 export const PeerHubFocusAgentInput = Schema.Struct({ paneId: TrimmedNonEmptyString });
 export type PeerHubFocusAgentInput = typeof PeerHubFocusAgentInput.Type;
+
+/** Lets the team watch one of this computer's threads live, or stops it. */
+export const PeerHubShareThreadInput = Schema.Struct({
+  thread: TrimmedNonEmptyString,
+  shared: Schema.Boolean,
+});
+export type PeerHubShareThreadInput = typeof PeerHubShareThreadInput.Type;
+
+/** A colleague's shared thread: its workspace, the computer that reports it, its id there. */
+export const PeerHubObserveInput = Schema.Struct({
+  workspace: TrimmedNonEmptyString,
+  environment: TrimmedNonEmptyString,
+  thread: TrimmedNonEmptyString,
+});
+export type PeerHubObserveInput = typeof PeerHubObserveInput.Type;
 
 export const PeerHubAgentInput = Schema.Struct({ agentId: TrimmedNonEmptyString });
 export type PeerHubAgentInput = typeof PeerHubAgentInput.Type;

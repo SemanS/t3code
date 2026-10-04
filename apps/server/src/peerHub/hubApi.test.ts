@@ -10,14 +10,17 @@ import { FetchHttpClient } from "effect/unstable/http";
 
 import * as HubApi from "./hubApi.ts";
 
-/** A hub that answers `/v1/workspaces/acme/events` with `respond`. */
-const standInHub = (respond: (response: NodeHttp.ServerResponse) => void) =>
+/** A hub that answers `path` (by default the acme workspace's events) with `respond`. */
+const standInHub = (
+  respond: (response: NodeHttp.ServerResponse) => void,
+  path = "/v1/workspaces/acme/events",
+) =>
   Effect.acquireRelease(
     Effect.promise(
       () =>
         new Promise<{ readonly url: string; readonly server: NodeHttp.Server }>((resolve) => {
           const server = NodeHttp.createServer((request, response) => {
-            if (request.url === "/v1/workspaces/acme/events") respond(response);
+            if (request.url === path) respond(response);
             else response.writeHead(404).end();
           });
           server.listen(0, "127.0.0.1", () =>
@@ -43,6 +46,7 @@ describe("hub events", () => {
             "event: gossip\ndata: {}\n\n",
             'event: coord\ndata: {"origin":null}\n\n',
             "event: resync\ndata: {}\n\n",
+            'event: observe\ndata: {"origin":null,"environment":"ana-laptop","thread":"peer:1"}\n\n',
           ].join(""),
         );
       });
@@ -52,6 +56,7 @@ describe("hub events", () => {
         { change: "work", origin: "bob-laptop" },
         { change: "coord", origin: null },
         { change: "resync", origin: null },
+        { change: "observe", origin: null, environment: "ana-laptop", thread: "peer:1" },
       ]);
     }).pipe(Effect.scoped, Effect.provide(FetchHttpClient.layer)),
   );
@@ -70,6 +75,29 @@ describe("hub events", () => {
         Effect.result,
       );
       assert.isTrue(Result.isFailure(refused) && HubApi.isSessionEnded(refused.failure));
+    }).pipe(Effect.scoped, Effect.provide(FetchHttpClient.layer)),
+  );
+});
+
+describe("observing", () => {
+  it.effect("relays a shared thread's views and drops what is not one", () =>
+    Effect.gen(function* () {
+      const view = { agentId: "peer:1", title: "Split payments", status: "working", gone: false };
+      const hub = yield* standInHub((response) => {
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.end(
+          [
+            `event: view\ndata: ${JSON.stringify(view)}\n\n`,
+            'event: view\ndata: {"title":1}\n\n',
+            ":\n\n",
+          ].join(""),
+        );
+      }, "/v1/workspaces/acme/observe/ana-laptop/peer%3A1");
+      const api = yield* HubApi.make;
+      const views = yield* Stream.runCollect(
+        api.observe(hub.url, "phs_test", "acme", "ana-laptop", "peer:1"),
+      );
+      assert.deepStrictEqual(Array.from(views), [view]);
     }).pipe(Effect.scoped, Effect.provide(FetchHttpClient.layer)),
   );
 });

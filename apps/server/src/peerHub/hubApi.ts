@@ -5,6 +5,7 @@
  * @module peerHub/hubApi
  */
 import {
+  PeerAgentView,
   PeerFoundWorkspace,
   PeerHubError,
   PeerHubProjectUsage,
@@ -81,6 +82,8 @@ export interface ReportedThread {
   readonly harness?: string;
   readonly branch?: string;
   readonly source: "peer" | "herdr";
+  /** Its owner lets the project's members watch it live. */
+  readonly observable?: boolean;
 }
 
 const HubCoordSession = Schema.Struct({
@@ -154,17 +157,33 @@ const SESSION_ENDED = "Your session with the hub ended. Sign in again.";
 /** The hub no longer accepts the stored session (signed out elsewhere, expired). */
 export const isSessionEnded = (error: PeerHubError) => error.detail === SESSION_ENDED;
 
-/** What a workspace's event stream pings about; `resync` follows pings it missed. */
-export type HubChange = "work" | "coord" | "projects" | "resync";
+/**
+ * What a workspace's event stream pings about; `observe` asks a computer to
+ * send a shared thread's view, `resync` follows pings it missed.
+ */
+export type HubChange = "work" | "coord" | "projects" | "observe" | "resync";
 
 export interface HubPing {
   readonly change: HubChange;
   /** The environment whose report caused it, so that environment can skip its own echo. */
   readonly origin: string | null;
+  /** For `observe`: the computer and the thread someone watches. */
+  readonly environment?: string;
+  readonly thread?: string;
 }
 
-const CHANGES: ReadonlySet<string> = new Set<HubChange>(["work", "coord", "projects", "resync"]);
-const PingData = Schema.Struct({ origin: Schema.optional(Schema.NullOr(Schema.String)) });
+const CHANGES: ReadonlySet<string> = new Set<HubChange>([
+  "work",
+  "coord",
+  "projects",
+  "observe",
+  "resync",
+]);
+const PingData = Schema.Struct({
+  origin: Schema.optional(Schema.NullOr(Schema.String)),
+  environment: Schema.optional(Schema.String),
+  thread: Schema.optional(Schema.String),
+});
 const decodePingData = Schema.decodeUnknownOption(Schema.fromJsonString(PingData));
 
 const NO_EVENTS = "The hub sends no change events.";
@@ -172,6 +191,8 @@ const NO_EVENTS = "The hub sends no change events.";
 export const isWithoutEvents = (error: PeerHubError) => error.detail === NO_EVENTS;
 
 const isPeerHubError = Schema.is(PeerHubError);
+const decodeView = Schema.decodeUnknownOption(Schema.fromJsonString(PeerAgentView));
+const Watchers = Schema.Struct({ watchers: Schema.Number });
 
 /** The hub's keep-alive comes every 20 s; this long without a byte means the stream is gone. */
 const EVENTS_SILENT_AFTER = "70 seconds";
@@ -577,18 +598,99 @@ export const make = Effect.gen(function* () {
                   ? error
                   : new PeerHubError({ detail: "The hub's event stream broke off." }),
               ),
-              Stream.map((event): HubPing | null =>
-                CHANGES.has(event.event)
-                  ? {
-                      change: event.event as HubChange,
-                      origin: Option.getOrUndefined(decodePingData(event.data))?.origin ?? null,
-                    }
-                  : null,
-              ),
+              Stream.map((event): HubPing | null => {
+                if (!CHANGES.has(event.event)) return null;
+                const data = Option.getOrUndefined(decodePingData(event.data));
+                return {
+                  change: event.event as HubChange,
+                  origin: data?.origin ?? null,
+                  ...(data?.environment === undefined ? {} : { environment: data.environment }),
+                  ...(data?.thread === undefined ? {} : { thread: data.thread }),
+                };
+              }),
               Stream.filter((ping): ping is HubPing => ping !== null),
             ),
           ),
           Stream.unwrap,
         ),
+
+    /**
+     * A colleague's shared thread as the hub relays it while you watch: each
+     * view its owner's Peer sends. Ends when the hub closes the stream; fails
+     * when the thread is not shared with you (any more).
+     */
+    observe: (
+      hubUrl: string,
+      session: string,
+      slug: string,
+      environment: string,
+      thread: string,
+    ): Stream.Stream<PeerAgentView, PeerHubError> =>
+      client
+        .execute(
+          HttpClientRequest.get(
+            `${hubUrl.replace(/\/+$/, "")}${workspacePath(
+              slug,
+              `/observe/${segment(environment)}/${segment(thread)}`,
+            )}`,
+          ).pipe(
+            HttpClientRequest.setHeader("Authorization", `Bearer ${session}`),
+            HttpClientRequest.setHeader("Accept", "text/event-stream"),
+          ),
+        )
+        .pipe(
+          Effect.mapError(
+            () => new PeerHubError({ detail: `Could not reach the hub at ${hubUrl}.` }),
+          ),
+          Effect.filterOrFail(
+            (response) => response.status === 200,
+            (response) =>
+              new PeerHubError({
+                detail:
+                  response.status === 404
+                    ? "That thread is not shared with you, or no longer runs."
+                    : response.status === 401
+                      ? SESSION_ENDED
+                      : `The hub refused to relay that thread (HTTP ${response.status}).`,
+              }),
+          ),
+          Effect.map((response) =>
+            response.stream.pipe(
+              Stream.timeoutOrElse({
+                duration: EVENTS_SILENT_AFTER,
+                orElse: () =>
+                  Stream.fail(new PeerHubError({ detail: "The relayed thread went silent." })),
+              }),
+              Stream.decodeText,
+              Stream.pipeThroughChannel(Sse.decode()),
+              Stream.mapError((error) =>
+                isPeerHubError(error)
+                  ? error
+                  : new PeerHubError({ detail: "The relayed thread broke off." }),
+              ),
+              Stream.filter((event) => event.event === "view"),
+              Stream.map((event) => Option.getOrUndefined(decodeView(event.data))),
+              Stream.filter((view): view is PeerAgentView => view !== undefined),
+            ),
+          ),
+          Stream.unwrap,
+        ),
+
+    /** Sends a shared thread's view to whoever watches it; how many do. */
+    publishView: (
+      hubUrl: string,
+      session: string,
+      slug: string,
+      environment: string,
+      thread: string,
+      view: unknown,
+    ) =>
+      request(Watchers, {
+        hubUrl,
+        path: workspacePath(slug, `/observe/${segment(environment)}/${segment(thread)}`),
+        method: "PUT",
+        session,
+        body: view,
+      }).pipe(Effect.map((answer) => answer.watchers)),
   };
 });

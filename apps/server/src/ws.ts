@@ -2052,6 +2052,14 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.peerHubPromptAgent, peerHub.promptAgent(input), {
             "rpc.aggregate": "peerHub",
           }),
+        [WS_METHODS.peerHubShareThread]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubShareThread, peerHub.shareThread(input), {
+            "rpc.aggregate": "peerHub",
+          }),
+        [WS_METHODS.peerHubObserveThread]: (input) =>
+          observeRpcStream(WS_METHODS.peerHubObserveThread, peerHub.observeThread(input), {
+            "rpc.aggregate": "peerHub",
+          }),
         [WS_METHODS.peerHubShareProject]: (input) =>
           observeRpcEffect(WS_METHODS.peerHubShareProject, peerHub.shareProject(input), {
             "rpc.aggregate": "peerHub",
