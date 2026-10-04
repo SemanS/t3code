@@ -24,6 +24,7 @@ import {
   editedFile,
   emptyMemory,
   isPlainCliCall,
+  mentionsCli,
   newsFor,
   repositoryPath,
   shortId,
@@ -147,7 +148,8 @@ export class CoordinationBroker {
     this.scripts = {
       hook: NodePath.join(deps.scriptsDir, "hook"),
       wait: NodePath.join(deps.scriptsDir, "wait"),
-      peer: NodePath.join(deps.scriptsDir, "peer"),
+      // In a directory of its own: a session's PATH gets it and nothing else.
+      peer: NodePath.join(deps.scriptsDir, "bin", "peer"),
     };
   }
 
@@ -155,13 +157,16 @@ export class CoordinationBroker {
 
   async start(): Promise<void> {
     if (this.server !== null) return;
-    await NodeFSP.mkdir(this.deps.scriptsDir, { recursive: true });
-    const texts = coordinationScripts(this.deps.socketPath);
+    const binDir = NodePath.dirname(this.scripts.peer);
+    await NodeFSP.mkdir(binDir, { recursive: true });
+    const texts = coordinationScripts(this.deps.socketPath, binDir);
     for (const [name, text] of Object.entries(texts)) {
-      const path = NodePath.join(this.deps.scriptsDir, name);
+      const path = this.scripts[name as keyof typeof texts];
       await NodeFSP.writeFile(path, text, { mode: 0o755 });
       await NodeFSP.chmod(path, 0o755);
     }
+    // Where `peer` lived before it had a directory of its own.
+    await NodeFSP.rm(NodePath.join(this.deps.scriptsDir, "peer"), { force: true });
     await NodeFSP.mkdir(NodePath.dirname(this.deps.socketPath), { recursive: true });
     await NodeFSP.rm(this.deps.socketPath, { force: true });
     const server = NodeHttp.createServer((request, response) => {
@@ -456,10 +461,12 @@ export class CoordinationBroker {
       const input = body.tool_input as Record<string, unknown> | null;
       const command = typeof input?.command === "string" ? input.command.trim() : "";
       const script = this.scripts.peer;
+      if (!mentionsCli(command, this.cli) && !command.includes(script)) return null;
+      // Whoever runs `peer` next is this session, whatever else the command does.
+      this.lastCli = { session: session.id, at: Date.now() };
       // `peer …` is Peer's own coordination command: run its script, without asking.
       const viaName = isPlainCliCall(command, this.cli);
       if (viaName || isPlainCliCall(command, script)) {
-        this.lastCli = { session: session.id, at: Date.now() };
         return {
           hookSpecificOutput: {
             hookEventName: "PreToolUse",
@@ -473,6 +480,8 @@ export class CoordinationBroker {
           },
         };
       }
+      // On the session's PATH it still runs; it only is not let through without asking.
+      this.log("cli.unplain", { session: session.id, command });
       return null;
     }
     const file = this.fileOf(session, body);

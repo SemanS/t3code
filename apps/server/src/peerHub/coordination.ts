@@ -303,26 +303,45 @@ export function statusText(input: {
 
 /** A command that runs Peer's CLI and nothing else, so it may run without asking. */
 export function isPlainCliCall(command: string, cli: string): boolean {
-  const trimmed = command.trim();
+  // Agents like to trim what a command prints (`2>&1 | head -30`); that much may follow.
+  const trimmed = command.trim().replace(/\s*2>&1\s*(\|\s*(head|tail)(\s+-n)?\s+-?\d+)?$/, "");
   if (!trimmed.startsWith(`${cli} `) && trimmed !== cli) return false;
   const rest = trimmed.slice(cli.length);
   // Words, and quoted text without anything a shell would expand or chain.
   return /^(\s+([A-Za-z0-9._/:@+=,-]+|'[^'\n]*'|"[^"$`\\\n]*"))*\s*$/.test(rest);
 }
 
+/** Whether a shell command runs `peer` anywhere in it, plain or not. */
+export function mentionsCli(command: string, cli: string): boolean {
+  const escaped = cli.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+  return new RegExp(`(^|[;&|(]\\s*|\\s)${escaped}(\\s|$)`).test(command.trim());
+}
+
 /** The scripts Peer writes for agents: the hook Claude Code runs, its wake-up wait, and `peer`. */
-export function coordinationScripts(socket: string): {
+export function coordinationScripts(
+  socket: string,
+  binDir: string,
+): {
   readonly hook: string;
   readonly wait: string;
   readonly peer: string;
 } {
-  const quoted = `'${socket.replaceAll("'", "'\\''")}'`;
+  const quote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`;
+  const quoted = quote(socket);
   const headers = `-H "X-Herdr-Pane: \${HERDR_PANE_ID:-}" -H "X-Peer-Session: \${PEER_SESSION:-}"`;
   return {
     hook: `#!/bin/sh
 # Peer coordination: hands a Claude Code hook event to Peer and prints its answer.
 # Prints nothing and lets the agent go on when Peer is not running.
-curl -sf --max-time 4 --unix-socket ${quoted} ${headers} -H 'Content-Type: application/json' --data-binary @- http://peer/hook 2>/dev/null
+input=$(cat)
+# A session starting (the only time Claude Code gives hooks this file): \`peer\` goes on its
+# PATH, and the session knows its id, so \`peer\` works in any command and says who calls.
+if [ -n "\${CLAUDE_ENV_FILE:-}" ]; then
+  sid=$(printf '%s' "$input" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' | head -n 1)
+  printf 'export PATH=%s:"$PATH"\\n' ${quote(quote(binDir))} >> "$CLAUDE_ENV_FILE"
+  [ -n "$sid" ] && printf 'export PEER_SESSION=%s\\n' "$sid" >> "$CLAUDE_ENV_FILE"
+fi
+printf '%s' "$input" | curl -sf --max-time 4 --unix-socket ${quoted} ${headers} -H 'Content-Type: application/json' --data-binary @- http://peer/hook 2>/dev/null
 exit 0
 `,
     wait: `#!/bin/sh

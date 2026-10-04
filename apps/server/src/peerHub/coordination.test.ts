@@ -7,6 +7,7 @@ import {
   emptyMemory,
   hasClaudeHooks,
   isPlainCliCall,
+  mentionsCli,
   newsFor,
   repositoryPath,
   withClaudeHooks,
@@ -223,6 +224,19 @@ describe("newsFor", () => {
 });
 
 describe("isPlainCliCall", () => {
+  it("lets an agent trim what peer prints, and nothing more", () => {
+    assert.isTrue(isPlainCliCall("peer status 2>&1 | head -30", "peer"));
+    assert.isTrue(isPlainCliCall("peer status 2>&1 | tail -n 5", "peer"));
+    assert.isFalse(isPlainCliCall("peer status 2>&1 | sh", "peer"));
+    assert.isFalse(isPlainCliCall("peer status | head -30; rm -rf ~", "peer"));
+  });
+
+  it("notices peer inside any command", () => {
+    assert.isTrue(mentionsCli("cd /w/app && peer status | grep Overlap", "peer"));
+    assert.isTrue(mentionsCli("peer note x", "peer"));
+    assert.isFalse(mentionsCli("echo peerless", "peer"));
+  });
+
   it("lets Peer's own command run and nothing chained to it", () => {
     assert.isTrue(isPlainCliCall(`${CLI} status`, CLI));
     assert.isTrue(isPlainCliCall(`${CLI} note "I only touch submit(), compatible"`, CLI));

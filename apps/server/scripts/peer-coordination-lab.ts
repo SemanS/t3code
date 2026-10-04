@@ -253,7 +253,7 @@ const startComputer = (name: string, email: string, herdrSocket?: string) =>
       scripts: {
         hook: NodePath.join(scriptsDir, "hook"),
         wait: NodePath.join(scriptsDir, "wait"),
-        peer: NodePath.join(scriptsDir, "peer"),
+        peer: NodePath.join(scriptsDir, "bin", "peer"),
       },
       log: coordinated.coordination.logPath,
     };
@@ -309,6 +309,28 @@ function agent(computer: Computer, sessionId: string, pane: string) {
         encoding: "utf8",
       }).trim();
     },
+    /**
+     * A session starting as Claude Code starts it: the SessionStart hook may write the
+     * session's environment, which every later Bash command of the session sources.
+     */
+    start(): string {
+      const envFile = NodePath.join(computer.home, `env-${sessionId}.sh`);
+      NodeFS.writeFileSync(envFile, "");
+      NodeChildProcess.execFileSync("sh", [computer.scripts.hook], {
+        env: { ...env, CLAUDE_ENV_FILE: envFile },
+        input: JSON.stringify({ ...base, hook_event_name: "SessionStart", source: "startup" }),
+        encoding: "utf8",
+      });
+      return envFile;
+    },
+    /** A command as the agent's Bash tool runs it: in the session's environment. */
+    shell(envFile: string, command: string): string {
+      return NodeChildProcess.execFileSync("sh", ["-c", `. '${envFile}'; ${command}`], {
+        env,
+        cwd: computer.checkout,
+        encoding: "utf8",
+      }).trim();
+    },
     /** The Stop hook's background wait: resolves with what woke the agent, or null. */
     idle(): Promise<string | null> {
       this.hook("Stop");
@@ -353,7 +375,7 @@ const program = Effect.gen(function* () {
   yield* Effect.promise(() => sleep(1200));
 
   // 2. Bob's agent is about to change the same file.
-  bobs.hook("SessionStart", { source: "startup" });
+  const bobsEnv = bobs.start();
   told(
     bobs.name,
     context(bobs.hook("UserPromptSubmit", { prompt: "Rename price() to totalPrice() everywhere" })),
@@ -376,6 +398,13 @@ const program = Effect.gen(function* () {
   check(noted.startsWith("Noted on overlap"), "its note reaches the overlap");
   const allowed = bobs.edit("PreToolUse", "src/pricing.ts");
   check(decision(allowed) === undefined, "after its note, it may edit");
+  // As agents like to run it: through a pipe, found on the session's PATH.
+  const piped = bobs.shell(bobsEnv, "peer status 2>&1 | head -3");
+  told(`${bobs.name} (peer status 2>&1 | head -3)`, piped);
+  check(
+    piped.includes("Peer · project lab · you: Bob's agent"),
+    "peer works in any command, and knows which session calls",
+  );
   bobs.edit("PostToolUse", "src/pricing.ts");
   bobs.edit("PreToolUse", "src/cart.ts");
   bobs.edit("PostToolUse", "src/cart.ts");
