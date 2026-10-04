@@ -25,8 +25,19 @@
 //   KEEP_LAB=1 keeps the throwaway homes and logs.
 //
 // REAL_AGENTS=1 HERDR_BIN=… runs real Claude Code sessions instead (Sonnet, one herdr server per
-// computer, Peer's hooks passed with --settings, the user's own settings and MCP servers left
-// out) on two overlapping tasks, and prints what they did and told each other.
+// computer, Peer's hooks and context permissions passed with --settings, the user's own settings
+// and MCP servers left out). Both agents work on task KRK-1 (their branch names it), on
+// overlapping changes to a project whose prices are integer cents, and it checks what Peer did:
+//
+//   A. one agent keeps KRK-1's shared context, the other reads it and sends it what it finds;
+//   B. the keeper idles while the other works (the idle threshold shortened to 45 s): the other
+//      takes the context over;
+//   C. what the agents marked [project] becomes knowledge candidates (or kontext reads the task's
+//      context for them), and one is kept: worded by kontext's llm adapter and staged in .ai;
+//   D. the keeper's session ends: the other agent keeps the context.
+//
+// It spends the person's Claude subscription (Sonnet for the agents, kontext's adapter for the
+// knowledge), and prints what the agents did, told each other and kept.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
@@ -40,13 +51,16 @@ import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
 
 import { ORCHESTRATION_PROTOCOL_VERSION, WS_METHODS, WsRpcGroup } from "@t3tools/contracts";
 
-import { claudeHookGroups } from "../src/peerHub/coordination.ts";
+import { claudeHookGroups, withContextAccess } from "../src/peerHub/coordination.ts";
 
 const repoRoot = NodePath.resolve(import.meta.dirname, "../../..");
 const peerhubBin = process.env.PEERHUB_BIN ?? "peerhub";
 const hubPort = 42000 + Math.floor(Math.random() * 1000);
 const hubUrl = `http://127.0.0.1:${hubPort}`;
 const lab = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "peer-lab-"));
+const REAL = process.env.REAL_AGENTS === "1";
+/** With real agents, a keeper idle this long gives way (production waits ten minutes). */
+const REAL_IDLE_SECS = 45;
 const bin = NodePath.join(repoRoot, "apps/server/dist/bin.mjs");
 const children: NodeChildProcess.ChildProcess[] = [];
 
@@ -91,6 +105,7 @@ const hub = spawnLogged(peerhubBin, ["serve"], {
   PEERHUB_MAIL: "echo",
   PEERHUB_GATEWAY_MODE: "memory",
   PEERHUB_SECRET_KEY: NodeCrypto.randomBytes(32).toString("hex"),
+  ...(REAL ? { PEERHUB_KEEPER_IDLE_SECS: String(REAL_IDLE_SECS) } : {}),
 });
 
 async function hubCall(path: string, init: { method?: string; session?: string; body?: unknown }) {
@@ -143,9 +158,37 @@ function makeOrigin(): string {
     NodePath.join(work, "src/cart.ts"),
     'import { price } from "./pricing";\n\nexport const cartTotal = (items: number[]) => price(items);\n',
   );
+  if (REAL) {
+    // Prices are integer cents, and other files rely on it: something worth keeping.
+    NodeFS.writeFileSync(
+      NodePath.join(work, "src/format.ts"),
+      "export const formatPrice = (cents: number): string => `€${(cents / 100).toFixed(2)}`;\n",
+    );
+    NodeFS.writeFileSync(
+      NodePath.join(work, "src/receipt.ts"),
+      'import { formatPrice } from "./format";\nimport { price } from "./pricing";\n\nexport const receiptLine = (items: number[]) => formatPrice(price(items));\n',
+    );
+  }
   git(work, "init", "--quiet", "--initial-branch", "main");
   // The project keeps knowledge with kontext, when it is installed here.
   if (kontext) NodeChildProcess.execFileSync("kontext", ["init", "--no-hooks"], { cwd: work });
+  if (REAL && kontext) {
+    NodeFS.mkdirSync(NodePath.join(work, ".ai", "conventions"), { recursive: true });
+    NodeFS.writeFileSync(
+      NodePath.join(work, ".ai", "conventions", "what-agents-mark-for-the-project.md"),
+      [
+        "---",
+        "id: what-agents-mark-for-the-project",
+        "kind: convention",
+        'title: "What agents mark for the project"',
+        "date: 2026-10-04",
+        "tags: [peer-skill]",
+        "---",
+        "",
+        "Mark [project] the rules prices follow here (units, rounding) and what other files rely on; leave renames, progress, plans and what your own change does unmarked.",
+      ].join("\n"),
+    );
+  }
   git(work, "add", ".");
   git(work, "commit", "--quiet", "-m", "pricing");
   const origin = NodePath.join(lab, "origin.git");
@@ -185,6 +228,13 @@ async function setUpWorkspace() {
       },
     },
   });
+  if (REAL) {
+    await hubCall("/v1/workspaces/acme/projects/lab/tasks", {
+      method: "POST",
+      session: admin,
+      body: { title: "Pricing", key: "KRK-1" },
+    });
+  }
 }
 
 // ---- two computers ----
@@ -202,8 +252,14 @@ const startComputer = (name: string, email: string, herdrSocket?: string) =>
       HERDR_SOCKET_PATH: herdrSocket ?? NodePath.join(home, "no-herdr.sock"),
       CLAUDE_CONFIG_DIR: NodePath.join(home, "claude"),
       T3CODE_TELEMETRY_ENABLED: "false",
-      // Kept knowledge is written without a model: nothing here spends anyone's subscription.
-      PEER_KNOWLEDGE_LLM: "off",
+      ...(REAL
+        ? {
+            PEER_KEEPER_IDLE_MS: String(REAL_IDLE_SECS * 1000),
+            // kontext's llm adapter runs on the person's own Claude Code, as it would in Peer.
+            PEER_KONTEXT_CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR ?? "",
+          }
+        : // Kept knowledge is written without a model: nothing here spends a subscription.
+          { PEER_KNOWLEDGE_LLM: "off" }),
     };
     const server = spawnLogged(
       process.execPath,
@@ -681,8 +737,9 @@ const program = Effect.gen(function* () {
   const handed = context(bobs.edit("PostToolUse", "src/cart.ts"));
   told(`${bobs.name} (next step)`, handed);
   check(
-    handed?.includes("you keep the shared context of lab (work outside tasks) now") === true &&
-      handed.includes("applyVat()"),
+    handed?.includes(
+      "you (Bob's agent) keep the shared context of lab (work outside tasks) now",
+    ) === true && handed.includes("applyVat()"),
     "it hears so at its next step, with the context as it stands",
   );
   check(decision(editShared(bobs, bobShared)) === "allow", "and may edit it now");
@@ -837,9 +894,45 @@ function herdrText(h: HerdrServer, ...args: string[]): string {
 
 async function startClaude(h: HerdrServer, computer: Computer, name: string) {
   const settings = NodePath.join(computer.home, "claude-settings.json");
+  // Peer's hooks, and the permission to read and edit the contexts Peer keeps, as Peer installs
+  // them; and the shell commands agents read and edit with, so nobody waits for an approval.
+  const given = withContextAccess(
+    { hooks: claudeHookGroups(computer.scripts) },
+    NodePath.join(computer.home, "userdata", "coord", "contexts"),
+    true,
+  ) as { permissions?: { allow?: string[] } };
+  const shell = [
+    "grep",
+    "rg",
+    "cat",
+    "ls",
+    "find",
+    "head",
+    "tail",
+    "wc",
+    "sed",
+    "perl",
+    "awk",
+    "git diff",
+    "git status",
+    "git log",
+  ];
   NodeFS.writeFileSync(
     settings,
-    JSON.stringify({ hooks: claudeHookGroups(computer.scripts) }, null, 2),
+    JSON.stringify(
+      {
+        ...given,
+        permissions: {
+          ...given.permissions,
+          allow: [
+            ...(given.permissions?.allow ?? []),
+            ...shell.map((command) => `Bash(${command}:*)`),
+          ],
+        },
+      },
+      null,
+      2,
+    ),
   );
   const created = herdrJson(
     h,
@@ -879,15 +972,20 @@ async function startClaude(h: HerdrServer, computer: Computer, name: string) {
       ...claudeArgs,
     );
     // First run in a new folder, Claude Code asks whether to trust it with "No, exit" preselected:
-    // move to "Yes" and confirm only once the cursor is there.
+    // move to "Yes" and confirm only once the cursor is there. herdr may call it idle before that
+    // dialog shows, so it has started only once its prompt (with the permission mode) is on screen.
     for (let step = 0; step < 30; step += 1) {
       const status = herdrJson(h, "agent", "get", pane).result?.agent?.agent_status;
-      if (status === "idle" || status === "done") {
+      const screen = herdrText(h, "pane", "read", pane, "--source", "visible");
+      if (
+        (status === "idle" || status === "done") &&
+        screen.includes("accept edits on") &&
+        !screen.includes("trust this folder")
+      ) {
         herdrText(h, "agent", "rename", pane, name);
         say(`${name} started`, `${computer.name}'s Claude Code in herdr pane ${pane}`);
         return pane;
       }
-      const screen = herdrText(h, "pane", "read", pane, "--source", "visible");
       if (screen.includes("Yes, I trust this folder")) {
         herdrText(
           h,
@@ -908,6 +1006,29 @@ async function startClaude(h: HerdrServer, computer: Computer, name: string) {
 const statusOf = (h: HerdrServer, pane: string) =>
   (herdrJson(h, "agent", "get", pane).result?.agent?.agent_status as string | undefined) ?? "?";
 
+/** What real agents did that Peer cannot make them do: reported, never failed on. */
+function observe(ok: unknown, what: string) {
+  say(ok ? "seen" : "NOT seen", what);
+}
+
+/** The coordination events of a computer, in order. */
+function events(computer: Computer): Array<{ event: string; t: string; [field: string]: unknown }> {
+  if (!NodeFS.existsSync(computer.log)) return [];
+  return NodeFS.readFileSync(computer.log, "utf8")
+    .trim()
+    .split("\n")
+    .filter((line) => line !== "")
+    .map((line) => JSON.parse(line) as { event: string; t: string; [field: string]: unknown });
+}
+
+/** The Claude Code sessions a computer's Peer met. */
+const sessionsOf = (computer: Computer) =>
+  new Set(
+    events(computer)
+      .filter((entry) => entry.event === "session.started")
+      .map((entry) => String(entry.session)),
+  );
+
 const realProgram = Effect.gen(function* () {
   yield* Effect.promise(() =>
     waitFor("the hub", async () => (await fetch(`${hubUrl}/health`)).ok, hub.output),
@@ -917,65 +1038,259 @@ const realProgram = Effect.gen(function* () {
   const bobHerdr = startHerdr("Bob");
   const ana = yield* startComputer("Ana", "ana@acme.test", anaHerdr.socket);
   const bob = yield* startComputer("Bob", "bob@acme.test", bobHerdr.socket);
-  yield* Effect.promise(() => sleep(2000));
+  // Both work on KRK-1: their branch names it.
+  for (const computer of [ana, bob]) {
+    git(computer.checkout, "checkout", "--quiet", "-b", "krk-1-pricing");
+  }
+  yield* Effect.promise(() => sleep(3000));
   const anaPane = yield* Effect.promise(() => startClaude(anaHerdr, ana, "ana"));
   const bobPane = yield* Effect.promise(() => startClaude(bobHerdr, bob, "bob"));
-
-  const anaTask =
-    "In src/pricing.ts give price() a VAT rate: price(items, vatRate = 0.2) returns the sum with VAT added. Keep the change small; do not run tests or builds.";
-  const bobTask =
-    "Rename the function price() to totalPrice() in src/pricing.ts and update its caller in src/cart.ts. Keep the change small; do not run tests or builds.";
-  herdrJson(anaHerdr, "agent", "prompt", anaPane, anaTask);
-  say("Ana's agent prompted", anaTask);
-  // Bob's agent starts once Ana's has changed the file.
-  for (let waited = 0; waited < 90_000; waited += 2000) {
-    yield* Effect.promise(() => sleep(2000));
-    const log = NodeFS.existsSync(ana.log) ? NodeFS.readFileSync(ana.log, "utf8") : "";
-    if (log.includes('"hookEvent":"PostToolUse"')) break;
-  }
-  herdrJson(bobHerdr, "agent", "prompt", bobPane, bobTask);
-  say("Bob's agent prompted", bobTask);
-
-  // Let them work, wake each other and settle: until both are quiet for a while.
-  let quiet = 0;
-  for (let elapsed = 0; elapsed < 8 * 60_000 && quiet < 45_000; elapsed += 5000) {
-    yield* Effect.promise(() => sleep(5000));
-    const statuses = [statusOf(anaHerdr, anaPane), statusOf(bobHerdr, bobPane)];
-    quiet = statuses.every((s) => s === "idle" || s === "done") ? quiet + 5000 : 0;
-    say("agents", `Ana's ${statuses[0]}, Bob's ${statuses[1]}`);
-  }
-
-  for (const [computer, h, pane] of [
-    [ana, anaHerdr, anaPane],
-    [bob, bobHerdr, bobPane],
-  ] as const) {
-    console.log(`\n===== ${computer.name}'s agent, last screen =====`);
-    console.log(
-      herdrText(h, "pane", "read", pane, "--source", "recent-unwrapped", "--lines", "160"),
-    );
-    console.log(`===== ${computer.name}'s checkout: git diff =====`);
-    console.log(git(computer.checkout, "diff"));
-    console.log(`===== ${computer.name}'s coordination log: decisions, notes, wake-ups =====`);
-    for (const line of NodeFS.readFileSync(computer.log, "utf8").trim().split("\n")) {
-      const entry = JSON.parse(line) as { event: string; t: string; [field: string]: unknown };
-      if (
-        [
-          "decision",
-          "note.agent",
-          "resolve.agent",
-          "news",
-          "wake",
-          "overlap.opened",
-          "cli",
-          "claim",
-        ].includes(entry.event)
-      ) {
-        console.log(JSON.stringify(entry).slice(0, 900));
+  const agents = [
+    { computer: ana, h: anaHerdr, pane: anaPane },
+    { computer: bob, h: bobHerdr, pane: bobPane },
+  ];
+  // What the agents did, printed however the run ends.
+  const report = () => {
+    for (const { computer, h, pane } of agents) {
+      console.log(`\n===== ${computer.name}'s agent, last screen =====`);
+      console.log(
+        herdrText(h, "pane", "read", pane, "--source", "recent-unwrapped", "--lines", "160"),
+      );
+      console.log(`===== ${computer.name}'s checkout: git diff =====`);
+      console.log(git(computer.checkout, "diff"));
+      console.log(`===== ${computer.name}'s coordination log =====`);
+      for (const entry of events(computer)) {
+        if (
+          /^(shared|context|finding|files|session)\.|^(decision|note\.agent|resolve\.agent|news|wake|overlap\.opened|cli)$/.test(
+            entry.event,
+          )
+        ) {
+          console.log(JSON.stringify(entry).slice(0, 900));
+        }
       }
     }
+    herdrText(anaHerdr, "server", "stop");
+    herdrText(bobHerdr, "server", "stop");
+  };
+  try {
+    const contextPath = "/v1/workspaces/acme/contexts/lab/task:krk-1";
+    const readContext = () =>
+      hubCall(contextPath, { session: hubSession }).catch(() => null) as Promise<Record<
+        string,
+        any
+      > | null>;
+    // The lab's checkouts are throwaway: a permission an agent still asks for is granted, as a
+    // person at the keyboard would, so no run stalls on a dialog nobody answers.
+    const approve = () => {
+      for (const { computer, h, pane } of agents) {
+        if (statusOf(h, pane) !== "blocked") continue;
+        const screen = herdrText(h, "pane", "read", pane, "--source", "visible");
+        if (/Do you want to proceed\?|❯\s*1\. Yes/.test(screen)) {
+          herdrText(h, "pane", "send-keys", pane, "enter");
+          say("approved", `${computer.name}'s agent's permission prompt`);
+        }
+      }
+    };
+    const untilQuiet = async (limitMs: number) => {
+      let quiet = 0;
+      for (let elapsed = 0; elapsed < limitMs && quiet < 40_000; elapsed += 5000) {
+        await sleep(5000);
+        approve();
+        const statuses = agents.map(({ h, pane }) => statusOf(h, pane));
+        quiet = statuses.every((s) => s === "idle" || s === "done") ? quiet + 5000 : 0;
+        say("agents", `Ana's ${statuses[0]}, Bob's ${statuses[1]}`);
+      }
+    };
+
+    // A. Two agents on one task, changing the same files.
+    const anaTask =
+      "In src/pricing.ts give price() a VAT rate: price(items, vatRate = 0.2) returns the total with VAT added. Check how the result is used and formatted elsewhere so it stays right. Keep the change small; do not run tests or builds.";
+    const bobTask =
+      "Rename price() to totalPrice() in src/pricing.ts and update every caller. Keep the change small; do not run tests or builds.";
+    herdrJson(anaHerdr, "agent", "prompt", anaPane, anaTask);
+    say("Ana's agent prompted", anaTask);
+    for (let waited = 0; waited < 120_000; waited += 2000) {
+      yield* Effect.promise(() => sleep(2000));
+      approve();
+      if (events(ana).some((e) => e.event === "hook" && e.hookEvent === "PostToolUse")) break;
+    }
+    herdrJson(bobHerdr, "agent", "prompt", bobPane, bobTask);
+    say("Bob's agent prompted", bobTask);
+    yield* Effect.promise(() => untilQuiet(10 * 60_000));
+
+    const afterA = yield* Effect.promise(readContext);
+    told(
+      "KRK-1's shared context after A",
+      afterA === null ? null : JSON.stringify(afterA, null, 2),
+    );
+    check(
+      afterA !== null && afterA.keeper !== undefined,
+      "one agent session keeps KRK-1's context",
+    );
+    observe(Number(afterA.version) >= 1, "the agent keeping it wrote it");
+    const keeperAt = agents.find(({ computer }) => sessionsOf(computer).has(afterA.keeper.session));
+    const otherAt = agents.find((agent) => agent !== keeperAt);
+    check(keeperAt !== undefined && otherAt !== undefined, "the keeper is one of the two agents");
+    observe(
+      events(otherAt.computer).some((e) => /^shared\.(read|told|lost)$/.test(e.event)),
+      `${otherAt.computer.name}'s agent reads it (it was given it, or kept it before)`,
+    );
+    observe(
+      [...events(ana), ...events(bob)].some((e) => e.event === "shared.handed"),
+      "the keeper changed hands during A, while one agent idled",
+    );
+    const shellEdits = agents.flatMap(({ computer }) =>
+      events(computer)
+        .filter((e) => e.event === "files.shell")
+        .flatMap((e) => (e.files as ReadonlyArray<string>).map((file) => ({ computer, file }))),
+    );
+    observe(shellEdits.length > 0, "an agent edited through the shell and Peer saw which files");
+    check(
+      shellEdits.every(({ computer, file }) =>
+        NodeFS.existsSync(NodePath.join(computer.checkout, file)),
+      ),
+      "the files Peer saw changed through the shell are paths in the repository",
+    );
+    observe(
+      events(otherAt.computer).some((e) => e.event === "shared.denied"),
+      `${otherAt.computer.name}'s agent tried to edit it and was told it only reads it`,
+    );
+    observe(
+      [...events(ana), ...events(bob)].some((e) => e.event === "finding.delivered"),
+      "a finding reached another agent",
+    );
+
+    // B. The keeper idles, the other agent works: it takes the context over. The other agent is
+    // prompted once the hub has seen the keeper idle past the threshold: its turn may be short.
+    for (let waited = 0; waited < 3 * 60_000; waited += 3000) {
+      const coord = yield* Effect.promise(() =>
+        hubCall("/v1/workspaces/acme/coord", { session: hubSession }),
+      );
+      const keeperNow = (
+        coord.sessions as ReadonlyArray<{
+          id: string;
+          status: string;
+          activeAt?: string;
+          seenAt: string;
+        }>
+      ).find((s) => s.id === afterA.keeper.session);
+      const idleMs =
+        keeperNow === undefined || keeperNow.status === "working"
+          ? 0
+          : Date.now() - Date.parse(keeperNow.activeAt ?? keeperNow.seenAt);
+      if (idleMs > (REAL_IDLE_SECS + 5) * 1000) break;
+      yield* Effect.promise(() => sleep(3000));
+      approve();
+    }
+    const follow =
+      "Add a one-line comment above the pricing function saying what it returns and in which unit. Keep it small; do not run tests or builds.";
+    herdrJson(otherAt.h, "agent", "prompt", otherAt.pane, follow);
+    say(`${otherAt.computer.name}'s agent prompted`, follow);
+    let keeperB: string | undefined;
+    for (let waited = 0; waited < 4 * 60_000; waited += 3000) {
+      yield* Effect.promise(() => sleep(3000));
+      approve();
+      keeperB = (yield* Effect.promise(readContext))?.keeper?.session;
+      if (keeperB !== afterA.keeper.session) break;
+    }
+    check(
+      keeperB !== undefined && sessionsOf(otherAt.computer).has(keeperB),
+      `a keeper idle over ${REAL_IDLE_SECS} s gives way to the agent that works`,
+    );
+    observe(
+      events(otherAt.computer).some((e) => e.event === "shared.handed"),
+      `${otherAt.computer.name}'s agent is told it keeps the context now`,
+    );
+    yield* Effect.promise(() => untilQuiet(4 * 60_000));
+
+    // C. What the agents marked for the project, kept in the project's knowledge.
+    const view = yield* Effect.promise(() =>
+      hubCall("/v1/workspaces/acme/coord", { session: hubSession }),
+    );
+    const findings = view.findings as ReadonlyArray<{
+      text: string;
+      scope?: string;
+      email: string;
+    }>;
+    told(
+      "findings on the hub",
+      findings.map((f) => `${f.scope ?? "task"} · ${f.email}: ${f.text}`).join("\n"),
+    );
+    observe(
+      findings.some((f) => f.scope === "project"),
+      "a real agent marked a line [project]",
+    );
+    if (!kontext) {
+      say("skipped", "kontext is not installed: the knowledge steps need it");
+    } else {
+      let candidates = yield* ana.client[WS_METHODS.peerHubKnowledgeCandidates]({
+        workspace: "acme",
+        project: "lab",
+      });
+      if (candidates.length === 0) {
+        const harvested = yield* ana.client[WS_METHODS.peerHubHarvestContext]({
+          workspace: "acme",
+          project: "lab",
+          scope: "task:krk-1",
+        });
+        say("harvest", `kontext read KRK-1's context: ${harvested.proposed} proposals`);
+        candidates = yield* ana.client[WS_METHODS.peerHubKnowledgeCandidates]({
+          workspace: "acme",
+          project: "lab",
+        });
+      }
+      told("knowledge candidates", JSON.stringify(candidates, null, 2));
+      check(
+        candidates.length > 0,
+        "there is something to keep, marked by an agent or read from the context",
+      );
+      const first = candidates[0];
+      if (first !== undefined) {
+        const kept = yield* ana.client[WS_METHODS.peerHubKeepCandidate]({
+          workspace: "acme",
+          project: "lab",
+          id: first.id,
+        });
+        const entry = NodeFS.readFileSync(NodePath.join(ana.checkout, kept.keptAs.path), "utf8");
+        told(`kept as ${kept.keptAs.path}`, entry);
+        check(
+          git(ana.checkout, "diff", "--cached", "--name-only").includes(kept.keptAs.path),
+          "Keep wrote it into the project's knowledge, staged",
+        );
+        if (kept.asWritten !== null) say("as written", kept.asWritten);
+        check(
+          kept.asWritten?.startsWith("kontext's model did not run") !== true,
+          "kontext's llm adapter ran on the person's own Claude Code",
+        );
+        observe(kept.asWritten === null, "kontext's llm adapter worded it");
+      }
+    }
+
+    // D. The keeper's session ends: the other agent keeps the context.
+    const keeperD = agents.find(
+      ({ computer }) => keeperB !== undefined && sessionsOf(computer).has(keeperB),
+    );
+    const remaining = agents.find((agent) => agent !== keeperD);
+    if (keeperD !== undefined && remaining !== undefined) {
+      herdrJson(keeperD.h, "agent", "prompt", keeperD.pane, "/exit");
+      say(`${keeperD.computer.name}'s agent exits`);
+      let keeperAfter: string | undefined;
+      for (let waited = 0; waited < 90_000; waited += 3000) {
+        yield* Effect.promise(() => sleep(3000));
+        keeperAfter = (yield* Effect.promise(readContext))?.keeper?.session;
+        if (keeperAfter !== keeperB) break;
+      }
+      check(
+        keeperAfter !== undefined && sessionsOf(remaining.computer).has(keeperAfter),
+        "when the keeper's session ends, the other agent keeps the context",
+      );
+    }
+
+    const final = yield* Effect.promise(readContext);
+    told("KRK-1's shared context at the end", final === null ? null : String(final.text));
+  } finally {
+    report();
   }
-  herdrText(anaHerdr, "server", "stop");
-  herdrText(bobHerdr, "server", "stop");
 }).pipe(Effect.scoped);
 
 try {

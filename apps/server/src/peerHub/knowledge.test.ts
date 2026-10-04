@@ -9,6 +9,7 @@ import {
   capturedId,
   directBody,
   distilledIds,
+  distillMiss,
   dryRunEntries,
   entryParts,
   guidanceThread,
@@ -47,6 +48,35 @@ describe("reading kontext's answers", () => {
     });
     assert.strictEqual(relatedTitle(json), "checked_addr errors reach clients");
     assert.isNull(relatedTitle("not json"));
+  });
+
+  it("says why distill wrote nothing: its model failed, or found nothing new", () => {
+    assert.strictEqual(
+      distillMiss({
+        code: 0,
+        stdout:
+          "Distilling 1 thread(s)…\n  text:- · 1 part(s), 2s · 0 entries · part 1: adapter 'llm-claude': `env` exited with exit status: 1: Not logged in · Please run /login\n\nNothing durable found (or all of it is recorded already).\n",
+        stderr: "",
+      }),
+      "kontext's model did not run (adapter 'llm-claude': `env` exited with exit status: 1: Not logged in · Please run /login)",
+    );
+    assert.strictEqual(
+      distillMiss({
+        code: 1,
+        stdout: "",
+        stderr: "Error: choose the model with --llm (llm-claude, llm-codex)\n",
+      }),
+      "kontext's model did not run (Error: choose the model with --llm (llm-claude, llm-codex))",
+    );
+    assert.strictEqual(
+      distillMiss({
+        code: 0,
+        stdout:
+          "Distilling 1 thread(s)…\n  text:- · 1 part(s), 6s · 0 entries\n\nNothing durable found (or all of it is recorded already).\n",
+        stderr: "",
+      }),
+      "kontext's model found nothing new in it (it may be recorded already)",
+    );
   });
 
   it("reads the entries a dry run printed, body and all", () => {

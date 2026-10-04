@@ -132,7 +132,7 @@ export function KnowledgeView({
       stackedThreadToast({
         type: "success",
         title: `Kept as ${kept.keptAs.path}`,
-        description: `Staged in ${kept.checkout}: it goes to the team with your next commit there.${kept.related === null ? "" : ` The knowledge already has “${kept.related}”: check they do not say the same.`}`,
+        description: `Staged in ${kept.checkout}: it goes to the team with your next commit there.${kept.asWritten === null ? "" : ` It reads as the agents wrote it: ${kept.asWritten}.`}${kept.related === null ? "" : ` The knowledge already has “${kept.related}”: check they do not say the same.`}`,
       }),
     );
   };

@@ -23,6 +23,22 @@ export interface KontextRun {
   readonly stderr: string;
 }
 
+/**
+ * kontext's environment: Peer's own. The coordination lab keeps its Peers'
+ * Claude Code settings apart (CLAUDE_CONFIG_DIR) and names, in
+ * `PEER_KONTEXT_CLAUDE_CONFIG_DIR`, the person's own Claude Code that
+ * kontext's llm adapter runs on; empty for Claude Code's default. Naming
+ * ~/.claude is not the same: Claude Code then looks for another sign-in.
+ */
+function kontextEnv(): NodeJS.ProcessEnv {
+  const own = process.env.PEER_KONTEXT_CLAUDE_CONFIG_DIR;
+  if (own === undefined) return process.env;
+  const env = { ...process.env };
+  delete env.CLAUDE_CONFIG_DIR;
+  if (own !== "") env.CLAUDE_CONFIG_DIR = own;
+  return env;
+}
+
 /** Runs `kontext <args>` in `cwd`, with `stdin` when given. Never throws: a missing kontext is code -1. */
 export function runKontext(
   args: ReadonlyArray<string>,
@@ -33,6 +49,7 @@ export function runKontext(
   return new Promise((resolve) => {
     const child = NodeChildProcess.spawn("kontext", [...args], {
       cwd,
+      env: kontextEnv(),
       stdio: ["pipe", "pipe", "pipe"],
     });
     let stdout = "";
@@ -68,6 +85,20 @@ export function distilledIds(stdout: string): string[] {
   return [...stdout.matchAll(/→ inbox:(\S+)/g)].flatMap((match) =>
     match[1] === undefined ? [] : [match[1]],
   );
+}
+
+/**
+ * Why `kontext distill` captured nothing: its model failed on the thread (its
+ * `part <n>: <error>` note), or found nothing it does not have already.
+ */
+export function distillMiss(run: KontextRun): string {
+  const failed =
+    run.code === 0
+      ? /· part \d+: (.+)$/m.exec(run.stdout)?.[1]
+      : `${run.stderr}\n${run.stdout}`.trim().split("\n").at(-1) || `exit ${run.code}`;
+  return failed === undefined
+    ? "kontext's model found nothing new in it (it may be recorded already)"
+    : `kontext's model did not run (${failed.trim()})`;
 }
 
 /** Where `kontext promote` wrote an entry: `<id> → <path> (staged)`. */

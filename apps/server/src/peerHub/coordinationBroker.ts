@@ -18,6 +18,7 @@ import type { PeerCoordinationPolicy, PeerWorkStatus } from "@t3tools/contracts"
 
 import {
   announcementKey,
+  changedPaths,
   closeOutText,
   contestKey,
   contextTemplate,
@@ -152,6 +153,8 @@ export interface BrokerDeps {
   readonly projectGuidance: (root: string) => Promise<string | null>;
   /** Whether a task was closed. */
   readonly taskDone: (workspace: string, project: string, task: string) => boolean;
+  /** What `git status --porcelain -z` says in a repository: its changed files. */
+  readonly gitStatus: (root: string) => Promise<string>;
   /** The versions of a shared context the hub keeps, newest first. */
   readonly contextVersions: (
     workspace: string,
@@ -207,6 +210,10 @@ interface LocalSession {
   compactedAt: number;
   /** It was asked, as the keeper of a closed task, to mark what the project should keep. */
   toldClosed: boolean;
+  /** The files git saw changed in its repository when it last looked: changes after it are its. */
+  dirty: Set<string>;
+  /** The lines it marked [project] in the shared context while keeping it: its findings. */
+  readonly marked: Set<string>;
   /** Its "For the team" lines as last read: what it shares with the project. */
   team: ReadonlyArray<string>;
   readonly startedAt: number;
@@ -267,8 +274,11 @@ const SHARED_MAX_BYTES = 32 * 1024;
 /** About 6K tokens: past this a keeper is told to compact, again for every 4 KiB more. */
 const SHARED_COMPACT_BYTES = 24 * 1024;
 const SHARED_COMPACT_STEP = 4 * 1024;
-/** A keeper idle this long, while an agent here works on its work, gives way (the hub decides). */
-const KEEPER_IDLE_MS = 10 * 60 * 1000;
+/**
+ * A keeper idle this long, while an agent here works on its work, gives way (the
+ * hub decides): ten minutes, or `PEER_KEEPER_IDLE_MS` (the coordination lab shortens it).
+ */
+const KEEPER_IDLE_MS = Number(process.env.PEER_KEEPER_IDLE_MS) || 10 * 60 * 1000;
 
 const clip = (text: string, max: number) => text.replace(/\s+/g, " ").trim().slice(0, max);
 
@@ -527,6 +537,9 @@ export class CoordinationBroker {
       roster: undefined,
       compactedAt: 0,
       toldClosed: false,
+      // What was changed before it started is not its doing.
+      dirty: new Set(changedPaths(await this.deps.gitStatus(place.root).catch(() => ""))),
+      marked: new Set(),
       team: [],
       startedAt: now,
       contextAt: now,
@@ -632,6 +645,11 @@ export class CoordinationBroker {
         return this.beforeTool(session, body);
       case "PostToolUse": {
         this.touch(session);
+        session.status = "working";
+        if (body.tool_name === "Bash") {
+          await this.readShellChanges(session);
+          return context(event, this.news(session));
+        }
         const edited = editedFile(body.tool_name, body.tool_input);
         if (edited === session.ownContextPath) {
           await this.readTeamLines(session);
@@ -643,6 +661,7 @@ export class CoordinationBroker {
         }
         const file = this.fileOf(session, body);
         if (file !== null) {
+          session.dirty.add(file);
           session.files = [...session.files.filter((f) => f !== file), file].slice(-MAX_FILES);
           const asked = session.asked.get(file);
           if (asked !== undefined) {
@@ -656,6 +675,16 @@ export class CoordinationBroker {
         const news = this.news(session);
         const nudge = this.nudge(session, file);
         return context(event, [news, nudge].filter((part) => part !== null).join("\n\n") || null);
+      }
+      case "Notification": {
+        // Waiting for its person's permission: not at work, so it neither keeps nor takes a context.
+        const message = typeof body.message === "string" ? body.message : "";
+        if (/permission|approv/i.test(message)) {
+          session.status = "blocked";
+          this.markDirty();
+          this.log("session.blocked", { session: session.id, message: clip(message, 200) });
+        }
+        return null;
       }
       case "Stop":
         session.status = "idle";
@@ -671,6 +700,27 @@ export class CoordinationBroker {
       default:
         return null;
     }
+  }
+
+  /**
+   * What a shell command changed: the files git sees changed now and did not
+   * before, less those other sessions here changed. Agents edit with sed too.
+   */
+  private async readShellChanges(session: LocalSession) {
+    const now = new Set(changedPaths(await this.deps.gitStatus(session.root).catch(() => "")));
+    const others = new Set(
+      [...this.sessions.values()]
+        .filter((other) => other !== session && other.root === session.root)
+        .flatMap((other) => other.files),
+    );
+    const changed = [...now].filter((path) => !session.dirty.has(path) && !others.has(path));
+    session.dirty = now;
+    if (changed.length === 0) return;
+    session.files = [...session.files.filter((file) => !changed.includes(file)), ...changed].slice(
+      -MAX_FILES,
+    );
+    this.markDirty();
+    this.log("files.shell", { session: session.id, files: changed });
   }
 
   private fileOf(session: LocalSession, body: Record<string, unknown>): string | null {
@@ -887,6 +937,14 @@ export class CoordinationBroker {
     return text;
   }
 
+  /** Who a session's agent is, as its teammates name it: "Ana's agent". */
+  private me(session: LocalSession) {
+    const email = this.deps.email();
+    return email === null
+      ? "your person's agent"
+      : `${this.deps.nameOf(session.workspace, email)}'s agent`;
+  }
+
   /** A keeper whose task was closed is asked, once, to mark what the project should keep. */
   private closeNews(session: LocalSession): string | null {
     if (!session.keeps || session.task === undefined || session.toldClosed) return null;
@@ -1022,6 +1080,7 @@ export class CoordinationBroker {
     }
     const guidance = await this.deps.projectGuidance(session.root).catch(() => null);
     const text = startContext({
+      me: this.me(session),
       guidance,
       own: {
         path: session.ownContextPath,
@@ -1315,6 +1374,10 @@ export class CoordinationBroker {
     if (text === null || text === mirror.text) return;
     session.contextAt = Date.now();
     session.contextKept = contextWritten(text);
+    const before = new Set(projectLines(mirror.text));
+    const after = projectLines(text);
+    for (const line of after) if (!before.has(line)) session.marked.add(line);
+    for (const line of before) if (!after.includes(line)) session.marked.delete(line);
     mirror.text = text;
     if (Buffer.byteLength(text) > SHARED_MAX_BYTES) {
       // The hub would refuse it: the team keeps the last version until the keeper shortens it.
@@ -1528,7 +1591,7 @@ export class CoordinationBroker {
       const fresh = findings.filter((finding) => Date.parse(finding.at) > since).slice(0, 10);
       next.pending.push(
         [
-          `Peer: you keep the shared context of ${subject} now${before === undefined ? "" : `; ${this.deps.nameOf(workspace, before.email)}'s agent kept it before${keeperSession === undefined ? "" : ` and has been idle for ${Math.round(idleFor / 60_000)} minutes`}`}. It is your working context from now on: carry over what matters from ${next.ownContextPath}, then keep it current.`,
+          `Peer: you (${this.me(next)}) keep the shared context of ${subject} now${before === undefined ? "" : `; ${this.deps.nameOf(workspace, before.email)}'s agent kept it before${keeperSession === undefined ? "" : ` and has been idle for ${Math.round(idleFor / 60_000)} minutes`}`}. It is your working context from now on: carry over what matters from ${next.ownContextPath}, then keep it current.`,
           keeperSkill(kept.path, subject),
           ...(guidance === null ? [] : [projectGuidanceText(guidance)]),
           contextWritten(kept.text)
@@ -1925,10 +1988,9 @@ export class CoordinationBroker {
         ...(s.task === undefined ? {} : { task: s.task }),
         files: s.files,
         claims: s.claims,
-        // A keeper's lines marked for the project are in the shared context it keeps.
-        findings: s.keeps
-          ? [...new Set([...projectLines(this.mirrorOf(s)?.text ?? ""), ...s.team])]
-          : s.team,
+        // Its own lines, and those it marked [project] in a shared context it kept: a keeper that
+        // takes over does not say again what its predecessor marked.
+        findings: [...new Set([...s.team, ...s.marked])],
         // When it was last at work: an idle keeper gives way to an agent that works.
         activeAt: new Date(s.lastActivity).toISOString(),
         // What it has heard is no independent discovery when it says the same.

@@ -467,6 +467,8 @@ export const PeerKeptCandidate = Schema.Struct({
   keptAs: PeerKeptAs,
   /** An entry already in the knowledge that may say the same, to check before committing. */
   related: Schema.NullOr(Schema.String),
+  /** Why kontext's model did not word it, when it was kept as the agents wrote it. */
+  asWritten: Schema.NullOr(Schema.String),
 });
 export type PeerKeptCandidate = typeof PeerKeptCandidate.Type;
 

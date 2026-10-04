@@ -1,6 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
 
 import {
+  changedPaths,
   claudeHookGroups,
   closeOutText,
   compactionNudge,
@@ -21,6 +22,7 @@ import {
   projectLines,
   repositoryPath,
   rosterChange,
+  settingsDiffer,
   startContext,
   taskNamed,
   teamLines,
@@ -290,6 +292,27 @@ describe("Claude Code settings", () => {
     const removed = withClaudeHooks(twice, groups, "/peer/coord", false);
     assert.deepStrictEqual(removed, theirs);
   });
+
+  it("upgrades hooks an older Peer installed once, then leaves the settings alone", () => {
+    const older = withClaudeHooks(
+      theirs,
+      {
+        PostToolUse: [
+          { matcher: "Edit|Write", hooks: [{ type: "command", command: "/peer/coord/hook" }] },
+        ],
+      },
+      "/peer/coord",
+      true,
+    );
+    const upgraded = withClaudeHooks(older, groups, "/peer/coord", true);
+    assert.isTrue(settingsDiffer(upgraded, older));
+    assert.strictEqual(upgraded.hooks?.PostToolUse?.[0]?.matcher, groups.PostToolUse?.[0]?.matcher);
+    assert.isDefined(upgraded.hooks?.Notification);
+    assert.strictEqual(upgraded.model, "opus");
+    assert.isFalse(
+      settingsDiffer(withClaudeHooks(upgraded, groups, "/peer/coord", true), upgraded),
+    );
+  });
 });
 
 describe("paths", () => {
@@ -521,6 +544,26 @@ describe("working context", () => {
       "[Project] worker.rs uses a plain reqwest client, outside the net.rs guard",
     ]);
     assert.include(contextSkill("/peer/me.md"), "Start a line with [project]");
+  });
+
+  it("reads what git says changed, renames by their new name", () => {
+    assert.deepStrictEqual(
+      changedPaths(" M src/pricing.ts\0R  src/new.ts\0src/old.ts\0?? notes.md\0"),
+      ["src/pricing.ts", "src/new.ts", "notes.md"],
+    );
+    assert.deepStrictEqual(changedPaths(""), []);
+  });
+
+  it("tells an agent who it is, so its own lines stay apart from its teammates'", () => {
+    const start = startContext({
+      me: "Ana's agent",
+      own: { path: "/peer/contexts/app/me.md", saved: undefined },
+      shared: undefined,
+      findings: [],
+      agents: [],
+      nameOf: () => "Vir",
+    });
+    assert.isTrue(start.startsWith("You are Ana's agent here."));
   });
 
   it("gives agents the project's own reviewed guidance on what to mark, as guidance", () => {

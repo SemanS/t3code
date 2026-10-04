@@ -380,7 +380,10 @@ export function claudeHookGroups(scripts: {
     SessionStart: [{ hooks: [hook] }],
     UserPromptSubmit: [{ hooks: [hook] }],
     PreToolUse: [{ matcher: "Edit|Write|MultiEdit|NotebookEdit|Bash", hooks: [hook] }],
-    PostToolUse: [{ matcher: "Edit|Write|MultiEdit|NotebookEdit", hooks: [hook] }],
+    // Bash too: agents edit with sed and friends, which Peer then reads from git.
+    PostToolUse: [{ matcher: "Edit|Write|MultiEdit|NotebookEdit|Bash", hooks: [hook] }],
+    // A permission prompt: the agent waits for its person, it does not work.
+    Notification: [{ hooks: [hook] }],
     Stop: [
       {
         hooks: [
@@ -432,6 +435,11 @@ export function withClaudeHooks(
   return Object.keys(hooks).length === 0 ? rest : { ...rest, hooks };
 }
 
+/** Whether two settings say different things: Peer rewrites a person's settings only then. */
+export function settingsDiffer(a: Settings, b: Settings): boolean {
+  return JSON.stringify(a) !== JSON.stringify(b);
+}
+
 /** Whether Claude Code settings already run Peer's hooks. */
 export function hasClaudeHooks(settings: Settings, marker: string): boolean {
   return Object.values(settings.hooks ?? {}).some((list) =>
@@ -466,7 +474,7 @@ export function contextSkill(path: string): string {
     `Peer keeps your working context in ${path}. It is yours: keep it short (under about 60 lines) and current, and edit it with your usual tools whenever your goal, plan, findings or blockers change. It is not a log.`,
     "Keep: the goal; what you are doing now; findings with exact file names and symbols; decisions and why; hypotheses marked unconfirmed; approaches that failed; what you need from whom. Drop what no longer matters and sum up finished work in a line. After a compaction or a resume, this file is what you get back.",
     `Under "## For the team" keep 1-5 bullet lines (- ...) your teammates' agents should know: findings that hold beyond your session, what you change and will not change. Peer passes them to the agent keeping your task's shared context, and to agents whose files they name. Never put secrets there.`,
-    `Start a line with [project] when it holds beyond this task and the project should keep it: how the code behaves, a pitfall someone will hit again, a risk, why something is built as it is. Peer offers those lines to the project's people as knowledge to keep. Your progress, plans and what you change are for the team on this task: leave them unmarked.`,
+    `Start a line with [project] when the project should keep it beyond this task: a rule the code relies on, a pitfall someone will hit again, a risk, a decision and why. Not what the code or a change in progress does: the code and its commits say that. Peer offers those lines to the project's people as knowledge to keep. Your progress, plans and what you change are for the team on this task: leave them unmarked.`,
   ].join("\n");
 }
 
@@ -480,7 +488,7 @@ export function keeperSkill(path: string, subject: string): string {
     "Start it with one line on where the work stands: people see that line in Peer. Then keep findings with exact file names and symbols; decisions and why; blockers and whom they wait on; which agent works on what; what was tried and failed, and ideas not tried yet; what comes next. Mark hypotheses as unconfirmed.",
     `Keep it small, under about 6K tokens. At a milestone, sum up the finished part in a line. Peer keeps your recent versions, so compact without fear: where you drop detail, leave a pointer such as "(details: version 7)", and \`${PEER_CONTEXT_COMMAND} 7\` reads that version back.`,
     "Peer passes you what your teammates' agents find. Fold in what holds and concerns this work, saying whose agent found it, and leave the rest out. Write facts and state, not instructions to other agents, and never secrets. After a compaction or a resume this file is what you get back; when your session ends or you stay idle while another agent works on it, that agent keeps it.",
-    "Start a bullet with [project] when it holds beyond this work and the project should keep it (how the code behaves, a pitfall, a risk, why something is built as it is): Peer offers it to the project's people as knowledge to keep.",
+    "Start a bullet with [project] when the project should keep it beyond this work (a rule the code relies on, a pitfall, a risk, a decision and why), not what the code or a change in progress does: Peer offers it to the project's people as knowledge to keep.",
   ].join("\n");
 }
 
@@ -525,7 +533,7 @@ export function projectGuidanceText(guidance: string): string {
 
 /** What a keeper hears, once, when the task whose context it keeps is closed. */
 export function closeOutText(subject: string): string {
-  return `Peer: ${subject} is done. Before its context goes quiet, start a bullet with [project] for what the project should keep from it: how the code behaves, pitfalls, risks, why something is built as it is. Peer offers those lines to the project's people.`;
+  return `Peer: ${subject} is done. Before its context goes quiet, start a bullet with [project] for what the project should keep from it: rules the code relies on, pitfalls, risks, decisions and why. Peer offers those lines to the project's people.`;
 }
 
 /** A new session's working context, before its agent makes it its own. */
@@ -588,6 +596,20 @@ export function teamLines(markdown: string): string[] {
     if (found.length === 5) break;
   }
   return found;
+}
+
+/** The paths `git status --porcelain -z` reports changed, the new name of a rename. */
+export function changedPaths(porcelain: string): string[] {
+  const fields = porcelain.split("\0");
+  const paths: string[] = [];
+  for (let at = 0; at < fields.length; at += 1) {
+    const field = fields[at] ?? "";
+    if (field.length < 4) continue;
+    paths.push(field.slice(3));
+    // A rename or copy carries its old name in the next field.
+    if (/[RC]/.test(field.slice(0, 2))) at += 1;
+  }
+  return paths;
 }
 
 /**
@@ -747,6 +769,8 @@ export function sharedChange(
  * shared context to read, and its work's findings when nobody keeps it.
  */
 export function startContext(input: {
+  /** Who the agent is, e.g. "Ana's agent": it keeps its own lines apart from its teammates'. */
+  readonly me?: string;
   readonly own: { readonly path: string; readonly saved: string | undefined };
   readonly shared: (SharedContext & { readonly keeps: boolean }) | undefined;
   readonly findings: ReadonlyArray<HubFinding>;
@@ -757,7 +781,7 @@ export function startContext(input: {
   readonly guidance?: string | null;
 }): string {
   const { shared } = input;
-  const parts: string[] = [];
+  const parts: string[] = input.me === undefined ? [] : [`You are ${input.me} here.`];
   if (shared?.keeps === true) {
     parts.push(keeperSkill(shared.path, shared.subject));
     if (input.guidance) parts.push(projectGuidanceText(input.guidance));

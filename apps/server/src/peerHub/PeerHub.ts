@@ -107,7 +107,7 @@ import { explainCloneFailure, explainGitHubCloneFailure } from "./cloneFailure.t
 import {
   claudeHookGroups,
   hasClaudeHooks,
-  hasContextAccess,
+  settingsDiffer,
   taskNamed,
   withClaudeHooks,
   withContextAccess,
@@ -541,7 +541,12 @@ function commandPath(command: string): string | null {
 function run(
   command: string,
   args: ReadonlyArray<string>,
-  options: { readonly cwd?: string; readonly timeoutMs?: number } = {},
+  options: {
+    readonly cwd?: string;
+    readonly timeoutMs?: number;
+    /** Its output as printed, not trimmed: `git status --porcelain` starts lines with a space. */
+    readonly raw?: boolean;
+  } = {},
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     NodeChildProcess.execFile(
@@ -565,7 +570,7 @@ function run(
           const output = (stderr || error.message).trim();
           reject(new Error(output.split("\n").slice(-3).join(" "), { cause: output }));
         } else {
-          resolve(stdout.trim());
+          resolve(options.raw === true ? stdout : stdout.trim());
         }
       },
     );
@@ -666,17 +671,30 @@ const make = Effect.gen(function* () {
   let broker: CoordinationBroker | null = null;
   const claudeSettings = yield* Effect.promise(() => readJsonSettings(claudeSettingsPath));
   let claudeHooksInstalled = hasClaudeHooks(claudeSettings ?? {}, coordinationDir);
-  // Hooks installed by an older Peer still need their agents let into their working contexts.
+  // Hooks an older Peer installed get this Peer's: new events, and agents let into their contexts.
+  const currentHooks =
+    claudeSettings === null || !claudeHooksInstalled
+      ? null
+      : withContextAccess(
+          withClaudeHooks(
+            claudeSettings,
+            claudeHookGroups({
+              hook: NodePath.join(coordinationDir, "hook"),
+              wait: NodePath.join(coordinationDir, "wait"),
+            }),
+            coordinationDir,
+            true,
+          ),
+          coordinationContexts,
+          true,
+        );
   if (
+    currentHooks !== null &&
     claudeSettings !== null &&
-    claudeHooksInstalled &&
-    !hasContextAccess(claudeSettings, coordinationContexts)
+    settingsDiffer(currentHooks, claudeSettings)
   ) {
     yield* Effect.promise(() =>
-      writeJsonSettings(
-        claudeSettingsPath,
-        withContextAccess(claudeSettings, coordinationContexts, true),
-      ).catch(() => undefined),
+      writeJsonSettings(claudeSettingsPath, currentHooks).catch(() => undefined),
     );
   }
 
@@ -2064,6 +2082,10 @@ const make = Effect.gen(function* () {
             hubApi.readContext(hubUrl, session, workspace, project, scope),
           ),
         projectGuidance: async (root) => (await Knowledge.projectGuidance(root))?.text ?? null,
+        gitStatus: (root) =>
+          run("git", ["-C", root, "status", "--porcelain=v1", "-z", "--untracked-files=all"], {
+            raw: true,
+          }),
         taskDone: (workspace, project, task) =>
           currentState()
             .work.get(sharedKey(workspace, project))
@@ -2701,6 +2723,8 @@ const make = Effect.gen(function* () {
       );
       const kind = candidate.kind ?? "learning";
       let id: string | null = null;
+      // Why kontext's model did not word it, when it is kept as the agents wrote it.
+      let asWritten: string | null = null;
       if (candidate.detail !== undefined) {
         // Already worded, e.g. read from a task's context: written as it is.
         const run = yield* kontext([
@@ -2730,6 +2754,7 @@ const make = Effect.gen(function* () {
           }),
         );
         id = Knowledge.distilledIds(run.stdout)[0] ?? null;
+        if (id === null) asWritten = Knowledge.distillMiss(run);
       }
       if (id === null) {
         const run = yield* kontext([
@@ -2769,7 +2794,7 @@ const make = Effect.gen(function* () {
       );
       broker?.hubChanged();
       yield* publish;
-      return { checkout, keptAs, related };
+      return { checkout, keptAs, related, asWritten };
     },
   );
 
