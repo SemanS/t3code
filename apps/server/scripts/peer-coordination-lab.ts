@@ -16,6 +16,8 @@
 //   7. After Peer restarts, a session it meets again keeps what it shared.
 //   8. When the keeper's session ends, the other agent keeps the shared context.
 //   9. A line the keeper marks [project] becomes a knowledge candidate that a person dismisses.
+//  10. With kontext installed, Keep writes a candidate into the project's knowledge (staged), and
+//      the project's reviewed guidance on what to mark reaches a new agent.
 //
 // It prints what each agent was told and leaves both computers' coordination logs.
 //
@@ -119,6 +121,16 @@ function git(cwd: string, ...args: string[]) {
   });
 }
 
+/** Whether kontext is installed: the knowledge steps need it. */
+const kontext = (() => {
+  try {
+    NodeChildProcess.execFileSync("kontext", ["--version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
 /** A small project both agents will work on, as a bare origin. */
 function makeOrigin(): string {
   const work = NodePath.join(lab, "seed");
@@ -132,6 +144,8 @@ function makeOrigin(): string {
     'import { price } from "./pricing";\n\nexport const cartTotal = (items: number[]) => price(items);\n',
   );
   git(work, "init", "--quiet", "--initial-branch", "main");
+  // The project keeps knowledge with kontext, when it is installed here.
+  if (kontext) NodeChildProcess.execFileSync("kontext", ["init", "--no-hooks"], { cwd: work });
   git(work, "add", ".");
   git(work, "commit", "--quiet", "-m", "pricing");
   const origin = NodePath.join(lab, "origin.git");
@@ -188,6 +202,8 @@ const startComputer = (name: string, email: string, herdrSocket?: string) =>
       HERDR_SOCKET_PATH: herdrSocket ?? NodePath.join(home, "no-herdr.sock"),
       CLAUDE_CONFIG_DIR: NodePath.join(home, "claude"),
       T3CODE_TELEMETRY_ENABLED: "false",
+      // Kept knowledge is written without a model: nothing here spends anyone's subscription.
+      PEER_KNOWLEDGE_LLM: "off",
     };
     const server = spawnLogged(
       process.execPath,
@@ -705,6 +721,71 @@ const program = Effect.gen(function* () {
     decided.find((c) => c.id === candidate.id)?.status === "dismissed",
     "a person dismisses it, for everyone on the project",
   );
+
+  // 10. Kept knowledge goes into the project's own kontext store, and the project's guidance
+  //     reaches its agents.
+  if (!kontext) {
+    say("skipped", "kontext is not installed: the knowledge steps need it");
+  } else {
+    const store = yield* ana.client[WS_METHODS.peerHubKnowledgeStatus]({
+      workspace: "acme",
+      project: "lab",
+    });
+    check(
+      store.store && store.checkout === ana.checkout,
+      "the project keeps knowledge with kontext",
+    );
+    yield* ana.client[WS_METHODS.peerHubDecideCandidate]({
+      workspace: "acme",
+      project: "lab",
+      id: candidate.id,
+      status: "proposed",
+    });
+    const kept = yield* ana.client[WS_METHODS.peerHubKeepCandidate]({
+      workspace: "acme",
+      project: "lab",
+      id: candidate.id,
+    });
+    told("Ana's Peer (kept)", JSON.stringify(kept, null, 2));
+    const staged = git(ana.checkout, "diff", "--cached", "--name-only");
+    check(
+      staged.includes(kept.keptAs.path) &&
+        NodeFS.readFileSync(NodePath.join(ana.checkout, kept.keptAs.path), "utf8").includes(
+          "totalPrice() is the only way into pricing",
+        ),
+      "Keep writes it into the project's knowledge, staged for the next commit",
+    );
+    const after = yield* bob.client[WS_METHODS.peerHubKnowledgeCandidates]({
+      workspace: "acme",
+      project: "lab",
+    });
+    check(
+      after.find((c) => c.id === candidate.id)?.keptAs?.path === kept.keptAs.path,
+      "and everyone sees where it went",
+    );
+    NodeFS.mkdirSync(NodePath.join(bob.checkout, ".ai", "conventions"), { recursive: true });
+    NodeFS.writeFileSync(
+      NodePath.join(bob.checkout, ".ai", "conventions", "what-agents-mark-for-the-project.md"),
+      [
+        "---",
+        "id: what-agents-mark-for-the-project",
+        "kind: convention",
+        'title: "What agents mark for the project"',
+        "date: 2026-10-04",
+        "tags: [peer-skill]",
+        "---",
+        "",
+        "Mark how pricing behaves and what callers rely on; leave renames and progress unmarked.",
+      ].join("\n"),
+    );
+    const guided = agent(bob, "lab-bob-guided", "w1:p3").start().told;
+    told(`${bobs.name} (a new session, with the project's guidance)`, guided);
+    check(
+      guided?.includes("This project's own guidance on what to mark [project]") === true &&
+        guided.includes("Mark how pricing behaves"),
+      "a new agent gets the project's own reviewed guidance on what to mark",
+    );
+  }
 
   for (const computer of [ana, bob]) {
     const lines = NodeFS.readFileSync(computer.log, "utf8").trim().split("\n");

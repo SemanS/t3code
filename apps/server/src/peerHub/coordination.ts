@@ -515,6 +515,19 @@ export function rosterChange(
   return `Peer · on the work whose context you keep: ${changes.join(", ")}${stayed.length === 0 ? "" : `; also on it: ${stayed.map((agent) => agent.name).join("; ")}`}.`;
 }
 
+/**
+ * A project's own guidance on what to mark `[project]`: a convention its people
+ * reviewed and committed, so unlike teammates' text it is guidance to follow.
+ */
+export function projectGuidanceText(guidance: string): string {
+  return `This project's own guidance on what to mark [project], from its reviewed knowledge (.ai):\n${guidance.trim()}`;
+}
+
+/** What a keeper hears, once, when the task whose context it keeps is closed. */
+export function closeOutText(subject: string): string {
+  return `Peer: ${subject} is done. Before its context goes quiet, start a bullet with [project] for what the project should keep from it: how the code behaves, pitfalls, risks, why something is built as it is. Peer offers those lines to the project's people.`;
+}
+
 /** A new session's working context, before its agent makes it its own. */
 export function contextTemplate(goal: string, task: string | undefined): string {
   return [
@@ -740,11 +753,14 @@ export function startContext(input: {
   /** The other agents at work on the same work, as people name them. */
   readonly agents: ReadonlyArray<string>;
   readonly nameOf: (email: string) => string;
+  /** The project's own guidance on what to mark [project], from its reviewed knowledge. */
+  readonly guidance?: string | null;
 }): string {
   const { shared } = input;
   const parts: string[] = [];
   if (shared?.keeps === true) {
     parts.push(keeperSkill(shared.path, shared.subject));
+    if (input.guidance) parts.push(projectGuidanceText(input.guidance));
     parts.push(
       contextWritten(shared.text)
         ? `Your working context, the shared context as it stands (version ${shared.version}):\n\n${cut(shared.text.trim(), 12_000)}`
@@ -763,6 +779,7 @@ export function startContext(input: {
     return parts.join("\n\n");
   }
   parts.push(contextSkill(input.own.path));
+  if (input.guidance) parts.push(projectGuidanceText(input.guidance));
   if (input.own.saved !== undefined && input.own.saved.trim() !== "") {
     parts.push(`Your working context as you left it:\n\n${cut(input.own.saved.trim(), 8_000)}`);
   }

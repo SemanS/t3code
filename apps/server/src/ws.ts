@@ -2088,6 +2088,26 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.peerHubDecideCandidate, peerHub.decideCandidate(input), {
             "rpc.aggregate": "peerHub",
           }),
+        [WS_METHODS.peerHubKnowledgeStatus]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubKnowledgeStatus, peerHub.knowledgeStatus(input), {
+            "rpc.aggregate": "peerHub",
+          }),
+        [WS_METHODS.peerHubSetupKnowledge]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubSetupKnowledge, peerHub.setupKnowledge(input), {
+            "rpc.aggregate": "peerHub",
+          }),
+        [WS_METHODS.peerHubKeepCandidate]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubKeepCandidate, peerHub.keepCandidate(input), {
+            "rpc.aggregate": "peerHub",
+          }),
+        [WS_METHODS.peerHubHarvestContext]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubHarvestContext, peerHub.harvestContext(input), {
+            "rpc.aggregate": "peerHub",
+          }),
+        [WS_METHODS.peerHubImproveGuidance]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubImproveGuidance, peerHub.improveGuidance(input), {
+            "rpc.aggregate": "peerHub",
+          }),
         [WS_METHODS.peerHubShareProject]: (input) =>
           observeRpcEffect(WS_METHODS.peerHubShareProject, peerHub.shareProject(input), {
             "rpc.aggregate": "peerHub",

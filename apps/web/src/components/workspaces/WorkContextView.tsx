@@ -13,6 +13,7 @@ import { formatRelativeTimeLabel } from "../../timestampFormat";
 import ChatMarkdown from "../ChatMarkdown";
 import { useRelativeTimeTick } from "../settings/settingsLayout";
 import { Button } from "../ui/button";
+import { stackedThreadToast, toastManager } from "../ui/toast";
 import { SidebarInset } from "../ui/sidebar";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
 import { confirmed, reportFailure, useWorkActions } from "./WorkPanel";
@@ -52,6 +53,15 @@ export function WorkContextView({ workspace, project, scope }: Place) {
   const restoreContext = useAtomCommand(serverEnvironment.peerHubRestoreContext, {
     reportFailure: false,
   });
+  const harvestContext = useAtomCommand(serverEnvironment.peerHubHarvestContext, {
+    reportFailure: false,
+  });
+  const [harvesting, setHarvesting] = useState(false);
+  const knowledge = useEnvironmentQuery(
+    environmentId === null
+      ? null
+      : serverEnvironment.peerHubKnowledgeStatus({ environmentId, input: { workspace, project } }),
+  ).data;
   const tree = useMemo(
     () => (status === null ? [] : buildWorkTree({ status, localThreads, now })),
     [localThreads, now, status],
@@ -78,6 +88,26 @@ export function WorkContextView({ workspace, project, scope }: Place) {
       ? taskLabel(task)
       : `${node?.name ?? project}${scope === "project" ? " · work outside tasks" : ""}`;
   const agents = (scope === "project" ? node?.unsorted : task?.threads) ?? [];
+
+  /** kontext reads the context for what the project should keep; people decide in Knowledge to keep. */
+  const harvest = async () => {
+    if (environmentId === null) return;
+    setHarvesting(true);
+    const result = await harvestContext({ environmentId, input: { workspace, project, scope } });
+    setHarvesting(false);
+    if (!reportFailure("Could not read it", result) || result._tag !== "Success") return;
+    const proposed = result.value.proposed;
+    toastManager.add(
+      stackedThreadToast({
+        type: "success",
+        title:
+          proposed === 0
+            ? "Nothing in it holds beyond this work"
+            : `${proposed} ${proposed === 1 ? "proposal" : "proposals"} in Knowledge to keep`,
+        description: "People keep or dismiss them under the project in Work.",
+      }),
+    );
+  };
 
   const restore = async (version: number) => {
     if (environmentId === null) return;
@@ -127,6 +157,22 @@ export function WorkContextView({ workspace, project, scope }: Place) {
                   <ChatMarkdown text={text} cwd={undefined} />
                 )}
                 {context.reports.length > 0 ? <Reports context={context} /> : null}
+                {knowledge?.store === true && knowledge.llm && text.trim() !== "" ? (
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      disabled={harvesting}
+                      onClick={() => void harvest()}
+                    >
+                      {harvesting ? "Reading it…" : "Propose what to keep"}
+                    </Button>
+                    <span className="text-xs text-muted-foreground">
+                      kontext reads this context for what the project should keep beyond the work;
+                      it waits in Knowledge to keep.
+                    </span>
+                  </div>
+                ) : null}
               </>
             )}
             <section aria-label="Agents on this work">

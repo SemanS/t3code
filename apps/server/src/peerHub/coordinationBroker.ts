@@ -18,6 +18,7 @@ import type { PeerCoordinationPolicy, PeerWorkStatus } from "@t3tools/contracts"
 
 import {
   announcementKey,
+  closeOutText,
   contestKey,
   contextTemplate,
   contextWritten,
@@ -26,6 +27,7 @@ import {
   editedFile,
   emptyMemory,
   compactionNudge,
+  projectGuidanceText,
   findingsForKeeper,
   findingsOnWork,
   isPlainCliCall,
@@ -146,6 +148,10 @@ export interface BrokerDeps {
     baseVersion: number,
     text: string,
   ) => Promise<HubContextText | ContextRefusal>;
+  /** The project's own guidance for agents on what to mark [project], from a checkout's knowledge. */
+  readonly projectGuidance: (root: string) => Promise<string | null>;
+  /** Whether a task was closed. */
+  readonly taskDone: (workspace: string, project: string, task: string) => boolean;
   /** The versions of a shared context the hub keeps, newest first. */
   readonly contextVersions: (
     workspace: string,
@@ -199,6 +205,8 @@ interface LocalSession {
   roster: ReadonlyArray<WorkAgent> | undefined;
   /** The size its kept context had when it was last told to compact it. */
   compactedAt: number;
+  /** It was asked, as the keeper of a closed task, to mark what the project should keep. */
+  toldClosed: boolean;
   /** Its "For the team" lines as last read: what it shares with the project. */
   team: ReadonlyArray<string>;
   readonly startedAt: number;
@@ -518,6 +526,7 @@ export class CoordinationBroker {
       starting: false,
       roster: undefined,
       compactedAt: 0,
+      toldClosed: false,
       team: [],
       startedAt: now,
       contextAt: now,
@@ -820,6 +829,7 @@ export class CoordinationBroker {
     if (options.team !== false) {
       parts.push(
         ...session.pending.splice(0),
+        this.closeNews(session),
         this.rosterNews(session),
         this.sharedNews(session),
         this.findingNews(session),
@@ -875,6 +885,15 @@ export class CoordinationBroker {
       text,
     });
     return text;
+  }
+
+  /** A keeper whose task was closed is asked, once, to mark what the project should keep. */
+  private closeNews(session: LocalSession): string | null {
+    if (!session.keeps || session.task === undefined || session.toldClosed) return null;
+    if (!this.deps.taskDone(session.workspace, session.project, session.task)) return null;
+    session.toldClosed = true;
+    this.log("shared.closed", { session: session.id, task: session.task });
+    return closeOutText(this.deps.taskName(session.workspace, session.project, session.task));
   }
 
   /** Who joined or left the work a keeper keeps the context of, since it last heard. */
@@ -1001,7 +1020,9 @@ export class CoordinationBroker {
       session.sharedHeardText = mirror.text;
       session.sharedToldAt = 0;
     }
+    const guidance = await this.deps.projectGuidance(session.root).catch(() => null);
     const text = startContext({
+      guidance,
       own: {
         path: session.ownContextPath,
         saved: source === "compact" || source === "resume" ? saved : undefined,
@@ -1498,6 +1519,7 @@ export class CoordinationBroker {
       await this.takeUp(next);
       const kept = this.mirrorOf(next);
       if (!next.keeps || kept === undefined) continue;
+      const guidance = await this.deps.projectGuidance(next.root).catch(() => null);
       const before = listed?.keeper;
       const since = kept.version === 0 ? 0 : Date.parse(kept.updatedAt);
       const findings = findingsOnWork(this.holder(next), this.findingsOf(workspace), next.heard);
@@ -1508,6 +1530,7 @@ export class CoordinationBroker {
         [
           `Peer: you keep the shared context of ${subject} now${before === undefined ? "" : `; ${this.deps.nameOf(workspace, before.email)}'s agent kept it before${keeperSession === undefined ? "" : ` and has been idle for ${Math.round(idleFor / 60_000)} minutes`}`}. It is your working context from now on: carry over what matters from ${next.ownContextPath}, then keep it current.`,
           keeperSkill(kept.path, subject),
+          ...(guidance === null ? [] : [projectGuidanceText(guidance)]),
           contextWritten(kept.text)
             ? `It reads now (version ${kept.version}):\n\n${kept.text.trim().slice(0, 12_000)}`
             : "Nobody has written it yet: Peer started it from a template.",

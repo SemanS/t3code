@@ -224,7 +224,11 @@ const HubCandidateSource = Schema.Struct({
   tagged: Schema.Boolean,
   independent: Schema.Boolean,
   at: Schema.String,
+  origin: Schema.optional(Schema.String),
 });
+
+const HubKeptAs = Schema.Struct({ path: Schema.String, title: Schema.String, kind: Schema.String });
+export type HubKeptAs = typeof HubKeptAs.Type;
 
 /** Something agents found that the project may want to keep, weighed by independent finders. */
 const HubKnowledgeCandidate = Schema.Struct({
@@ -239,6 +243,9 @@ const HubKnowledgeCandidate = Schema.Struct({
   reopened: Schema.optional(Schema.Boolean),
   firstAt: Schema.String,
   lastAt: Schema.String,
+  kind: Schema.optional(Schema.String),
+  detail: Schema.optional(Schema.String),
+  keptAs: Schema.optional(HubKeptAs),
 });
 export type HubKnowledgeCandidate = typeof HubKnowledgeCandidate.Type;
 export type HubCoordView = typeof CoordView.Type;
@@ -617,7 +624,7 @@ export const make = Effect.gen(function* () {
         notFound: { value: [] },
       }),
 
-    /** A person dismisses a candidate, promotes it, or proposes it again. */
+    /** A person dismisses a candidate, promotes it (naming the entry it became), or proposes it again. */
     decideCandidate: (
       hubUrl: string,
       session: string,
@@ -625,13 +632,36 @@ export const make = Effect.gen(function* () {
       project: string,
       id: string,
       status: "proposed" | "dismissed" | "promoted",
+      keptAs?: HubKeptAs,
     ) =>
       request(HubKnowledgeCandidate, {
         hubUrl,
         path: workspacePath(slug, `/candidates/${segment(project)}/${segment(id)}`),
         method: "POST",
         session,
-        body: { status },
+        body: keptAs === undefined ? { status } : { status, keptAs },
+      }),
+
+    /** Something a person's Peer proposes for the project, e.g. read from a task's shared context. */
+    proposeCandidate: (
+      hubUrl: string,
+      session: string,
+      slug: string,
+      project: string,
+      body: {
+        readonly text: string;
+        readonly kind?: string;
+        readonly detail?: string;
+        readonly task?: string;
+        readonly origin: string;
+      },
+    ) =>
+      request(HubKnowledgeCandidate, {
+        hubUrl,
+        path: workspacePath(slug, `/candidates/${segment(project)}`),
+        method: "POST",
+        session,
+        body,
       }),
 
     /** The versions of a shared context the hub keeps, newest first. */

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { kontextCaptureCommand } from "./knowledge.logic";
+import { decisionStats, kontextCaptureCommand } from "./knowledge.logic";
 
 describe("kontextCaptureCommand", () => {
   it("titles a candidate by its first sentence and quotes it for the shell", () => {
@@ -15,5 +15,22 @@ describe("kontextCaptureCommand", () => {
     expect(kontextCaptureCommand({ text: "worker.rs isn't guarded", finders: 1 })).toContain(
       "--title 'worker.rs isn'\\''t guarded'",
     );
+  });
+});
+
+describe("decisionStats", () => {
+  it("counts what people kept, and how many of the agents' own marks", () => {
+    const mark = { tagged: true };
+    const harvest = { tagged: true, origin: "context:task:krk-335@v4" };
+    const found = { tagged: false };
+    expect(
+      decisionStats([
+        { status: "promoted", sources: [mark] },
+        { status: "dismissed", sources: [mark] },
+        { status: "promoted", sources: [found, found] },
+        { status: "promoted", sources: [harvest] },
+        { status: "proposed", sources: [mark] },
+      ]),
+    ).toEqual({ decided: 4, kept: 3, marked: 2, markedKept: 1 });
   });
 });

@@ -343,6 +343,11 @@ import {
   PeerHubContextVersionInput,
   PeerHubCandidatesInput,
   PeerHubDecideCandidateInput,
+  PeerHubCandidateInput,
+  PeerHubHarvestInput,
+  PeerKnowledgeStatus,
+  PeerKeptCandidate,
+  PeerStagedEntry,
   PeerKnowledgeCandidate,
   PeerContextVersion,
   PeerContextVersionText,
@@ -527,6 +532,11 @@ export const WS_METHODS = {
   peerHubRestoreContext: "peerHub.restoreContext",
   peerHubKnowledgeCandidates: "peerHub.knowledgeCandidates",
   peerHubDecideCandidate: "peerHub.decideCandidate",
+  peerHubKnowledgeStatus: "peerHub.knowledgeStatus",
+  peerHubSetupKnowledge: "peerHub.setupKnowledge",
+  peerHubKeepCandidate: "peerHub.keepCandidate",
+  peerHubHarvestContext: "peerHub.harvestContext",
+  peerHubImproveGuidance: "peerHub.improveGuidance",
   peerHubShareProject: "peerHub.shareProject",
   peerHubUnshareProject: "peerHub.unshareProject",
   peerHubInvite: "peerHub.invite",
@@ -1906,6 +1916,41 @@ const WsPeerHubDecideCandidateRpc = Rpc.make(WS_METHODS.peerHubDecideCandidate, 
   error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
 });
 
+/** A project's knowledge on this computer: its checkout, kontext there, its guidance for agents. */
+const WsPeerHubKnowledgeStatusRpc = Rpc.make(WS_METHODS.peerHubKnowledgeStatus, {
+  payload: PeerHubCandidatesInput,
+  success: PeerKnowledgeStatus,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
+/** Runs `kontext init` in the project's checkout here. */
+const WsPeerHubSetupKnowledgeRpc = Rpc.make(WS_METHODS.peerHubSetupKnowledge, {
+  payload: PeerHubCandidatesInput,
+  success: PeerKnowledgeStatus,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
+/** Writes a candidate into the project's knowledge, staged, and marks it kept for everyone. */
+const WsPeerHubKeepCandidateRpc = Rpc.make(WS_METHODS.peerHubKeepCandidate, {
+  payload: PeerHubCandidateInput,
+  success: PeerKeptCandidate,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
+/** Reads a shared context with kontext for what the project should keep; proposes it. */
+const WsPeerHubHarvestContextRpc = Rpc.make(WS_METHODS.peerHubHarvestContext, {
+  payload: PeerHubHarvestInput,
+  success: Schema.Struct({ proposed: Schema.Number }),
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
+/** Proposes the project's guidance for its agents from what people kept and dismissed, staged. */
+const WsPeerHubImproveGuidanceRpc = Rpc.make(WS_METHODS.peerHubImproveGuidance, {
+  payload: PeerHubCandidatesInput,
+  success: PeerStagedEntry,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
 const WsPeerHubShareProjectRpc = Rpc.make(WS_METHODS.peerHubShareProject, {
   payload: PeerHubShareProjectInput,
   success: PeerHubStatus,
@@ -2047,6 +2092,11 @@ export const WsRpcGroup = RpcGroup.make(
   WsPeerHubRestoreContextRpc,
   WsPeerHubKnowledgeCandidatesRpc,
   WsPeerHubDecideCandidateRpc,
+  WsPeerHubKnowledgeStatusRpc,
+  WsPeerHubSetupKnowledgeRpc,
+  WsPeerHubKeepCandidateRpc,
+  WsPeerHubHarvestContextRpc,
+  WsPeerHubImproveGuidanceRpc,
   WsPeerHubShareProjectRpc,
   WsPeerHubUnshareProjectRpc,
   WsPeerHubInviteRpc,

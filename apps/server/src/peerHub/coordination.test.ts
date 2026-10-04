@@ -2,6 +2,7 @@ import { assert, describe, it } from "@effect/vitest";
 
 import {
   claudeHookGroups,
+  closeOutText,
   compactionNudge,
   contextSkill,
   findingsOnWork,
@@ -520,6 +521,27 @@ describe("working context", () => {
       "[Project] worker.rs uses a plain reqwest client, outside the net.rs guard",
     ]);
     assert.include(contextSkill("/peer/me.md"), "Start a line with [project]");
+  });
+
+  it("gives agents the project's own reviewed guidance on what to mark, as guidance", () => {
+    const start = startContext({
+      own: { path: "/peer/contexts/app/me.md", saved: undefined },
+      shared: undefined,
+      findings: [],
+      agents: [],
+      nameOf: () => "Vir",
+      guidance: "Mark how webhooks and URL checks behave; leave UI copy unmarked.",
+    });
+    assert.include(
+      start,
+      "This project's own guidance on what to mark [project], from its reviewed knowledge (.ai):\nMark how webhooks",
+    );
+    assert.notInclude(
+      start,
+      "<shared-context>",
+      "reviewed knowledge is not fenced as a teammate's text",
+    );
+    assert.include(closeOutText("KRK-335 · DNS errors"), "KRK-335 · DNS errors is done");
   });
 
   it("tells a context the agent wrote from Peer's empty template", () => {
