@@ -160,12 +160,14 @@ function ExperimentSteps() {
         </li>
         <li>On both, start Claude Code in herdr in that checkout, each on a branch of its own.</li>
         <li>
-          Computer A: “In apps/server/src/webhooks.rs make post() retry a failed delivery up to 3
-          times with backoff (1 s, 2 s, 4 s). Keep it small, do not push.”
+          Computer A: “In apps/server/src/webhooks.rs every delivery should also send user-agent:
+          vocabulift-webhooks/&lt;version&gt; and webhook-attempt: &lt;n&gt; (1-based); pass the
+          attempt from round() into post(). Keep it small, do not run cargo, do not push.”
         </li>
         <li>
-          A minute later, computer B: “In apps/server/src/webhooks.rs rename sign() to signature()
-          and update every caller; add a doc comment on what is signed. Keep it small, do not push.”
+          A minute later, computer B: “In apps/server/src/webhooks.rs let post() sign the delivery
+          itself (give it the secret instead of a ready signature) and rename sign() to signature(),
+          keeping the specification test. Keep it small, do not run cargo, do not push.”
         </li>
         <li>
           Watch the Overlaps section of the Work view, then send both coordination logs (path
