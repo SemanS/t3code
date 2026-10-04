@@ -2,9 +2,9 @@
 /**
  * herdr — the coding agents herdr (https://herdr.dev) runs on this computer,
  * read through its local socket API: `agent.list` names every agent with its
- * state (working, blocked, done, idle), `agent.focus` brings one forward in
- * herdr. Peer never starts or drives them; it shows them and reports them as
- * work on the project whose checkout they run in.
+ * state (working, blocked, done, idle), `events.subscribe` says when that
+ * changes, `agent.focus` brings one forward in herdr. Peer shows them and
+ * reports them as work on the project whose checkout they run in.
  *
  * @module peerHub/herdr
  */
@@ -167,4 +167,70 @@ export async function notifyHerdr(
   await call(socketPath, "notification.show", { title, body, sound: "request" }).catch(
     () => undefined,
   );
+}
+
+export interface HerdrWatch {
+  readonly close: () => void;
+}
+
+/**
+ * Calls `onChange` whenever herdr reports an agent appearing or going away
+ * anywhere, or one of `paneIds` changing state; the events only say that
+ * something changed, `agent.list` says what. Ends with `onEnd(subscribed)` when
+ * herdr's server goes away (subscribed) or refuses the subscription, as herdr
+ * before events did (not subscribed); not after `close`.
+ */
+export function watchHerdrAgents(input: {
+  readonly paneIds: ReadonlyArray<string>;
+  readonly onChange: () => void;
+  readonly onEnd: (subscribed: boolean) => void;
+  readonly socketPath?: string;
+}): HerdrWatch {
+  const id = `peer-watch-${NodeCrypto.randomUUID()}`;
+  const socket = NodeNet.createConnection(input.socketPath ?? herdrSocketPath());
+  let buffer = "";
+  let subscribed = false;
+  let ended = false;
+  const end = () => {
+    if (ended) return;
+    ended = true;
+    socket.destroy();
+    input.onEnd(subscribed);
+  };
+  socket.setEncoding("utf8");
+  socket.on("connect", () => {
+    const subscriptions = [
+      { type: "pane.agent_detected" },
+      { type: "pane.exited" },
+      { type: "pane.closed" },
+      ...input.paneIds.map((paneId) => ({ type: "pane.agent_status_changed", pane_id: paneId })),
+    ];
+    socket.write(
+      `${JSON.stringify({ id, method: "events.subscribe", params: { subscriptions } })}\n`,
+    );
+  });
+  socket.on("data", (chunk: string) => {
+    buffer += chunk;
+    for (let newline = buffer.indexOf("\n"); newline >= 0; newline = buffer.indexOf("\n")) {
+      const line = buffer.slice(0, newline);
+      buffer = buffer.slice(newline + 1);
+      let message: { id?: unknown; event?: unknown; error?: unknown };
+      try {
+        message = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (typeof message.event === "string") input.onChange();
+      else if (message.id === id && message.error !== undefined) end();
+      else if (message.id === id) subscribed = true;
+    }
+  });
+  socket.on("error", end);
+  socket.on("close", end);
+  return {
+    close: () => {
+      ended = true;
+      socket.destroy();
+    },
+  };
 }

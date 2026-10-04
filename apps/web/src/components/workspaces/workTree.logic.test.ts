@@ -331,15 +331,39 @@ describe("taskNamedIn", () => {
 });
 
 describe("activeAgents", () => {
-  it("lists what runs here and may need you, blocked first", () => {
+  it("puts what waits on you first, and keeps what just works below it", () => {
+    const finished = shell("t5", "Webhook retries", {
+      latestRun: { completedAt: "2026-10-03T11:00:00Z" },
+    } as Partial<EnvironmentThreadShell>);
+    const project = status(kirkwood());
+    const withDone = {
+      ...project,
+      agents: {
+        ...project.agents,
+        list: [
+          ...project.agents.list,
+          {
+            id: "herdr:term3",
+            paneId: "w3:p1",
+            agent: "claude",
+            title: "Review the diff",
+            status: "done" as const,
+          },
+        ],
+      },
+    };
     const agents = activeAgents({
-      status: status(kirkwood()),
-      localThreads: LOCAL,
+      status: withDone,
+      localThreads: [...LOCAL, finished],
       projectNames: new Map([[`${HERE}:${KIRKWOOD_T3}`, "Kirkwood"]]),
       localEnvironmentId: HERE,
+      unseen: (thread) => thread.id === finished.id,
+      taskOf: new Map([["herdr:term1", "KRK-812 · Split Payments"]]),
     });
-    expect(agents.map((a) => [a.title, a.status, a.where])).toEqual([
-      ["Investigation for KRK-812", "blocked", "Kirkwood"],
+    expect(agents.map((a) => [a.title, a.needs ?? a.status, a.where])).toEqual([
+      ["Investigation for KRK-812", "input", "Kirkwood · KRK-812 · Split Payments"],
+      ["Review the diff", "review", undefined],
+      ["Webhook retries", "review", "Kirkwood"],
       ["Main implementation", "working", "Kirkwood"],
       ["Side project", "working", "side"],
     ]);

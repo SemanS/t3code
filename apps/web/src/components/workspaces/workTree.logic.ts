@@ -285,28 +285,44 @@ export function buildWorkTree(input: {
   );
 }
 
+/** Why an agent waits on you: an approval, an answer, or finished work to look at. */
+export type AgentNeed = "approval" | "input" | "review";
+
 export interface ActiveAgentNode {
   readonly key: string;
   readonly title: string;
   readonly status: PeerWorkStatus;
   readonly harness: string | undefined;
-  /** The project it works in, when there is one. */
+  /** The project it works in, and its task there, when there are. */
   readonly where: string | undefined;
   readonly open: WorkOpen;
+  /** Set while it waits on you; unset while it just works. */
+  readonly needs: AgentNeed | undefined;
 }
 
+const NEED_ORDER: Readonly<Record<AgentNeed, number>> = { approval: 0, input: 1, review: 2 };
+
 /**
- * What runs on this computer right now and may need you: herdr's agents
- * (whatever started them) and this computer's threads that are working or
- * waiting on an answer. Blocked first.
+ * What on this computer needs you, and what just runs: herdr's agents
+ * (whatever started them) and this computer's threads. An agent needs you
+ * while it waits for an approval or an answer, and once it finished work you
+ * have not looked at yet; working ones are not news.
  */
 export function activeAgents(input: {
   readonly status: PeerHubStatus | null;
   readonly localThreads: ReadonlyArray<EnvironmentThreadShell>;
   readonly projectNames: ReadonlyMap<string, string>;
   readonly localEnvironmentId: EnvironmentId | null;
+  /** A thread finished work its owner has not opened since. */
+  readonly unseen: (thread: EnvironmentThreadShell) => boolean;
+  /** Thread key (`peer:<id>`, `herdr:<id>`) → the task it is on, as the work tree places it. */
+  readonly taskOf?: ReadonlyMap<string, string>;
 }): ReadonlyArray<ActiveAgentNode> {
   const agents: ActiveAgentNode[] = [];
+  const place = (key: string, project: string | undefined) => {
+    const parts = [project, input.taskOf?.get(key)].filter((part) => part !== undefined);
+    return parts.length === 0 ? undefined : parts.join(" · ");
+  };
   const projectTitle = (workspace: string | undefined, projectId: string | undefined) =>
     workspace === undefined || projectId === undefined
       ? undefined
@@ -314,14 +330,21 @@ export function activeAgents(input: {
           .find((w) => w.slug === workspace)
           ?.projects.find((p) => p.project.id === projectId)?.project.name;
   for (const agent of input.status?.agents.list ?? []) {
-    if (agent.status === "idle") continue;
+    // herdr says "done" for finished work nobody has looked at, "idle" once someone has.
+    const needs =
+      agent.status === "blocked" ? "input" : agent.status === "done" ? "review" : undefined;
+    if (needs === undefined && agent.status !== "working") continue;
     agents.push({
       key: agent.id,
       title: agent.title,
       status: agent.status,
       harness: agent.agent,
-      where: projectTitle(agent.workspace, agent.projectId) ?? agent.cwd?.split("/").at(-1),
+      where: place(
+        agent.id,
+        projectTitle(agent.workspace, agent.projectId) ?? agent.cwd?.split("/").at(-1),
+      ),
       open: { kind: "herdr", paneId: agent.paneId },
+      needs,
     });
   }
   for (const thread of input.localThreads) {
@@ -330,19 +353,28 @@ export function activeAgents(input: {
     }
     if (thread.archivedAt !== null || thread.deletedAt !== null) continue;
     const status = localThreadStatus(thread);
-    if (status !== "working" && status !== "blocked") continue;
+    const needs: AgentNeed | undefined = thread.hasPendingApprovals
+      ? "approval"
+      : thread.hasPendingUserInput
+        ? "input"
+        : status !== "working" && input.unseen(thread)
+          ? "review"
+          : undefined;
+    if (needs === undefined && status !== "working") continue;
+    const key = `peer:${thread.id}`;
     agents.push({
-      key: `peer:${thread.id}`,
+      key,
       title: thread.title,
       status,
       harness: undefined,
-      where: input.projectNames.get(`${thread.environmentId}:${thread.projectId}`),
+      where: place(key, input.projectNames.get(`${thread.environmentId}:${thread.projectId}`)),
       open: { kind: "thread", environmentId: thread.environmentId, threadId: thread.id },
+      needs,
     });
   }
-  return agents.toSorted(
-    (a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status] || a.title.localeCompare(b.title),
-  );
+  const rank = (agent: ActiveAgentNode) =>
+    agent.needs === undefined ? 3 + STATUS_ORDER[agent.status] : NEED_ORDER[agent.needs];
+  return agents.toSorted((a, b) => rank(a) - rank(b) || a.title.localeCompare(b.title));
 }
 
 /** A task the way lists and menus name it: `KRK-812 · Split Payments`. */

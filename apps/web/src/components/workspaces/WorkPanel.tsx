@@ -6,8 +6,15 @@ import type {
   PeerWorkStatus,
   ProjectId,
 } from "@t3tools/contracts";
-import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { threadRuntimeCanArchive } from "@t3tools/client-runtime/state/models";
+import {
+  scopedThreadKey,
+  scopeProjectRef,
+  scopeThreadRef,
+} from "@t3tools/client-runtime/environment";
+import {
+  threadRuntimeCanArchive,
+  type EnvironmentThreadShell,
+} from "@t3tools/client-runtime/state/models";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import { settlePromise, type AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import { useNavigate, useParams } from "@tanstack/react-router";
@@ -21,9 +28,10 @@ import {
   MessageCircleQuestionIcon,
   PlusIcon,
   Share2Icon,
+  ShieldQuestionIcon,
   type LucideIcon,
 } from "lucide-react";
-import { useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { useCallback, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 
 import { useNewThreadHandler } from "../../hooks/useHandleNewThread";
 import { useScratchProject } from "../../hooks/useScratchProject";
@@ -37,7 +45,9 @@ import { serverEnvironment } from "../../state/server";
 import { threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { buildThreadRouteParams } from "../../threadRoutes";
+import { useUiStateStore } from "../../uiStateStore";
 import { useRelativeTimeTick } from "../settings/settingsLayout";
+import { hasUnseenCompletion, resolveThreadLastVisitedAt } from "../Sidebar.logic";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { MiddleTruncate } from "../ui/middle-truncate";
@@ -58,6 +68,7 @@ import {
   taskMenuItems,
   threadMenuItems,
   type ActiveAgentNode,
+  type AgentNeed,
   type WorkOpen,
   type WorkProjectNode,
   type WorkTaskNode,
@@ -320,15 +331,42 @@ export function WorkPanel() {
     () => new Map(projects.map((p) => [`${p.environmentId}:${p.id}`, p.title] as const)),
     [projects],
   );
-  const running = useMemo(
+  const visited = useUiStateStore((state) => state.threadLastVisitedAtById);
+  const unseen = useCallback(
+    (thread: EnvironmentThreadShell) =>
+      hasUnseenCompletion({
+        ...thread,
+        lastVisitedAt: resolveThreadLastVisitedAt(
+          thread.lastVisitedAt,
+          visited[scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))],
+        ),
+      }),
+    [visited],
+  );
+  const taskOf = useMemo(
+    () =>
+      new Map(
+        tree.flatMap((project) =>
+          project.areas.flatMap((area) =>
+            area.tasks.flatMap((task) =>
+              task.threads.map((thread) => [thread.key, taskLabel(task)] as const),
+            ),
+          ),
+        ),
+      ),
+    [tree],
+  );
+  const agents = useMemo(
     () =>
       activeAgents({
         status,
         localThreads: threads,
         projectNames,
         localEnvironmentId: environmentId,
+        unseen,
+        taskOf,
       }),
-    [environmentId, projectNames, status, threads],
+    [environmentId, projectNames, status, taskOf, threads, unseen],
   );
 
   return (
@@ -336,7 +374,12 @@ export function WorkPanel() {
       {environmentId !== null && status !== null && status.signedIn ? (
         <OverlapList environmentId={environmentId} status={status} />
       ) : null}
-      <ActiveAgents agents={running} herdr={status?.agents.herdr ?? null} onOpen={actions.open} />
+      <NeedsYou
+        agents={agents}
+        herdr={status?.agents.herdr ?? null}
+        activeThread={activeThread}
+        onOpen={actions.open}
+      />
       {environmentId === null || status === null ? (
         <p className="px-2 text-xs text-muted-foreground">Connecting…</p>
       ) : !status.signedIn ? (
@@ -392,44 +435,137 @@ function SectionLabel({ children }: { readonly children: React.ReactNode }) {
   );
 }
 
-function ActiveAgents({
+const NEED: Readonly<
+  Record<AgentNeed, { readonly label: string; readonly icon: LucideIcon; readonly tone: string }>
+> = {
+  approval: { label: "Needs approval", icon: ShieldQuestionIcon, tone: "text-warning-foreground" },
+  input: { label: "Needs input", icon: MessageCircleQuestionIcon, tone: "text-warning-foreground" },
+  review: { label: "Finished", icon: CircleCheckIcon, tone: "text-success" },
+};
+
+/**
+ * What on this computer waits on you — an approval, an answer, finished work
+ * to look at — with what merely runs folded away below it.
+ */
+function NeedsYou({
   agents,
   herdr,
+  activeThread,
   onOpen,
 }: {
   readonly agents: ReadonlyArray<ActiveAgentNode>;
   readonly herdr: PeerHubStatus["agents"]["herdr"] | null;
+  readonly activeThread: string | null;
   readonly onOpen: (open: WorkOpen) => void;
 }) {
+  const [showRunning, setShowRunning] = useState(false);
+  const waiting = agents.filter((agent) => agent.needs !== undefined);
+  const running = agents.filter((agent) => agent.needs === undefined);
   return (
-    <section aria-label="Active agents">
-      <SectionLabel>Active agents</SectionLabel>
-      {agents.length === 0 ? (
+    <section aria-label="Needs you">
+      <SectionLabel>Needs you{waiting.length > 0 ? ` · ${waiting.length}` : ""}</SectionLabel>
+      {waiting.length === 0 ? (
         <p className="px-2 text-xs text-muted-foreground">
-          {herdr === "running"
-            ? "Nothing is running right now."
-            : "Nothing is running. Agents you run in herdr (herdr.dev) show up here too."}
+          {running.length > 0 || herdr === "running"
+            ? "Nothing needs you right now."
+            : "Nothing needs you. Agents you run in herdr (herdr.dev) show up here too."}
         </p>
       ) : (
-        <ul className="flex flex-col gap-px">
-          {agents.map((agent) => (
-            <li key={agent.key}>
-              <button
-                type="button"
-                className="flex h-7 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-sm text-sidebar-foreground hover:bg-sidebar-row-hover"
-                onClick={() => onOpen(agent.open)}
-              >
-                <StatusGlyph status={agent.status} />
-                <span className="min-w-0 flex-1 truncate">{agent.title}</span>
-                <span className="shrink-0 truncate text-xs text-muted-foreground">
-                  {[agent.harness, agent.where].filter(Boolean).join(" · ")}
-                </span>
-              </button>
-            </li>
+        <ul className="flex flex-col">
+          {waiting.map((agent) => (
+            <NeedCard
+              key={agent.key}
+              agent={agent}
+              active={
+                agent.open.kind === "thread" &&
+                activeThread === `${agent.open.environmentId}:${agent.open.threadId}`
+              }
+              onOpen={onOpen}
+            />
           ))}
         </ul>
       )}
+      {running.length > 0 ? (
+        <>
+          <button
+            type="button"
+            className="mt-1 flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left text-xs text-muted-foreground hover:bg-sidebar-row-hover"
+            aria-expanded={showRunning}
+            onClick={() => setShowRunning((value) => !value)}
+          >
+            <ChevronRightIcon className={cn("size-3 shrink-0", showRunning && "rotate-90")} />
+            <CircleDashedIcon aria-hidden className="size-3.5 shrink-0 text-info" />
+            {running.length === 1 ? "1 agent working" : `${running.length} agents working`}
+          </button>
+          {showRunning ? (
+            <ul className="flex flex-col gap-px">
+              {running.map((agent) => (
+                <li key={agent.key}>
+                  <button
+                    type="button"
+                    className="flex h-7 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-sm text-sidebar-foreground hover:bg-sidebar-row-hover"
+                    onClick={() => onOpen(agent.open)}
+                  >
+                    <StatusGlyph status={agent.status} />
+                    <span className="min-w-0 flex-1 truncate">{agent.title}</span>
+                    <span className="shrink-0 truncate text-xs text-muted-foreground">
+                      {[agent.harness, agent.where].filter(Boolean).join(" · ")}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </>
+      ) : null}
     </section>
+  );
+}
+
+/** One thing that waits on you, as a card like the work tree's threads. */
+function NeedCard({
+  agent,
+  active,
+  onOpen,
+}: {
+  readonly agent: ActiveAgentNode;
+  readonly active: boolean;
+  readonly onOpen: (open: WorkOpen) => void;
+}) {
+  if (agent.needs === undefined) return null;
+  const need = NEED[agent.needs];
+  const Icon = need.icon;
+  const harness = [agent.harness, agent.open.kind === "herdr" ? "herdr" : null]
+    .filter(Boolean)
+    .join(" · ");
+  return (
+    <li className="list-none py-px">
+      <button
+        type="button"
+        aria-current={active ? "page" : undefined}
+        className={cn(
+          "relative w-full rounded-md px-2.5 py-1.5 text-left outline-none select-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+          active ? "bg-sidebar-row-active" : "hover:bg-sidebar-row-hover",
+        )}
+        onClick={() => onOpen(agent.open)}
+      >
+        <span className="flex h-5 min-w-0 items-center gap-1.5 text-xs">
+          <span className={cn("inline-flex shrink-0 items-center gap-1 font-medium", need.tone)}>
+            <Icon aria-hidden className="size-3.5 shrink-0" />
+            {need.label}
+          </span>
+          <span className="min-w-0 flex-1 truncate text-right text-muted-foreground">
+            {harness}
+          </span>
+        </span>
+        <span className="mt-0.5 block truncate text-sm font-medium text-foreground">
+          {agent.title}
+        </span>
+        {agent.where === undefined ? null : (
+          <span className="mt-0.5 block truncate text-xs text-muted-foreground">{agent.where}</span>
+        )}
+      </button>
+    </li>
   );
 }
 

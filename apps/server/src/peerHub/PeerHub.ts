@@ -70,6 +70,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
+import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
@@ -112,7 +113,14 @@ const SESSION_SECRET = "peer-hub-session";
 /** The hub a fresh install signs in to; PEER_HUB_URL points a build or a machine elsewhere. */
 const DEFAULT_HUB_URL = process.env.PEER_HUB_URL?.trim() || "https://hub.webinson.com";
 const WORK_INTERVAL = "30 seconds";
-const HERDR_INTERVAL = "4 seconds";
+/**
+ * How often Peer reads herdr's agents when herdr sends no events, and when it
+ * does (agents' titles change without an event).
+ */
+const HERDR_POLL_MS = 4_000;
+const HERDR_RESYNC_MS = 15_000;
+/** A change in herdr's agents reaches the hub at most this often. */
+const HERDR_REPORT_GAP_MS = 2_000;
 const MANIFEST_INTERVAL = "10 minutes";
 const GIT_TIMEOUT_MS = 15 * 60 * 1000;
 
@@ -216,6 +224,15 @@ interface ProjectWork {
 
 interface HerdrAgentState extends Herdr.HerdrAgent {
   readonly branch: string | undefined;
+}
+
+/** What Peer shows and reports of herdr's agents, to tell a change from a re-read. */
+function herdrSignature(agents: ReadonlyArray<HerdrAgentState> | null): string {
+  if (agents === null) return "";
+  return agents
+    .map((a) => [a.terminalId, a.paneId, a.status, a.title, a.cwd, a.branch].join("\u0000"))
+    .toSorted()
+    .join("\u0001");
 }
 
 const ACTIVE_RUN_STATES: ReadonlySet<string> = new Set([
@@ -1174,6 +1191,89 @@ const make = Effect.gen(function* () {
     yield* updateRuntime((s) => ({ ...s, herdr: withBranches }));
   });
 
+  /**
+   * Keeps herdr's agents current. herdr's events say when an agent appears,
+   * leaves or changes state; Peer then reads the list, shows it at once and
+   * tells the hub within a couple of seconds. Without events (no herdr, or
+   * one from before them) Peer reads the list every few seconds instead.
+   */
+  const followHerdr = Effect.gen(function* () {
+    const changed = yield* Queue.dropping<void>(1);
+    const signal = () => void Queue.offerUnsafe(changed, undefined);
+    const watch = {
+      handle: null as Herdr.HerdrWatch | null,
+      panes: "",
+      refused: false,
+      retryAt: 0,
+    };
+    yield* Effect.addFinalizer(() => Effect.sync(() => watch.handle?.close()));
+    let shown = "";
+    let reported = "";
+    let reportedAt = 0;
+
+    const step = Effect.gen(function* () {
+      yield* refreshHerdr;
+      const agents = (yield* Ref.get(stateRef)).herdr;
+      const now = DateTime.toEpochMillis(yield* DateTime.now);
+      const seen = herdrSignature(agents);
+      if (seen !== shown) {
+        shown = seen;
+        yield* publish;
+      }
+      if (seen !== reported && now - reportedAt >= HERDR_REPORT_GAP_MS) {
+        reported = seen;
+        reportedAt = now;
+        yield* background(refreshWork);
+      }
+      if (watch.refused) {
+        watch.refused = false;
+        watch.retryAt = now + HERDR_RESYNC_MS;
+      }
+      // Follow the panes that run agents now: herdr reports state per pane.
+      const panes = (agents ?? []).map((agent) => agent.paneId).toSorted();
+      if (agents === null) {
+        watch.handle?.close();
+        watch.handle = null;
+      } else if (
+        (watch.handle === null || watch.panes !== panes.join(" ")) &&
+        now >= watch.retryAt
+      ) {
+        watch.handle?.close();
+        watch.panes = panes.join(" ");
+        watch.handle = Herdr.watchHerdrAgents({
+          paneIds: panes,
+          onChange: signal,
+          onEnd: (subscribed) => {
+            watch.handle = null;
+            watch.refused = !subscribed;
+            signal();
+          },
+        });
+      }
+      return seen !== reported
+        ? Math.max(100, HERDR_REPORT_GAP_MS - (now - reportedAt))
+        : watch.handle === null
+          ? HERDR_POLL_MS
+          : HERDR_RESYNC_MS;
+    });
+
+    while (true) {
+      const wait = yield* step.pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("Peer could not read herdr's agents", cause).pipe(
+            Effect.as(HERDR_POLL_MS),
+          ),
+        ),
+      );
+      const woken = yield* Queue.take(changed).pipe(Effect.timeoutOption(wait));
+      if (Option.isSome(woken)) {
+        // An agent starting or finishing sends a few events at once; read once they settle.
+        yield* Effect.sleep(150);
+        yield* Queue.clear(changed);
+      }
+    }
+  });
+
   const startSignIn: PeerHub["Service"]["startSignIn"] = Effect.fn("PeerHub.startSignIn")(
     function* (input) {
       const { persisted } = yield* Ref.get(stateRef);
@@ -2124,14 +2224,7 @@ const make = Effect.gen(function* () {
       Effect.ignoreCause({ log: true }),
     ),
   ).pipe(Effect.forkScoped);
-  // herdr's agents change by the second; reading its socket is cheap.
-  yield* refreshHerdr.pipe(
-    Effect.andThen(publish),
-    Effect.andThen(Effect.sleep(HERDR_INTERVAL)),
-    Effect.ignoreCause({ log: true }),
-    Effect.forever,
-    Effect.forkScoped,
-  );
+  yield* followHerdr.pipe(Effect.forkScoped);
   yield* background(refreshGitHub);
   if ((yield* Ref.get(stateRef)).persisted.coordination?.enabled === true) {
     yield* background(startBroker);
