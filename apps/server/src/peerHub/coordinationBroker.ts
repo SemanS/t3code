@@ -229,6 +229,8 @@ const NUDGE_MS = 20 * 60 * 1000;
 const CLAIM_GAP_MS = 20_000;
 /** An agent reading a shared context hears its changes at most this often. */
 const SHARED_NEWS_GAP_MS = 5 * 60 * 1000;
+/** What the hub keeps of a shared context. */
+const SHARED_MAX_BYTES = 32 * 1024;
 
 const clip = (text: string, max: number) => text.replace(/\s+/g, " ").trim().slice(0, max);
 
@@ -1225,6 +1227,18 @@ export class CoordinationBroker {
     session.contextAt = Date.now();
     session.contextKept = contextWritten(text);
     mirror.text = text;
+    if (Buffer.byteLength(text) > SHARED_MAX_BYTES) {
+      // The hub would refuse it: the team keeps the last version until the keeper shortens it.
+      session.pending.push(
+        `Peer: the shared context you keep (${mirror.path}) is over 32 KiB, so your teammates' agents still read version ${mirror.version}. Shorten it to what the work needs; Peer shares it again then.`,
+      );
+      this.log("shared.too_large", {
+        session: session.id,
+        scope: mirror.scope,
+        bytes: Buffer.byteLength(text),
+      });
+      return;
+    }
     mirror.unsent = true;
     await this.pushShared(session, mirror);
   }

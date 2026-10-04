@@ -556,6 +556,23 @@ const program = Effect.gen(function* () {
     ),
     "and reaches it once",
   );
+  const kept = NodeFS.readFileSync(sharedPath, "utf8");
+  NodeFS.writeFileSync(sharedPath, `${kept}\n${"- an endless log line\n".repeat(2000)}`);
+  const tooLong = context(
+    anas.hook("PostToolUse", {
+      tool_name: "Write",
+      tool_input: { file_path: sharedPath, content: "(too long)" },
+    }),
+  );
+  check(
+    tooLong?.includes("over 32 KiB") === true,
+    "a keeper whose context outgrows what the hub keeps is told to shorten it",
+  );
+  NodeFS.writeFileSync(sharedPath, kept);
+  anas.hook("PostToolUse", {
+    tool_name: "Write",
+    tool_input: { file_path: sharedPath, content: "(shortened)" },
+  });
   const keeperBack = context(anas.hook("SessionStart", { source: "compact" }));
   told(`${anas.name} (after a compaction)`, keeperBack);
   check(
