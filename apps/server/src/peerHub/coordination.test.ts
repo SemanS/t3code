@@ -2,6 +2,7 @@ import { assert, describe, it } from "@effect/vitest";
 
 import {
   claudeHookGroups,
+  contextSkill,
   decideEdit,
   editedFile,
   emptyMemory,
@@ -10,10 +11,15 @@ import {
   mentionsCli,
   newsFor,
   repositoryPath,
+  startContext,
+  taskNamed,
+  teamLines,
+  teamNews,
   withClaudeHooks,
+  withContextAccess,
   type CoordinationView,
 } from "./coordination.ts";
-import type { HubCoordSession, HubOverlap } from "./hubApi.ts";
+import type { HubCoordSession, HubFinding, HubOverlap } from "./hubApi.ts";
 
 const CLI = "/Users/ana/.peer/userdata/coord/peer";
 const nameOf = (email: string) => (email.startsWith("vir") ? "Vir" : "Slavo");
@@ -283,5 +289,116 @@ describe("paths", () => {
     assert.strictEqual(repositoryPath("/w/app", "/w/app/src/pay.ts"), "src/pay.ts");
     assert.isNull(repositoryPath("/w/app", "/w/other/x.ts"));
     assert.isNull(repositoryPath("/w/app", "/w/app"));
+  });
+});
+
+describe("working context", () => {
+  const finding = (id: string, text: string, extra: Partial<HubFinding> = {}): HubFinding => ({
+    id,
+    project: "app",
+    text,
+    email: "vir@acme.test",
+    session: "claude:vir",
+    environment: "vir-laptop",
+    at: "2026-10-04T10:00:00Z",
+    ...extra,
+  });
+  const me = {
+    id: "claude:me",
+    project: "app",
+    task: "krk-335",
+    files: ["src/net.rs"],
+    claims: [],
+  };
+  const taskName = (task: string) => (task === "krk-335" ? "KRK-335 · DNS errors" : task);
+
+  it("shares only the bullet lines under For the team", () => {
+    const markdown = [
+      "# Working context",
+      "- private: I suspect the resolver",
+      "## For the team",
+      "<!-- what teammates' agents should know -->",
+      "- DNS lookup fails when Cloudflare returns an empty AAAA answer",
+      "plain sentence, not a bullet",
+      "* src/net.rs resolve() retries only on timeouts",
+      "- DNS lookup fails when Cloudflare returns an empty AAAA answer",
+      "## Tried and failed",
+      "- raising the timeout",
+    ].join("\n");
+    assert.deepStrictEqual(teamLines(markdown), [
+      "DNS lookup fails when Cloudflare returns an empty AAAA answer",
+      "src/net.rs resolve() retries only on timeouts",
+    ]);
+    assert.deepStrictEqual(teamLines("# nothing shared"), []);
+  });
+
+  it("brings an agent the findings on its task or its files, once, never its own", () => {
+    const findings = [
+      finding("f1", "Cloudflare returns an empty AAAA answer", { task: "krk-335" }),
+      finding("f2", "net.rs: resolve() swallows NXDOMAIN"),
+      finding("f3", "The billing export is slow", { task: "krk-900" }),
+      finding("f4", "My own finding", { session: "claude:me", task: "krk-335" }),
+    ];
+    const news = teamNews({ me, findings, heard: new Set(), nameOf: () => "Vir", taskName });
+    assert.deepStrictEqual(news?.ids, ["f1", "f2"]);
+    assert.include(news?.text, "Peer · your team's agents found on KRK-335 · DNS errors:");
+    assert.include(news?.text, "- Vir's agent: Cloudflare returns an empty AAAA answer");
+    assert.isNull(
+      teamNews({ me, findings, heard: new Set(["f1", "f2"]), nameOf: () => "Vir", taskName }),
+    );
+  });
+
+  it("gives a session back its context after a compaction, with the team's findings on its task first", () => {
+    const start = startContext({
+      path: "/peer/contexts/app/me.md",
+      saved: "# Working context\nGoal: fix DNS errors\n## Now\n- reading src/net.rs",
+      me,
+      findings: [
+        finding("f3", "The billing export is slow", { task: "krk-900" }),
+        finding("f1", "Cloudflare returns an empty AAAA answer", { task: "krk-335" }),
+      ],
+      nameOf: () => "Vir",
+      taskName,
+    });
+    assert.include(start.text, contextSkill("/peer/contexts/app/me.md"));
+    assert.include(
+      start.text,
+      "Your working context as you left it:\n\n# Working context\nGoal: fix DNS errors",
+    );
+    assert.isBelow(
+      start.text.indexOf("Cloudflare returns"),
+      start.text.indexOf("The billing export"),
+      "its own task comes first",
+    );
+    assert.include(start.text, "- Vir's agent (krk-900): The billing export is slow");
+    assert.deepStrictEqual(start.ids, ["f1", "f3"]);
+  });
+
+  it("names a task by its key as a whole token", () => {
+    const tasks = [
+      { id: "krk-335", key: "KRK-335" },
+      { id: "krk-33", key: "KRK-33" },
+    ];
+    assert.strictEqual(taskNamed(tasks, ["fix/krk-335-dns", undefined]), "krk-335");
+    assert.isUndefined(taskNamed(tasks, ["KRK-3350"]));
+  });
+
+  it("lets agents read and edit only Peer's contexts folder, and takes the rule back out", () => {
+    const theirs = {
+      permissions: { allow: ["Bash(npm test)"], deny: ["Read(./.env)"] },
+      model: "opus",
+    };
+    const given = withContextAccess(theirs, "/Users/ana/.peer/userdata/coord/contexts", true);
+    assert.deepStrictEqual((given.permissions as { allow: string[] }).allow, [
+      "Bash(npm test)",
+      "Read(//Users/ana/.peer/userdata/coord/contexts/**)",
+      "Edit(//Users/ana/.peer/userdata/coord/contexts/**)",
+    ]);
+    const twice = withContextAccess(given, "/Users/ana/.peer/userdata/coord/contexts", true);
+    assert.deepStrictEqual(twice, given, "installing again changes nothing");
+    assert.deepStrictEqual(
+      withContextAccess(twice, "/Users/ana/.peer/userdata/coord/contexts", false),
+      theirs,
+    );
   });
 });

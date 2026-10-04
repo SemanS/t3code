@@ -9,6 +9,8 @@
 //   3. Ana's agent, idle, wakes up with Bob's note, answers and resolves the overlap.
 //   4. Bob's agent hears the answer at its next step; neither ever reads the other's conversation.
 //   5. Under the `ask` policy, Bob himself is asked instead, once.
+//   6. Working context: an agent's "For the team" line reaches the other agent once, and a
+//      compaction gives an agent its own context back.
 //
 // It prints what each agent was told and leaves both computers' coordination logs.
 //
@@ -364,7 +366,8 @@ const program = Effect.gen(function* () {
   const bobs = agent(bob, "lab-bob", "w1:p1");
 
   // 1. Ana's agent changes pricing alone: nothing to hear.
-  told(anas.name, context(anas.hook("SessionStart", { source: "startup" })));
+  const anaStart = context(anas.hook("SessionStart", { source: "startup" }));
+  told(anas.name, anaStart);
   anas.hook("UserPromptSubmit", { prompt: "Add 20% VAT to price() in src/pricing.ts" });
   const first = anas.edit("PreToolUse", "src/pricing.ts");
   check(
@@ -444,6 +447,51 @@ const program = Effect.gen(function* () {
   check(
     decision(bobs.edit("PreToolUse", "src/format.ts")) === undefined,
     "once approved, not asked again",
+  );
+
+  // 6. Working context (experimental): what an agent shares reaches the other agent once, and a
+  //    compaction gives an agent its own context back.
+  const anaContext = /working context in (\S+\.md)\./.exec(anaStart ?? "")?.[1];
+  check(
+    anaContext !== undefined && NodeFS.existsSync(anaContext),
+    "a session starts with a working context file of its own",
+  );
+  const own = anas.hook("PreToolUse", {
+    tool_name: "Edit",
+    tool_input: { file_path: anaContext, old_string: "a", new_string: "b" },
+  });
+  check(decision(own) === "allow", "its agent edits it without being asked");
+  NodeFS.writeFileSync(
+    anaContext,
+    [
+      "# Working context",
+      "Goal: VAT on totalPrice()",
+      "## Now",
+      "- waiting for Bob's rename of price()",
+      "## For the team",
+      "- src/pricing.ts: VAT is added in one place, applyVat(), after the rename lands",
+    ].join("\n"),
+  );
+  anas.hook("PostToolUse", {
+    tool_name: "Write",
+    tool_input: { file_path: anaContext, content: "(the context above)" },
+  });
+  yield* Effect.promise(() => sleep(3500));
+  const shared = bobs.edit("PostToolUse", "src/pricing.ts");
+  told(`${bobs.name} (next step)`, context(shared));
+  check(
+    context(shared)?.includes("VAT is added in one place, applyVat()"),
+    "the other agent hears the finding on its file at its next step",
+  );
+  check(
+    !(context(bobs.edit("PostToolUse", "src/pricing.ts")) ?? "").includes("applyVat()"),
+    "and hears it once",
+  );
+  const back = context(anas.hook("SessionStart", { source: "compact" }));
+  told(`${anas.name} (after a compaction)`, back);
+  check(
+    back?.includes("waiting for Bob's rename of price()"),
+    "after a compaction the agent gets its own working context back",
   );
 
   for (const computer of [ana, bob]) {

@@ -377,6 +377,19 @@ export const PeerOverlap = Schema.Struct({
 export type PeerOverlap = typeof PeerOverlap.Type;
 
 /** Agents on the same project staying out of each other's way (experimental). */
+/** What an agent found for its team: a line of the "For the team" part of its working context. */
+export const PeerFinding = Schema.Struct({
+  id: Schema.String,
+  workspace: Schema.String,
+  project: Schema.String,
+  task: Schema.optional(Schema.String),
+  text: Schema.String,
+  /** Whose agent found it. */
+  email: Schema.String,
+  at: Schema.String,
+});
+export type PeerFinding = typeof PeerFinding.Type;
+
 export const PeerCoordinationState = Schema.Struct({
   enabled: Schema.Boolean,
   policy: PeerCoordinationPolicy,
@@ -386,6 +399,8 @@ export const PeerCoordinationState = Schema.Struct({
   logPath: Schema.String,
   sessions: Schema.Array(PeerCoordSession),
   overlaps: Schema.Array(PeerOverlap),
+  /** What the agents on your projects found for the team, newest first. */
+  findings: Schema.Array(PeerFinding),
 });
 export type PeerCoordinationState = typeof PeerCoordinationState.Type;
 

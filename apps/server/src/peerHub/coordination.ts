@@ -17,7 +17,7 @@
  */
 import type { PeerCoordinationPolicy } from "@t3tools/contracts";
 
-import type { HubCoordSession, HubOverlap } from "./hubApi.ts";
+import type { HubCoordSession, HubFinding, HubOverlap } from "./hubApi.ts";
 
 /** Claude Code tools that change a file. */
 export const EDIT_TOOLS: ReadonlySet<string> = new Set([
@@ -436,5 +436,194 @@ export function withClaudeHooks(
 export function hasClaudeHooks(settings: Settings, marker: string): boolean {
   return Object.values(settings.hooks ?? {}).some((list) =>
     list.some((group) => (group.hooks ?? []).some((entry) => isPeerEntry(entry, marker))),
+  );
+}
+
+// ---- working context (experimental, after Context Language Models, arXiv:2609.37725) ----
+//
+// Each agent session keeps a working context file it curates itself. After a compaction or a
+// resume Peer puts it back into the session, so what carries over is what the agent chose, not
+// the harness's summary. Its "For the team" lines are all that leaves the computer: they become
+// the project's findings, which other agents hear when they concern their task or their files.
+// The wording below is the experiment's skill; tune it from logged runs, not by guessing.
+
+function cut(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+/** How an agent keeps its working context, said at the start of each session. */
+export function contextSkill(path: string): string {
+  return [
+    `Peer keeps your working context in ${path}. It is yours: keep it short (under about 60 lines) and current, and edit it with your usual tools whenever your goal, plan, findings or blockers change. It is not a log.`,
+    "Keep: the goal; what you are doing now; findings with exact file names and symbols; decisions and why; hypotheses marked unconfirmed; approaches that failed; what you need from whom. Drop what no longer matters and sum up finished work in a line. After a compaction or a resume, this file is what you get back.",
+    `Under "## For the team" keep 1-5 bullet lines (- ...) your teammates' agents should know: findings that hold beyond your session, what you change and will not change. Peer shares only those lines with agents on the same project. Never put secrets there.`,
+  ].join("\n");
+}
+
+/** A new session's working context, before its agent makes it its own. */
+export function contextTemplate(goal: string, task: string | undefined): string {
+  return [
+    "# Working context",
+    "",
+    `Goal: ${goal}${task === undefined ? "" : ` (${task})`}`,
+    "",
+    "## Now",
+    "",
+    "## Findings",
+    "",
+    "## Tried and failed",
+    "",
+    "## For the team",
+    "",
+  ].join("\n");
+}
+
+/** The bullet lines under "## For the team": what the agent shares with its project. */
+export function teamLines(markdown: string): string[] {
+  const lines = markdown.split("\n");
+  const start = lines.findIndex((line) => /^#{2,3}\s+for the team\s*$/i.test(line.trim()));
+  if (start < 0) return [];
+  const found: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    if (/^#{1,3}\s/.test(line.trim())) break;
+    const bullet = /^\s*(?:[-*+]|\d+[.)])\s+(.+)$/.exec(line)?.[1]?.trim();
+    if (bullet === undefined || bullet.startsWith("<!--") || found.includes(bullet)) continue;
+    found.push(cut(bullet, 300));
+    if (found.length === 5) break;
+  }
+  return found;
+}
+
+export interface ContextHolder {
+  readonly id: string;
+  readonly project: string;
+  readonly task: string | undefined;
+  readonly files: ReadonlyArray<string>;
+  readonly claims: ReadonlyArray<string>;
+}
+
+function names(finding: HubFinding, paths: ReadonlyArray<string>): boolean {
+  return paths.some((path) => {
+    const clean = path.replace(/\/$/, "");
+    const base = clean.split("/").at(-1) ?? clean;
+    return (
+      finding.text.includes(clean) ||
+      (base.includes(".") && base.length >= 6 && finding.text.includes(base))
+    );
+  });
+}
+
+/**
+ * What other agents found that this one should hear now: findings on its task,
+ * or naming a file it changed or is about to change. Each is heard once.
+ */
+export function teamNews(input: {
+  readonly me: ContextHolder;
+  readonly findings: ReadonlyArray<HubFinding>;
+  readonly heard: ReadonlySet<string>;
+  readonly nameOf: (email: string) => string;
+  readonly taskName: (task: string) => string;
+}): { readonly text: string; readonly ids: ReadonlyArray<string> } | null {
+  const { me } = input;
+  const relevant = input.findings
+    .filter(
+      (finding) =>
+        finding.session !== me.id &&
+        finding.project === me.project &&
+        !input.heard.has(finding.id) &&
+        ((me.task !== undefined && finding.task === me.task) ||
+          names(finding, [...me.files, ...me.claims])),
+    )
+    .slice(0, 5);
+  if (relevant.length === 0) return null;
+  return {
+    text: [
+      `Peer · your team's agents found${me.task === undefined ? "" : ` on ${input.taskName(me.task)}`}:`,
+      ...relevant.map((finding) => `- ${input.nameOf(finding.email)}'s agent: ${finding.text}`),
+    ].join("\n"),
+    ids: relevant.map((finding) => finding.id),
+  };
+}
+
+/**
+ * What a session hears when it starts, resumes or comes back from a compaction:
+ * how to keep its working context, the context itself when it had one, and what
+ * the team's agents found on its task (first) and its project.
+ */
+export function startContext(input: {
+  readonly path: string;
+  readonly saved: string | undefined;
+  readonly me: ContextHolder;
+  readonly findings: ReadonlyArray<HubFinding>;
+  readonly nameOf: (email: string) => string;
+  readonly taskName: (task: string) => string;
+}): { readonly text: string; readonly ids: ReadonlyArray<string> } {
+  const { me } = input;
+  const team = input.findings
+    .filter((finding) => finding.session !== me.id && finding.project === me.project)
+    .toSorted(
+      (a, b) =>
+        Number(b.task !== undefined && b.task === me.task) -
+        Number(a.task !== undefined && a.task === me.task),
+    )
+    .slice(0, 8);
+  const parts = [contextSkill(input.path)];
+  if (input.saved !== undefined && input.saved.trim() !== "") {
+    parts.push(`Your working context as you left it:\n\n${cut(input.saved.trim(), 8_000)}`);
+  }
+  if (team.length > 0) {
+    parts.push(
+      [
+        "What your team's agents found on this project (newest first; check before relying on it):",
+        ...team.map(
+          (finding) =>
+            `- ${input.nameOf(finding.email)}'s agent${finding.task !== undefined && finding.task !== me.task ? ` (${input.taskName(finding.task)})` : ""}: ${finding.text}`,
+        ),
+      ].join("\n"),
+    );
+  }
+  return { text: parts.join("\n\n"), ids: team.map((finding) => finding.id) };
+}
+
+/** The task a key names in a branch or label, when exactly one task's key appears as a whole token. */
+export function taskNamed(
+  tasks: ReadonlyArray<{ readonly id: string; readonly key?: string | undefined }>,
+  texts: ReadonlyArray<string | undefined>,
+): string | undefined {
+  const haystacks = texts
+    .filter((t): t is string => t !== undefined && t !== "")
+    .map((t) => t.toLowerCase());
+  const named = tasks.filter((task) => {
+    if (task.key === undefined) return false;
+    const key = task.key.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(`(^|[^a-z0-9])${key}($|[^a-z0-9])`);
+    return haystacks.some((text) => pattern.test(text));
+  });
+  return named.length === 1 ? named[0]?.id : undefined;
+}
+
+/** Claude Code permission rules that let agents read and edit their working contexts, unasked. */
+export function withContextAccess(settings: Settings, dir: string, install: boolean): Settings {
+  const absolute = `/${dir.replace(/^\/+/, "")}`;
+  const ours = [`Read(/${absolute}/**)`, `Edit(/${absolute}/**)`];
+  const permissions = (settings.permissions ?? {}) as Record<string, unknown>;
+  const allow = Array.isArray(permissions.allow)
+    ? (permissions.allow as unknown[]).filter((rule) => !ours.includes(String(rule)))
+    : [];
+  const next = install ? [...allow, ...ours] : allow;
+  const { allow: _previous, ...restPermissions } = permissions;
+  const merged = next.length > 0 ? { ...restPermissions, allow: next } : restPermissions;
+  const { permissions: _old, ...rest } = settings;
+  return Object.keys(merged).length > 0 ? { ...rest, permissions: merged } : rest;
+}
+
+/** Whether Claude Code settings already let agents read and edit their working contexts. */
+export function hasContextAccess(settings: Settings, dir: string): boolean {
+  const absolute = `/${dir.replace(/^\/+/, "")}`;
+  const allow = (settings.permissions as { allow?: unknown } | undefined)?.allow;
+  return (
+    Array.isArray(allow) &&
+    allow.includes(`Read(/${absolute}/**)`) &&
+    allow.includes(`Edit(/${absolute}/**)`)
   );
 }

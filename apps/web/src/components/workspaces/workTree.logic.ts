@@ -71,6 +71,12 @@ export interface WorkTaskNode {
   readonly threads: ReadonlyArray<WorkThreadNode>;
   /** Its creator, the project's leads and the workspace's admins may remove it. */
   readonly removable: boolean;
+  /** What the team's agents found on it, newest first. */
+  readonly findings: ReadonlyArray<{
+    readonly id: string;
+    readonly person: string;
+    readonly text: string;
+  }>;
 }
 
 export interface WorkAreaNode {
@@ -291,6 +297,18 @@ function projectTree(input: {
       threads,
       removable:
         task.createdBy === me || state.project.role === "lead" || workspace.role !== "member",
+      findings: status.coordination.findings
+        .filter(
+          (finding) =>
+            finding.workspace === workspace.slug &&
+            finding.project === state.project.id &&
+            finding.task === task.id,
+        )
+        .map((finding) => ({
+          id: finding.id,
+          person: personName(state, finding.email),
+          text: finding.text,
+        })),
     });
   }
   // Areas the project declares come first, in its order; then those tasks name; then no area.

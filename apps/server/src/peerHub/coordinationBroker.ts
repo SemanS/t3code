@@ -19,6 +19,7 @@ import type { PeerCoordinationPolicy, PeerWorkStatus } from "@t3tools/contracts"
 import {
   announcementKey,
   contestKey,
+  contextTemplate,
   coordinationScripts,
   decideEdit,
   editedFile,
@@ -28,12 +29,22 @@ import {
   newsFor,
   repositoryPath,
   shortId,
+  startContext,
   statusText,
+  teamLines,
+  teamNews,
   touches,
+  type ContextHolder,
   type CoordinationView,
   type SessionMemory,
 } from "./coordination.ts";
-import type { HubCoordSession, HubCoordView, HubOverlap, ReportedSession } from "./hubApi.ts";
+import type {
+  HubCoordSession,
+  HubCoordView,
+  HubFinding,
+  HubOverlap,
+  ReportedSession,
+} from "./hubApi.ts";
 
 export interface CheckoutPlace {
   readonly workspace: string;
@@ -80,6 +91,20 @@ export interface BrokerDeps {
   readonly notify: (title: string, body: string) => void;
   /** What people see changed. */
   readonly changed: () => void;
+  /** Where agents keep their working contexts, one file per session. */
+  readonly contextsDir: string;
+  /**
+   * The task a session works on: the one its herdr agent was put on, else the
+   * one its branch or label names by key.
+   */
+  readonly taskOf: (
+    workspace: string,
+    project: string,
+    session: string,
+    texts: ReadonlyArray<string | undefined>,
+  ) => string | undefined;
+  /** A task as people name it, e.g. `KRK-335 · DNS errors`. */
+  readonly taskName: (workspace: string, project: string, task: string) => string;
 }
 
 interface LocalSession {
@@ -103,6 +128,17 @@ interface LocalSession {
   readonly memory: SessionMemory;
   /** Files whose edit its person was asked about: the edit happening means they approved. */
   readonly asked: Map<string, ReadonlyArray<string>>;
+  /** The file the agent keeps its working context in. */
+  readonly contextPath: string;
+  /** Its "For the team" lines as last read: what it shares with the project. */
+  team: ReadonlyArray<string>;
+  readonly startedAt: number;
+  /** When the agent last changed its working context, or when Peer created it. */
+  contextAt: number;
+  nudgedAt: number;
+  task: string | undefined;
+  /** Findings of other agents it has heard. */
+  readonly heard: Set<string>;
 }
 
 interface Waiter {
@@ -121,8 +157,13 @@ const FRESH_MS = 500;
 const WAIT_MS = 25 * 60 * 1000;
 const LOG_ROTATE_BYTES = 20 * 1024 * 1024;
 const MAX_FILES = 200;
+/** An agent whose working context has not changed for this long, while it works, is reminded once. */
+const NUDGE_MS = 20 * 60 * 1000;
 
 const clip = (text: string, max: number) => text.replace(/\s+/g, " ").trim().slice(0, max);
+
+/** A part of a path made of one id: no separators, no dots to climb with. */
+const safePart = (part: string) => part.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 120);
 
 export class CoordinationBroker {
   private server: NodeHttp.Server | null = null;
@@ -214,16 +255,19 @@ export class CoordinationBroker {
       HubCoordSession & { readonly workspace: string; readonly local: boolean }
     >;
     readonly overlaps: ReadonlyArray<HubOverlap & { readonly workspace: string }>;
+    readonly findings: ReadonlyArray<HubFinding & { readonly workspace: string }>;
   } {
     const sessions = [];
     const overlaps = [];
+    const findings = [];
     for (const [workspace, view] of this.views) {
       for (const session of this.merged(workspace, view).sessions) {
         sessions.push({ ...session, workspace, local: this.sessions.has(session.id) });
       }
       for (const overlap of view.overlaps) overlaps.push({ ...overlap, workspace });
+      for (const finding of view.findings ?? []) findings.push({ ...finding, workspace });
     }
-    return { sessions, overlaps };
+    return { sessions, overlaps, findings };
   }
 
   /** A person's note on an overlap, from Peer. */
@@ -314,6 +358,8 @@ export class CoordinationBroker {
       return null;
     }
     const title = pane === undefined ? undefined : this.deps.herdrTitle(pane);
+    const branch = await this.deps.branchOf(place.root);
+    const now = Date.now();
     const session: LocalSession = {
       id,
       agent: "claude",
@@ -325,14 +371,29 @@ export class CoordinationBroker {
       transcript: typeof body.transcript_path === "string" ? body.transcript_path : undefined,
       label: title ?? "Claude session",
       labelFromPrompt: false,
-      branch: await this.deps.branchOf(place.root),
+      branch,
       status: "idle",
       files: [],
       claims: [],
       intent: undefined,
-      lastActivity: Date.now(),
+      lastActivity: now,
       memory: emptyMemory(),
       asked: new Map(),
+      contextPath: NodePath.join(
+        this.deps.contextsDir,
+        safePart(place.workspace),
+        safePart(place.project),
+        `${safePart(sid)}.md`,
+      ),
+      team: [],
+      startedAt: now,
+      contextAt: now,
+      nudgedAt: 0,
+      task: this.deps.taskOf(place.workspace, place.project, `herdr:claude:${sid}`, [
+        branch,
+        title,
+      ]),
+      heard: new Set(),
     };
     this.sessions.set(id, session);
     this.log("session.started", {
@@ -400,7 +461,10 @@ export class CoordinationBroker {
         this.touch(session);
         session.status = "idle";
         this.markDirty();
-        return context(event, this.news(session));
+        const source = typeof body.source === "string" ? body.source : "startup";
+        const start = await this.startContextFor(session, source);
+        const news = this.news(session, { team: false });
+        return context(event, news === null ? start : `${start}\n\n${news}`);
       }
       case "UserPromptSubmit": {
         this.touch(session);
@@ -421,6 +485,10 @@ export class CoordinationBroker {
         return this.beforeTool(session, body);
       case "PostToolUse": {
         this.touch(session);
+        if (editedFile(body.tool_name, body.tool_input) === session.contextPath) {
+          await this.readTeamLines(session);
+          return context(event, this.news(session));
+        }
         const file = this.fileOf(session, body);
         if (file !== null) {
           session.files = [...session.files.filter((f) => f !== file), file].slice(-MAX_FILES);
@@ -433,7 +501,9 @@ export class CoordinationBroker {
           }
           this.markDirty();
         }
-        return context(event, this.news(session));
+        const news = this.news(session);
+        const nudge = this.nudge(session);
+        return context(event, [news, nudge].filter((part) => part !== null).join("\n\n") || null);
       }
       case "Stop":
         session.status = "idle";
@@ -486,6 +556,15 @@ export class CoordinationBroker {
       // On the session's PATH it still runs; it only is not let through without asking.
       this.log("cli.unplain", { session: session.id, command });
       return null;
+    }
+    if (editedFile(body.tool_name, body.tool_input) === session.contextPath) {
+      return {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "allow",
+          permissionDecisionReason: "The agent's own working context",
+        },
+      };
     }
     const file = this.fileOf(session, body);
     if (file === null) return this.newsContext("PreToolUse", session);
@@ -553,8 +632,11 @@ export class CoordinationBroker {
       : { hookSpecificOutput: { hookEventName: event, additionalContext: text } };
   }
 
-  /** What happened on the session's overlaps since it last heard, marked as heard. */
-  private news(session: LocalSession): string | null {
+  /**
+   * What happened on the session's overlaps since it last heard, and (unless
+   * `team` is false) what other agents found that concerns it, marked as heard.
+   */
+  private news(session: LocalSession, options: { readonly team?: boolean } = {}): string | null {
     const news = newsFor({
       me: this.asHub(session),
       view: this.merged(session.workspace, this.views.get(session.workspace)),
@@ -562,16 +644,125 @@ export class CoordinationBroker {
       nameOf: this.nameOf(session.workspace),
       cli: this.cli,
     });
-    if (news === null) return null;
-    for (const id of news.announced) session.memory.announced.add(id);
-    for (const id of news.seen) session.memory.seenNotes.add(id);
-    this.log("news", {
-      session: session.id,
-      text: news.text,
-      announced: news.announced,
-      seen: news.seen,
+    if (news !== null) {
+      for (const id of news.announced) session.memory.announced.add(id);
+      for (const id of news.seen) session.memory.seenNotes.add(id);
+      this.log("news", {
+        session: session.id,
+        text: news.text,
+        announced: news.announced,
+        seen: news.seen,
+      });
+    }
+    const team =
+      options.team === false
+        ? null
+        : teamNews({
+            me: this.holder(session),
+            findings: this.findingsOf(session.workspace),
+            heard: session.heard,
+            nameOf: this.nameOf(session.workspace),
+            taskName: (task) => this.deps.taskName(session.workspace, session.project, task),
+          });
+    if (team !== null) {
+      for (const id of team.ids) session.heard.add(id);
+      this.log("finding.delivered", { session: session.id, findings: team.ids, text: team.text });
+    }
+    const parts = [news?.text ?? null, team?.text ?? null].filter((part) => part !== null);
+    return parts.length === 0 ? null : parts.join("\n\n");
+  }
+
+  private holder(session: LocalSession): ContextHolder {
+    return {
+      id: session.id,
+      project: session.project,
+      task: session.task,
+      files: session.files,
+      claims: session.claims,
+    };
+  }
+
+  private findingsOf(workspace: string): ReadonlyArray<HubFinding> {
+    return this.views.get(workspace)?.findings ?? [];
+  }
+
+  // ---- working context (experimental) ----
+
+  /**
+   * What a session hears when it starts: how to keep its working context (made
+   * now if it has none), the context itself after a compaction or a resume,
+   * and the team's findings on its task and project.
+   */
+  private async startContextFor(session: LocalSession, source: string): Promise<string> {
+    await NodeFSP.mkdir(NodePath.dirname(session.contextPath), { recursive: true });
+    let saved: string | undefined;
+    try {
+      saved = await NodeFSP.readFile(session.contextPath, "utf8");
+      session.contextAt = (await NodeFSP.stat(session.contextPath)).mtimeMs;
+    } catch {
+      await NodeFSP.writeFile(
+        session.contextPath,
+        contextTemplate(
+          session.label,
+          session.task === undefined
+            ? undefined
+            : this.deps.taskName(session.workspace, session.project, session.task),
+        ),
+      );
+    }
+    session.team = saved === undefined ? [] : teamLines(saved);
+    // What the team found is worth a fresh look when a session starts.
+    await this.syncNow(session.workspace, 1500);
+    const start = startContext({
+      path: session.contextPath,
+      saved: source === "compact" || source === "resume" ? saved : undefined,
+      me: this.holder(session),
+      findings: this.findingsOf(session.workspace),
+      nameOf: this.nameOf(session.workspace),
+      taskName: (task) => this.deps.taskName(session.workspace, session.project, task),
     });
-    return news.text;
+    for (const id of start.ids) session.heard.add(id);
+    this.log("context.injected", {
+      session: session.id,
+      source,
+      path: session.contextPath,
+      saved: saved?.length ?? 0,
+      findings: start.ids,
+      bytes: start.text.length,
+    });
+    return start.text;
+  }
+
+  /** The agent changed its working context: what it shares with the team may have changed. */
+  private async readTeamLines(session: LocalSession) {
+    let text: string;
+    try {
+      text = await NodeFSP.readFile(session.contextPath, "utf8");
+    } catch {
+      return;
+    }
+    session.contextAt = Date.now();
+    const team = teamLines(text);
+    const changed = team.join("\n") !== session.team.join("\n");
+    session.team = team;
+    this.log("context.updated", { session: session.id, bytes: text.length, team, changed });
+    if (changed) this.markDirty();
+  }
+
+  /** A working agent whose context went stale is reminded once in a while, in a line. */
+  private nudge(session: LocalSession): string | null {
+    const now = Date.now();
+    if (
+      now - session.startedAt < NUDGE_MS ||
+      now - session.contextAt < NUDGE_MS ||
+      now - session.nudgedAt < NUDGE_MS
+    ) {
+      return null;
+    }
+    session.nudgedAt = now;
+    const minutes = Math.round((now - session.contextAt) / 60_000);
+    this.log("context.nudged", { session: session.id, minutes });
+    return `Peer: your working context (${session.contextPath}) has not changed for ${minutes} minutes. Update it if your goal, findings or plan moved.`;
   }
 
   // ---- waking idle agents ----
@@ -582,7 +773,8 @@ export class CoordinationBroker {
   ): Promise<string> {
     const session = await this.sessionFor(body, headerOf(headers, "x-herdr-pane"));
     if (session === null) return "";
-    const ready = this.news(session);
+    // Findings wait for the agent's next step; only a note on an overlap wakes it.
+    const ready = this.news(session, { team: false });
     if (ready !== null) {
       this.log("wake", { session: session.id, text: ready, immediate: true });
       return ready;
@@ -614,7 +806,8 @@ export class CoordinationBroker {
         waiter.answer("");
         continue;
       }
-      const text = this.news(session);
+      // Findings wait for the agent's next step; only a note on an overlap wakes it.
+      const text = this.news(session, { team: false });
       if (text !== null) {
         this.waiters.delete(waiter);
         this.log("wake", { session: session.id, text });
@@ -867,8 +1060,10 @@ export class CoordinationBroker {
         ...(s.branch === undefined ? {} : { branch: s.branch }),
         status: s.status,
         ...(s.intent === undefined ? {} : { intent: s.intent }),
+        ...(s.task === undefined ? {} : { task: s.task }),
         files: s.files,
         claims: s.claims,
+        findings: s.team,
       }));
   }
 

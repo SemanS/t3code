@@ -91,7 +91,14 @@ import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as Settings from "../serverSettings.ts";
 import { explainCloneFailure, explainGitHubCloneFailure } from "./cloneFailure.ts";
-import { claudeHookGroups, hasClaudeHooks, withClaudeHooks } from "./coordination.ts";
+import {
+  claudeHookGroups,
+  hasClaudeHooks,
+  hasContextAccess,
+  taskNamed,
+  withClaudeHooks,
+  withContextAccess,
+} from "./coordination.ts";
 import {
   CoordinationBroker,
   readJsonSettings,
@@ -597,11 +604,24 @@ const make = Effect.gen(function* () {
     process.env.CLAUDE_CONFIG_DIR?.trim() || NodePath.join(NodeOS.homedir(), ".claude"),
     "settings.json",
   );
+  /** Agents' working contexts, one file per session (experimental). */
+  const coordinationContexts = NodePath.join(coordinationDir, "contexts");
   let broker: CoordinationBroker | null = null;
-  let claudeHooksInstalled = hasClaudeHooks(
-    (yield* Effect.promise(() => readJsonSettings(claudeSettingsPath))) ?? {},
-    coordinationDir,
-  );
+  const claudeSettings = yield* Effect.promise(() => readJsonSettings(claudeSettingsPath));
+  let claudeHooksInstalled = hasClaudeHooks(claudeSettings ?? {}, coordinationDir);
+  // Hooks installed by an older Peer still need their agents let into their working contexts.
+  if (
+    claudeSettings !== null &&
+    claudeHooksInstalled &&
+    !hasContextAccess(claudeSettings, coordinationContexts)
+  ) {
+    yield* Effect.promise(() =>
+      writeJsonSettings(
+        claudeSettingsPath,
+        withContextAccess(claudeSettings, coordinationContexts, true),
+      ).catch(() => undefined),
+    );
+  }
 
   const persist = (persisted: PersistedState) =>
     Effect.tryPromise(async () => {
@@ -762,7 +782,7 @@ const make = Effect.gen(function* () {
   /** Rebuilds the status, publishes it when it changed, and hands the policy its new state. */
   /** Coordination as people see it: the settings, and what the broker last heard. */
   const coordinationStatus = (s: RuntimeState): PeerHubStatus["coordination"] => {
-    const snapshot = broker?.snapshot() ?? { sessions: [], overlaps: [] };
+    const snapshot = broker?.snapshot() ?? { sessions: [], overlaps: [], findings: [] };
     return {
       enabled: s.persisted.coordination?.enabled ?? false,
       policy: s.persisted.coordination?.policy ?? "coordinate",
@@ -781,6 +801,15 @@ const make = Effect.gen(function* () {
         files: session.files,
         claims: session.claims,
         local: session.local,
+      })),
+      findings: snapshot.findings.map((finding) => ({
+        id: finding.id,
+        workspace: finding.workspace,
+        project: finding.project,
+        ...(finding.task === undefined ? {} : { task: finding.task }),
+        text: finding.text,
+        email: finding.email,
+        at: finding.at,
       })),
       overlaps: snapshot.overlaps.map((overlap) => ({
         id: overlap.id,
@@ -1927,6 +1956,26 @@ const make = Effect.gen(function* () {
         },
         notify: (title, body) => void Herdr.notifyHerdr(title, body),
         changed: () => void Effect.runFork(publish.pipe(Effect.ignore)),
+        contextsDir: coordinationContexts,
+        taskOf: (workspace, project, key, texts) => {
+          const s = currentState();
+          const assigned = s.persisted.assignments?.[key];
+          if (
+            assigned !== undefined &&
+            assigned.workspace === workspace &&
+            assigned.project === project
+          ) {
+            return assigned.task;
+          }
+          return taskNamed(s.work.get(sharedKey(workspace, project))?.tasks ?? [], texts);
+        },
+        taskName: (workspace, project, task) => {
+          const found = currentState()
+            .work.get(sharedKey(workspace, project))
+            ?.tasks.find((candidate) => candidate.id === task);
+          if (found === undefined) return task;
+          return found.key === undefined ? found.title : `${found.key} · ${found.title}`;
+        },
       });
       await created.start();
       broker = created;
@@ -1973,7 +2022,11 @@ const make = Effect.gen(function* () {
           });
           await writeJsonSettings(
             claudeSettingsPath,
-            withClaudeHooks(settings, groups, coordinationDir, install),
+            withContextAccess(
+              withClaudeHooks(settings, groups, coordinationDir, install),
+              coordinationContexts,
+              install,
+            ),
           );
           claudeHooksInstalled = install;
         },

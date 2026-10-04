@@ -24,6 +24,7 @@ import {
   EllipsisIcon,
   EyeIcon,
   GitBranchIcon,
+  LightbulbIcon,
   MessageCircleQuestionIcon,
   PlusIcon,
   Share2Icon,
@@ -930,6 +931,7 @@ function TaskRow({
           </span>
         </span>
       </div>
+      {expanded && task.findings.length > 0 ? <TeamContext findings={task.findings} /> : null}
       {expanded && task.threads.length > 0 ? (
         <ul className="mt-px mb-1 ml-3 flex flex-col border-l border-sidebar-border pl-1">
           <ThreadList
@@ -943,6 +945,38 @@ function TaskRow({
         </ul>
       ) : null}
     </li>
+  );
+}
+
+/**
+ * What the team's agents found on a task, folded until opened: shared context
+ * instead of their threads, the lines their agents chose to share.
+ */
+function TeamContext({ findings }: { readonly findings: WorkTaskNode["findings"] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mt-px ml-3 border-l border-sidebar-border pl-1">
+      <button
+        type="button"
+        aria-expanded={open}
+        className="flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left text-xs text-muted-foreground hover:bg-sidebar-row-hover"
+        onClick={() => setOpen((value) => !value)}
+      >
+        <ChevronRightIcon className={cn("size-3 shrink-0", open && "rotate-90")} />
+        <LightbulbIcon aria-hidden className="size-3.5 shrink-0" />
+        <span className="min-w-0 flex-1 truncate">Team context · {findings.length}</span>
+      </button>
+      {open ? (
+        <ul className="flex flex-col gap-1 px-2 pb-1">
+          {findings.map((finding) => (
+            <li key={finding.id} className="list-none text-xs text-sidebar-foreground">
+              <span className="text-muted-foreground">{finding.person}’s agent: </span>
+              {finding.text}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
   );
 }
 

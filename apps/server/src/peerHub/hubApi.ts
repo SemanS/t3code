@@ -125,9 +125,23 @@ const HubOverlap = Schema.Struct({
 });
 export type HubOverlap = typeof HubOverlap.Type;
 
+const HubFinding = Schema.Struct({
+  id: Schema.String,
+  project: Schema.String,
+  task: Schema.optional(Schema.String),
+  text: Schema.String,
+  email: Schema.String,
+  session: Schema.String,
+  environment: Schema.String,
+  at: Schema.String,
+});
+export type HubFinding = typeof HubFinding.Type;
+
 const CoordView = Schema.Struct({
   sessions: Schema.Array(HubCoordSession),
   overlaps: Schema.Array(HubOverlap),
+  /** A hub from before findings has none. */
+  findings: Schema.optional(Schema.Array(HubFinding)),
   at: Schema.String,
 });
 export type HubCoordView = typeof CoordView.Type;
@@ -144,6 +158,8 @@ export interface ReportedSession {
   readonly intent?: string;
   readonly files: ReadonlyArray<string>;
   readonly claims: ReadonlyArray<string>;
+  /** The "For the team" lines of its working context. */
+  readonly findings?: ReadonlyArray<string>;
 }
 
 const Ok = Schema.Struct({});

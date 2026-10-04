@@ -241,6 +241,7 @@ const SIGNED_OUT: PeerHubStatus = {
     logPath: "",
     sessions: [],
     overlaps: [],
+    findings: [],
   },
   sharedThreads: [],
   syncing: false,
