@@ -28,6 +28,7 @@ import {
   failureMessage,
   usePeerHubStatus,
 } from "../workspaces/WorkspaceAccess";
+import { GitHubConnect } from "../workspaces/GitHubConnect";
 import { useOpenWorkspaceProject } from "../workspaces/useOpenWorkspaceProject";
 import { useSettingsScope } from "./SettingsScopeContext";
 import {
@@ -181,6 +182,18 @@ function SignedIn({
         }
       />
       {status.error ? <SettingsRow title="Last sync failed" description={status.error} /> : null}
+      <SettingsRow
+        title="GitHub"
+        description={
+          status.github.account !== null
+            ? `Workspace repositories on GitHub clone as ${status.github.account}, through GitHub CLI.`
+            : "Connect GitHub so workspace repositories on GitHub clone with your account."
+        }
+      >
+        <div className="pb-3">
+          <GitHubConnect environmentId={environmentId} github={status.github} />
+        </div>
+      </SettingsRow>
       <SettingsRow
         title="How capacity works"
         description="Your own subscriptions stay on this machine and only run your own work. A workspace’s shared capacity is its API pool, billed to one project with your allocation."

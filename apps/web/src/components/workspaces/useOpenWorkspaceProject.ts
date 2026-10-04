@@ -18,6 +18,8 @@ export interface ProjectCheckout {
   readonly missing: boolean;
   /** Why the last clone or open failed. */
   readonly errors: ReadonlyArray<string>;
+  /** Connecting GitHub, with an account that can open it, fixes a failure. */
+  readonly gitHubSignIn: boolean;
 }
 
 export function projectCheckout(state: PeerProjectState): ProjectCheckout {
@@ -27,6 +29,9 @@ export function projectCheckout(state: PeerProjectState): ProjectCheckout {
     missing: state.repositories.some((repo) => repo.state === "missing" || repo.state === "error"),
     errors: state.repositories.flatMap((repo) =>
       repo.state === "error" && repo.error !== undefined ? [repo.error] : [],
+    ),
+    gitHubSignIn: state.repositories.some(
+      (repo) => repo.state === "error" && repo.gitHubSignIn === true,
     ),
   };
 }

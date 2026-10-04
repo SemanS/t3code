@@ -101,6 +101,8 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.peerHubUnshareProject]: AuthAccessWriteScope,
   [WS_METHODS.peerHubSync]: AuthOrchestrationOperateScope,
   [WS_METHODS.peerHubOpenProject]: AuthOrchestrationOperateScope,
+  [WS_METHODS.peerHubConnectGitHub]: AuthOrchestrationOperateScope,
+  [WS_METHODS.peerHubCancelGitHubSignIn]: AuthOrchestrationOperateScope,
   [WS_METHODS.peerHubStartSignIn]: AuthAccessWriteScope,
   [WS_METHODS.peerHubFinishSignIn]: AuthAccessWriteScope,
   [WS_METHODS.peerHubSignOut]: AuthAccessWriteScope,

@@ -6,6 +6,7 @@ import type {
   ProjectId,
 } from "@t3tools/contracts";
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import { useNavigate } from "@tanstack/react-router";
 import {
@@ -20,6 +21,7 @@ import {
 import { useMemo, useState } from "react";
 
 import { useNewThreadHandler } from "../../hooks/useHandleNewThread";
+import { useScratchProject } from "../../hooks/useScratchProject";
 import { cn } from "../../lib/utils";
 import { useProjects, useThreadShells } from "../../state/entities";
 import { usePrimaryEnvironment } from "../../state/environments";
@@ -32,6 +34,7 @@ import { Input } from "../ui/input";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { stackedThreadToast, toastManager } from "../ui/toast";
+import { GitHubConnect } from "./GitHubConnect";
 import {
   projectCheckout,
   useOpenWorkspaceProject,
@@ -314,6 +317,8 @@ function ProjectSection({
           ) : null}
           {checkout !== undefined && checkout.projectId === undefined ? (
             <NotOpenHere
+              environmentId={environmentId}
+              github={status.github}
               checkout={checkout}
               opening={opener.opening}
               onOpen={() => void opener.open()}
@@ -366,12 +371,19 @@ function ProjectSection({
   );
 }
 
-/** A workspace project not open on this computer: clone and open it, or say why that failed. */
+/**
+ * A workspace project not open on this computer: clone and open it, or say
+ * why that failed, with GitHub to connect when the account was the reason.
+ */
 function NotOpenHere({
+  environmentId,
+  github,
   checkout,
   opening,
   onOpen,
 }: {
+  readonly environmentId: EnvironmentId;
+  readonly github: PeerHubStatus["github"];
   readonly checkout: ProjectCheckout;
   readonly opening: boolean;
   readonly onOpen: () => void;
@@ -379,25 +391,30 @@ function NotOpenHere({
   const busy = opening || checkout.cloning;
   const failed = !busy && checkout.errors.length > 0;
   return (
-    <div className="flex items-start gap-2 px-2 py-1 text-xs text-muted-foreground">
-      <span className={cn("min-w-0 flex-1", failed && "text-destructive")}>
-        {failed
-          ? checkout.errors.join(" ")
-          : checkout.missing
-            ? "Not on this computer yet."
-            : "On this computer, not open yet."}
-      </span>
-      <Button size="xs" variant="outline" disabled={busy} onClick={onOpen}>
-        {busy
-          ? checkout.missing
-            ? "Cloning…"
-            : "Opening…"
-          : failed
-            ? "Try again"
+    <div className="flex flex-col gap-1.5 px-2 py-1">
+      <div className="flex items-start gap-2 text-xs text-muted-foreground">
+        <span className={cn("min-w-0 flex-1", failed && "text-destructive")}>
+          {failed
+            ? checkout.errors.join(" ")
             : checkout.missing
-              ? "Clone & open"
-              : "Open"}
-      </Button>
+              ? "Not on this computer yet."
+              : "On this computer, not open yet."}
+        </span>
+        <Button size="xs" variant="outline" disabled={busy} onClick={onOpen}>
+          {busy
+            ? checkout.missing
+              ? "Cloning…"
+              : "Opening…"
+            : failed
+              ? "Try again"
+              : checkout.missing
+                ? "Clone & open"
+                : "Open"}
+        </Button>
+      </div>
+      {failed && checkout.gitHubSignIn ? (
+        <GitHubConnect environmentId={environmentId} github={github} onConnected={onOpen} />
+      ) : null}
     </div>
   );
 }
@@ -736,7 +753,12 @@ function NewTaskForm({
   );
 }
 
-/** Any member shares one of this computer's projects; the whole workspace then works on it. */
+/**
+ * Any member shares a project with the workspace the way "Add project" takes
+ * one: a repository by its address (GitHub's owner/repo or a clone URL), or a
+ * project on this computer by its origin. Everyone then clones it with
+ * "Clone & open".
+ */
 function ShareProject({
   environmentId,
   status,
@@ -745,20 +767,44 @@ function ShareProject({
   readonly status: PeerHubStatus;
 }) {
   const projects = useProjects();
+  const { scratchWorkspaceRootFor } = useScratchProject();
   const shareProject = useAtomCommand(serverEnvironment.peerHubShareProject, {
     reportFailure: false,
   });
   const [open, setOpen] = useState(false);
   const [workspace, setWorkspace] = useState(status.workspaces[0]?.slug ?? "");
+  const [address, setAddress] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const bound = new Set(
     status.workspaces.flatMap((w) =>
       w.projects.flatMap((p) => p.repositories.flatMap((r) => (r.projectId ? [r.projectId] : []))),
     ),
   );
+  // Threads without a project ("No project") have no repository to share.
+  const scratchRoot = scratchWorkspaceRootFor(environmentId);
   const candidates = projects.filter(
-    (project) => project.environmentId === environmentId && !bound.has(project.id),
+    (project) =>
+      project.environmentId === environmentId &&
+      !bound.has(project.id) &&
+      !isScratchProject(project, scratchRoot),
   );
+  const workspaceName = status.workspaces.find((w) => w.slug === workspace)?.name ?? workspace;
+  const share = (
+    key: string,
+    label: string,
+    what: { readonly projectId: ProjectId } | { readonly repository: string },
+  ) => {
+    setBusy(key);
+    void shareProject({ environmentId, input: { workspace, ...what } })
+      .then((result) => {
+        if (reportFailure(`Could not share ${label}`, result)) {
+          toastManager.add({ type: "success", title: `${label} is shared with ${workspaceName}` });
+          setAddress("");
+          setOpen(false);
+        }
+      })
+      .finally(() => setBusy(null));
+  };
   if (!open) {
     return (
       <Button
@@ -778,8 +824,7 @@ function ShareProject({
       className="mx-1 rounded-md border border-sidebar-border p-2"
     >
       <p className="text-xs text-muted-foreground">
-        The project’s repository becomes a project everyone in the workspace works on. They clone it
-        with their own git access.
+        Everyone in the workspace sees the project and clones it with “Clone &amp; open”.
       </p>
       {status.workspaces.length > 1 ? (
         <div className="mt-2 flex flex-wrap gap-1">
@@ -795,43 +840,58 @@ function ShareProject({
           ))}
         </div>
       ) : null}
-      {candidates.length === 0 ? (
-        <p className="mt-2 text-xs text-muted-foreground">
-          Every project on this computer is in a workspace already. Add a project first.
+      <form
+        className="mt-2 flex gap-1"
+        onSubmit={(event) => {
+          event.preventDefault();
+          const repository = address.trim();
+          if (repository === "" || busy !== null) return;
+          share("address", repository, { repository });
+        }}
+      >
+        <Input
+          className="min-w-0 flex-1"
+          size="sm"
+          nativeInput
+          placeholder="owner/repo or clone URL"
+          aria-label="Repository to share"
+          value={address}
+          readOnly={busy !== null}
+          onChange={(event) => setAddress(event.currentTarget.value)}
+        />
+        <Button type="submit" size="xs" disabled={busy !== null || address.trim() === ""}>
+          {busy === "address" ? "Sharing…" : "Share"}
+        </Button>
+      </form>
+      {status.github.account !== null ? (
+        <p className="mt-1 text-xs text-muted-foreground">
+          GitHub repositories open as {status.github.account}.
         </p>
-      ) : (
-        <ul className="mt-2 flex flex-col gap-px">
-          {candidates.map((project) => (
-            <li key={project.id} className="flex items-center gap-2">
-              <span className="min-w-0 flex-1 truncate text-sm">{project.title}</span>
-              <Button
-                size="xs"
-                variant="outline"
-                disabled={busy !== null}
-                onClick={() => {
-                  setBusy(project.id);
-                  void shareProject({
-                    environmentId,
-                    input: { workspace, projectId: project.id },
-                  })
-                    .then((result) => {
-                      if (reportFailure(`Could not share ${project.title}`, result)) {
-                        toastManager.add({
-                          type: "success",
-                          title: `${project.title} is shared with ${status.workspaces.find((w) => w.slug === workspace)?.name ?? workspace}`,
-                        });
-                        setOpen(false);
-                      }
-                    })
-                    .finally(() => setBusy(null));
-                }}
-              >
-                {busy === project.id ? "Sharing…" : "Share"}
-              </Button>
-            </li>
-          ))}
-        </ul>
-      )}
+      ) : status.github.cli ? (
+        <div className="mt-1.5">
+          <GitHubConnect environmentId={environmentId} github={status.github} />
+        </div>
+      ) : null}
+      {candidates.length > 0 ? (
+        <>
+          <p className="mt-3 text-xs text-muted-foreground">Or a project on this computer:</p>
+          <ul className="mt-1 flex flex-col gap-px">
+            {candidates.map((project) => (
+              <li key={project.id} className="flex items-center gap-2">
+                <span className="min-w-0 flex-1 truncate text-sm">{project.title}</span>
+                <Button
+                  size="xs"
+                  variant="outline"
+                  disabled={busy !== null}
+                  onClick={() => share(project.id, project.title, { projectId: project.id })}
+                >
+                  {busy === project.id ? "Sharing…" : "Share"}
+                </Button>
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : null}
       <div className="mt-2 flex justify-end">
         <Button size="xs" variant="ghost" onClick={() => setOpen(false)}>
           Close

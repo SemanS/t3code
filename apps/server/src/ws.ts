@@ -2064,6 +2064,14 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.peerHubOpenProject, peerHub.openProject(input), {
             "rpc.aggregate": "peerHub",
           }),
+        [WS_METHODS.peerHubConnectGitHub]: (_input) =>
+          observeRpcEffect(WS_METHODS.peerHubConnectGitHub, peerHub.connectGitHub, {
+            "rpc.aggregate": "peerHub",
+          }),
+        [WS_METHODS.peerHubCancelGitHubSignIn]: (_input) =>
+          observeRpcEffect(WS_METHODS.peerHubCancelGitHubSignIn, peerHub.cancelGitHubSignIn, {
+            "rpc.aggregate": "peerHub",
+          }),
         [WS_METHODS.peerHubSetSharedCapacity]: (input) =>
           observeRpcEffect(WS_METHODS.peerHubSetSharedCapacity, peerHub.setSharedCapacity(input), {
             "rpc.aggregate": "peerHub",

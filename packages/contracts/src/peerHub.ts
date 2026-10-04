@@ -200,6 +200,8 @@ export const PeerProjectState = Schema.Struct({
       path: Schema.String,
       state: PeerCheckoutState,
       error: Schema.optional(Schema.String),
+      /** Signing in to GitHub, with an account that can open the repository, fixes the error. */
+      gitHubSignIn: Schema.optional(Schema.Boolean),
       projectId: Schema.optional(ProjectId),
     }),
   ),
@@ -276,6 +278,22 @@ export const PeerJoinableWorkspace = Schema.Struct({
 });
 export type PeerJoinableWorkspace = typeof PeerJoinableWorkspace.Type;
 
+/**
+ * GitHub on this computer, through GitHub CLI: workspace repositories on
+ * github.com clone with its account, and Peer signs in to it from the app.
+ */
+export const PeerGitHubState = Schema.Struct({
+  /** GitHub CLI (`gh`) is installed. */
+  cli: Schema.Boolean,
+  /** GitHub CLI's active account on github.com, which clones use. */
+  account: Schema.NullOr(Schema.String),
+  /** A sign-in waiting for the person to enter this code at this address. */
+  signIn: Schema.NullOr(Schema.Struct({ userCode: Schema.String, verificationUri: Schema.String })),
+  /** Why the last sign-in failed. */
+  error: Schema.NullOr(Schema.String),
+});
+export type PeerGitHubState = typeof PeerGitHubState.Type;
+
 export const PeerHubStatus = Schema.Struct({
   /** The hub this environment signs in to (the default one until changed). */
   hubUrl: Schema.String,
@@ -302,6 +320,7 @@ export const PeerHubStatus = Schema.Struct({
     herdr: Schema.Literals(["running", "not-running"]),
     list: Schema.Array(PeerLocalAgent),
   }),
+  github: PeerGitHubState,
   syncing: Schema.Boolean,
   lastSyncAt: Schema.NullOr(Schema.String),
   error: Schema.NullOr(Schema.String),
@@ -406,8 +425,10 @@ export type PeerHubFocusAgentInput = typeof PeerHubFocusAgentInput.Type;
 
 export const PeerHubShareProjectInput = Schema.Struct({
   workspace: TrimmedNonEmptyString,
-  /** The local project whose repository the workspace gets. */
-  projectId: ProjectId,
+  /** The local project whose repository the workspace gets... */
+  projectId: Schema.optional(ProjectId),
+  /** ...or a repository by its address: GitHub's `owner/repo` or a clone URL. */
+  repository: Schema.optional(TrimmedNonEmptyString),
   name: Schema.optional(TrimmedNonEmptyString),
   areas: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
 });

@@ -618,6 +618,75 @@ const program = Effect.gen(function* () {
     throw new Error("the project stayed shared");
   }
 
+  // A repository shared by its address, as "Add project" takes one: nobody has it yet, all clone it.
+  const byAddress = yield* client[WS_METHODS.peerHubShareProject]({
+    workspace: "acme",
+    repository: NodePath.join(home, "origin", "app"),
+    name: "Shared by address",
+  });
+  const addressed = repositoriesOf(byAddress, "shared-by-address");
+  log(
+    "shared by address",
+    JSON.stringify(addressed.map((r) => ({ url: r.url, branch: r.branch, state: r.state }))),
+  );
+  if (addressed[0]?.state !== "missing" || addressed[0].branch !== "main") {
+    throw new Error("a repository shared by its address is not offered to clone");
+  }
+  const clonedByAddress = repositoriesOf(
+    yield* client[WS_METHODS.peerHubOpenProject]({
+      workspace: "acme",
+      projectId: "shared-by-address",
+    }),
+    "shared-by-address",
+  );
+  if (clonedByAddress[0]?.state !== "ready" || !clonedByAddress[0].projectId) {
+    throw new Error("a repository shared by its address does not clone");
+  }
+  yield* client[WS_METHODS.peerHubUnshareProject]({
+    workspace: "acme",
+    projectId: "shared-by-address",
+  });
+
+  // Opt-in, with GitHub CLI signed in here: a real (private) GitHub repository clones with its
+  // account, and one that account cannot open says which account it was.
+  const gitHubRepo = process.env.GITHUB_SMOKE_REPO;
+  if (gitHubRepo !== undefined) {
+    const fromGitHub = yield* client[WS_METHODS.peerHubShareProject]({
+      workspace: "acme",
+      repository: gitHubRepo,
+      name: "From GitHub",
+    });
+    log("github", `GitHub CLI account: ${fromGitHub.github.account ?? "-"}`);
+    const [checkout] = repositoriesOf(
+      yield* client[WS_METHODS.peerHubOpenProject]({ workspace: "acme", projectId: "from-github" }),
+      "from-github",
+    );
+    log("github clone", `${checkout?.state ?? "-"}: ${checkout?.error ?? checkout?.path ?? "-"}`);
+    if (checkout?.state !== "ready") throw new Error("the GitHub repository did not clone");
+    const helpers = NodeChildProcess.execFileSync(
+      "git",
+      ["-C", checkout.path, "config", "--get-all", "credential.https://github.com.helper"],
+      { encoding: "utf8" },
+    );
+    if (!helpers.includes("auth git-credential")) {
+      throw new Error("the checkout does not sign in to GitHub with GitHub CLI");
+    }
+    const refused = yield* client[WS_METHODS.peerHubShareProject]({
+      workspace: "acme",
+      repository: `${gitHubRepo}-no-such-repository`,
+    }).pipe(Effect.result);
+    log("github no access", refused._tag === "Failure" ? refused.failure.message : "SHARED");
+    if (refused._tag === "Success" || !refused.failure.message.includes("cannot open")) {
+      throw new Error("a repository the account cannot open does not name the account");
+    }
+    yield* client[WS_METHODS.peerHubUnshareProject]({
+      workspace: "acme",
+      projectId: "from-github",
+    });
+  } else {
+    log("github", "skipped (set GITHUB_SMOKE_REPO=owner/repo to clone a real one)");
+  }
+
   // Workspaces can be looked up by their short name.
   const found = yield* client[WS_METHODS.peerHubFindWorkspace]({ slug: "acme" });
   const missing = yield* client[WS_METHODS.peerHubFindWorkspace]({ slug: "no-such-space" });

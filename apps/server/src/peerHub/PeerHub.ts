@@ -77,8 +77,16 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as Settings from "../serverSettings.ts";
-import { explainCloneFailure } from "./cloneFailure.ts";
+import { explainCloneFailure, explainGitHubCloneFailure } from "./cloneFailure.ts";
 import { GIT_ALLOWED_PROTOCOLS, isSafeGitRef, isSafeGitRemote } from "./gitSafety.ts";
+import {
+  activeGitHubAccount,
+  gitHubCredentialHelper,
+  gitHubCredentialOptions,
+  gitHubRepository,
+  startGitHubSignIn,
+  type GitHubSignIn,
+} from "./github.ts";
 import * as Herdr from "./herdr.ts";
 import * as HubApi from "./hubApi.ts";
 import {
@@ -152,6 +160,17 @@ const EMPTY_PERSISTED: PersistedState = {
 interface Transient {
   readonly state: "cloning" | "error";
   readonly error?: string;
+  /** Signing in to GitHub with an account that can open the repository fixes the error. */
+  readonly gitHubSignIn?: boolean;
+}
+
+/** GitHub CLI on this computer, as last read. */
+interface GitHubRuntime {
+  /** Where `gh` is installed. */
+  readonly cli: string | null;
+  readonly account: string | null;
+  readonly signIn: { readonly userCode: string; readonly verificationUri: string } | null;
+  readonly error: string | null;
 }
 
 interface RuntimeState {
@@ -170,6 +189,7 @@ interface RuntimeState {
   readonly work: ReadonlyMap<string, ProjectWork>;
   /** What herdr runs on this computer; null while no herdr server listens. */
   readonly herdr: ReadonlyArray<HerdrAgentState> | null;
+  readonly github: GitHubRuntime;
 }
 
 interface ProjectWork {
@@ -285,6 +305,9 @@ export class PeerHub extends Context.Service<
     readonly openProject: (
       input: PeerHubProjectInput,
     ) => Effect.Effect<PeerHubStatus, PeerHubError>;
+    /** Starts signing GitHub CLI in to GitHub; the status carries the code to enter. */
+    readonly connectGitHub: Effect.Effect<PeerHubStatus, PeerHubError>;
+    readonly cancelGitHubSignIn: Effect.Effect<PeerHubStatus>;
     readonly setSharedCapacity: (
       input: PeerHubSharedCapacityInput,
     ) => Effect.Effect<PeerHubStatus, PeerHubError>;
@@ -365,7 +388,16 @@ function searchPath(): string[] {
 
 function commandAvailable(command: string): boolean {
   if (command.includes("/")) return NodeFS.existsSync(command);
-  return searchPath().some((dir) => NodeFS.existsSync(NodePath.join(dir, command)));
+  return commandPath(command) !== null;
+}
+
+/** Where `command` is installed, looked up the way `run` finds it. */
+function commandPath(command: string): string | null {
+  for (const dir of searchPath()) {
+    const candidate = NodePath.join(dir, command);
+    if (NodeFS.existsSync(candidate)) return candidate;
+  }
+  return null;
 }
 
 function run(
@@ -467,6 +499,7 @@ const make = Effect.gen(function* () {
     sharedErrors: new Map(),
     work: new Map(),
     herdr: null,
+    github: { cli: null, account: null, signIn: null, error: null },
   });
   const statusRef = yield* Ref.make<PeerHubStatus | null>(null);
   const changes = yield* Effect.acquireRelease(PubSub.unbounded<PeerHubStatus>(), PubSub.shutdown);
@@ -537,6 +570,7 @@ const make = Effect.gen(function* () {
           path,
           state: transient?.state ?? (ready ? ("ready" as const) : ("missing" as const)),
           ...(transient?.error === undefined ? {} : { error: transient.error }),
+          ...(transient?.gitHubSignIn === true ? { gitHubSignIn: true } : {}),
           ...(projectId === undefined ? {} : { projectId }),
         });
       }
@@ -694,6 +728,12 @@ const make = Effect.gen(function* () {
       agents: {
         herdr: s.herdr === null ? "not-running" : "running",
         list: (s.herdr ?? []).map((agent) => localAgentView(s, agent)),
+      },
+      github: {
+        cli: s.github.cli !== null,
+        account: s.github.account,
+        signIn: s.github.signIn,
+        error: s.github.error,
       },
       syncing: s.syncing,
       lastSyncAt: s.persisted.lastSyncAt,
@@ -1015,6 +1055,22 @@ const make = Effect.gen(function* () {
     });
 
   /** What herdr runs on this computer, with each agent's git branch. */
+  /** GitHub CLI and its active account, read again: what github.com clones sign in with. */
+  const refreshGitHub = Effect.gen(function* () {
+    const gh = commandPath("gh");
+    const account =
+      gh === null
+        ? null
+        : yield* Effect.tryPromise(() =>
+            run(gh, ["auth", "status", "--hostname", "github.com", "--json", "hosts"]),
+          ).pipe(
+            Effect.map(activeGitHubAccount),
+            Effect.orElseSucceed(() => null),
+          );
+    yield* updateRuntime((s) => ({ ...s, github: { ...s.github, cli: gh, account } }));
+    return { gh, account };
+  });
+
   const refreshHerdr = Effect.gen(function* () {
     const agents = yield* Effect.promise(() => Herdr.listHerdrAgents());
     const nowMillis = DateTime.toEpochMillis(yield* DateTime.now);
@@ -1231,21 +1287,64 @@ const make = Effect.gen(function* () {
             checkouts: new Map(s.checkouts).set(path, { state: "cloning" }),
           }));
           yield* publish;
+          // On github.com, GitHub CLI's account clones over https when it is signed in, whatever
+          // else git keeps; otherwise git signs in its own way (SSH keys, the keychain).
+          const github = gitHubRepository(repo.url);
+          const { gh, account } =
+            github === null ? { gh: null, account: null } : yield* refreshGitHub;
+          const viaGh = github !== null && gh !== null && account !== null ? gh : null;
           const cloned = yield* Effect.tryPromise({
             try: async () => {
               await NodeFSP.mkdir(NodePath.dirname(path), { recursive: true });
+              const source = viaGh === null ? repo.url : (github?.httpsUrl ?? repo.url);
               await run(
                 "git",
-                ["clone", "--quiet", "--branch", repo.branch, "--", repo.url, path],
+                [
+                  ...(viaGh === null ? [] : gitHubCredentialOptions(viaGh)),
+                  "clone",
+                  "--quiet",
+                  "--branch",
+                  repo.branch,
+                  "--",
+                  source,
+                  path,
+                ],
                 { timeoutMs: GIT_TIMEOUT_MS },
               );
+              if (viaGh !== null) {
+                // Pulls and pushes in this checkout sign in the same way.
+                const key = "credential.https://github.com.helper";
+                await run("git", ["-C", path, "config", "--local", key, ""]);
+                await run("git", [
+                  "-C",
+                  path,
+                  "config",
+                  "--local",
+                  "--add",
+                  key,
+                  gitHubCredentialHelper(viaGh),
+                ]);
+              }
             },
-            catch: (failure) => explainCloneFailure(runOutput(failure), repo),
+            catch: (failure) =>
+              github === null
+                ? { message: explainCloneFailure(runOutput(failure), repo), signIn: false }
+                : explainGitHubCloneFailure(runOutput(failure), {
+                    ...repo,
+                    nameWithOwner: github.nameWithOwner,
+                    account: viaGh === null ? null : account,
+                    cli: gh !== null,
+                  }),
           }).pipe(Effect.result);
           if (cloned._tag === "Failure") {
+            const { message, signIn } = cloned.failure;
             yield* updateRuntime((s) => ({
               ...s,
-              checkouts: new Map(s.checkouts).set(path, { state: "error", error: cloned.failure }),
+              checkouts: new Map(s.checkouts).set(path, {
+                state: "error",
+                error: message,
+                ...(signIn ? { gitHubSignIn: true } : {}),
+              }),
             }));
             continue;
           }
@@ -1311,6 +1410,64 @@ const make = Effect.gen(function* () {
       return yield* publish;
     },
   );
+
+  // The sign-in GitHub CLI is waiting on, killed with the layer if still waiting.
+  let gitHubSignIn: GitHubSignIn | null = null;
+  yield* Effect.addFinalizer(() => Effect.sync(() => gitHubSignIn?.cancel()));
+
+  const connectGitHub: PeerHub["Service"]["connectGitHub"] = Effect.gen(function* () {
+    if (gitHubSignIn !== null) return yield* publish;
+    const { gh } = yield* refreshGitHub;
+    if (gh === null) {
+      return yield* hubError(
+        "Install GitHub CLI first (brew install gh, or see cli.github.com), then connect GitHub.",
+      );
+    }
+    const started = yield* Effect.tryPromise({
+      try: () =>
+        startGitHubSignIn(gh, { ...process.env, PATH: searchPath().join(NodePath.delimiter) }),
+      catch: (failure) =>
+        hubError(
+          `GitHub CLI could not start signing in: ${failure instanceof Error ? failure.message : String(failure)}`,
+        ),
+    });
+    gitHubSignIn = started;
+    const { userCode, verificationUri } = started;
+    yield* updateRuntime((s) => ({
+      ...s,
+      github: { ...s.github, signIn: { userCode, verificationUri }, error: null },
+    }));
+    // gh waits until the person entered the code; the account it gets is the one clones use.
+    yield* background(
+      Effect.gen(function* () {
+        const finished = yield* Effect.tryPromise({
+          try: () => started.done,
+          catch: (failure) => (failure instanceof Error ? failure.message : String(failure)),
+        }).pipe(Effect.result);
+        // A cancelled or replaced sign-in leaves no error behind.
+        const current = gitHubSignIn === started;
+        if (current) gitHubSignIn = null;
+        yield* updateRuntime((s) => ({
+          ...s,
+          github: {
+            ...s.github,
+            signIn: current ? null : s.github.signIn,
+            error: current && finished._tag === "Failure" ? finished.failure : s.github.error,
+          },
+        }));
+        yield* refreshGitHub;
+      }),
+    );
+    return yield* publish;
+  });
+
+  const cancelGitHubSignIn: PeerHub["Service"]["cancelGitHubSignIn"] = Effect.gen(function* () {
+    const waiting = gitHubSignIn;
+    gitHubSignIn = null;
+    waiting?.cancel();
+    yield* updateRuntime((s) => ({ ...s, github: { ...s.github, signIn: null } }));
+    return yield* publish;
+  });
 
   const enableSharedCapacity = (workspace: PersistedWorkspace, project: PeerProject) =>
     Effect.gen(function* () {
@@ -1508,6 +1665,106 @@ const make = Effect.gen(function* () {
     },
   );
 
+  /** What sharing gives the workspace: one repository, and where it is checked out here if it is. */
+  interface SharedRepository {
+    readonly name: string;
+    readonly repoId: string;
+    readonly url: string;
+    readonly branch: string;
+    readonly root: string | null;
+  }
+
+  /** A project on this computer: its origin, and the branch that remote starts from. */
+  const localRepository = (projectId: ProjectId) =>
+    Effect.gen(function* () {
+      const local = yield* projects
+        .getById(projectId)
+        .pipe(Effect.orElseSucceed(() => Option.none()));
+      if (Option.isNone(local)) return yield* hubError("That project is not on this computer.");
+      const { title, workspaceRoot: root } = local.value;
+      const url = yield* Effect.tryPromise(() =>
+        run("git", ["-C", root, "remote", "get-url", "origin"]),
+      ).pipe(
+        Effect.mapError(() =>
+          hubError(
+            `${title} has no git remote named origin. Push it where your team can clone it, or share its repository by address.`,
+          ),
+        ),
+      );
+      if (!isSafeGitRemote(url)) {
+        return yield* hubError(`${title}'s origin is not an address colleagues can clone.`);
+      }
+      // Colleagues start from the remote's own branch, not whatever is checked out here.
+      const remoteHead = yield* Effect.tryPromise(() =>
+        run("git", ["-C", root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"]),
+      ).pipe(Effect.orElseSucceed(() => ""));
+      const head =
+        remoteHead.replace(/^origin\//, "") ||
+        (yield* Effect.tryPromise(() =>
+          run("git", ["-C", root, "rev-parse", "--abbrev-ref", "HEAD"]),
+        ).pipe(Effect.orElseSucceed(() => "")));
+      return {
+        name: title,
+        repoId: kebab(NodePath.basename(root)) || "app",
+        url,
+        branch: head === "" || head === "HEAD" ? "main" : head,
+        root,
+      } satisfies SharedRepository;
+    });
+
+  /**
+   * A repository by its address, GitHub's `owner/repo` or a clone URL, as
+   * "Add project" takes one. Asking it for its default branch also shows
+   * that the person sharing it can open it.
+   */
+  const addressedRepository = (address: string) =>
+    Effect.gen(function* () {
+      const github = gitHubRepository(address);
+      if (github === null && !isSafeGitRemote(address)) {
+        return yield* hubError(
+          `"${address}" is not a repository address. Enter GitHub's owner/repo or a clone URL.`,
+        );
+      }
+      const url = github?.httpsUrl ?? address;
+      const { gh, account } = github === null ? { gh: null, account: null } : yield* refreshGitHub;
+      const viaGh = github !== null && gh !== null && account !== null ? gh : null;
+      const head = yield* Effect.tryPromise({
+        try: () =>
+          run(
+            "git",
+            [
+              ...(viaGh === null ? [] : gitHubCredentialOptions(viaGh)),
+              "ls-remote",
+              "--symref",
+              url,
+              "HEAD",
+            ],
+            { timeoutMs: 60_000 },
+          ),
+        catch: (failure) =>
+          hubError(
+            github === null
+              ? explainCloneFailure(runOutput(failure), { url, branch: "" })
+              : explainGitHubCloneFailure(runOutput(failure), {
+                  url,
+                  branch: "",
+                  nameWithOwner: github.nameWithOwner,
+                  account: viaGh === null ? null : account,
+                  cli: gh !== null,
+                }).message,
+          ),
+      });
+      const name =
+        github?.name ?? NodePath.basename(url.replace(/\/+$/, "")).replace(/\.git$/i, "");
+      return {
+        name,
+        repoId: kebab(name) || "app",
+        url,
+        branch: /^ref: refs\/heads\/(\S+)\s+HEAD$/m.exec(head)?.[1] ?? "main",
+        root: null,
+      } satisfies SharedRepository;
+    });
+
   const shareProject: PeerHub["Service"]["shareProject"] = Effect.fn("PeerHub.shareProject")(
     function* (input) {
       const { hubUrl, session } = yield* requireSession;
@@ -1517,43 +1774,30 @@ const make = Effect.gen(function* () {
       if (workspace === undefined) {
         return yield* hubError(`You are not a member of the workspace "${input.workspace}".`);
       }
-      const local = yield* projects
-        .getById(input.projectId)
-        .pipe(Effect.orElseSucceed(() => Option.none()));
-      if (Option.isNone(local)) return yield* hubError("That project is not on this computer.");
-      const root = local.value.workspaceRoot;
-      const url = yield* Effect.tryPromise(() =>
-        run("git", ["-C", root, "remote", "get-url", "origin"]),
-      ).pipe(
-        Effect.mapError(() =>
-          hubError(
-            `${local.value.title} has no git remote named origin. Push it where your team can clone it, then share it.`,
-          ),
-        ),
-      );
-      if (!isSafeGitRemote(url)) {
-        return yield* hubError(
-          `${local.value.title}'s origin is not an address colleagues can clone.`,
-        );
-      }
-      const head = yield* Effect.tryPromise(() =>
-        run("git", ["-C", root, "rev-parse", "--abbrev-ref", "HEAD"]),
-      ).pipe(Effect.orElseSucceed(() => ""));
-      const name = input.name ?? local.value.title;
+      let shared: SharedRepository;
+      if (input.repository !== undefined) shared = yield* addressedRepository(input.repository);
+      else if (input.projectId !== undefined) shared = yield* localRepository(input.projectId);
+      else return yield* hubError("Choose a project on this computer or enter a repository.");
+      const name = input.name ?? shared.name;
       const id = kebab(name);
-      const repoId = kebab(NodePath.basename(root)) || "app";
       if (!safeId(id)) return yield* hubError("Give the project a name with letters or digits.");
       yield* hubApi.shareProject(hubUrl, session, input.workspace, {
         id,
         name,
-        repositories: [{ id: repoId, url, branch: head === "" || head === "HEAD" ? "main" : head }],
+        repositories: [{ id: shared.repoId, url: shared.url, branch: shared.branch }],
         areas: input.areas ?? [],
       });
-      // Here the checkout stays where it is; colleagues clone it under their workspace root.
-      yield* updatePersisted((p) => ({
-        ...p,
-        localCheckouts: { ...p.localCheckouts, [`${input.workspace}/${id}/${repoId}`]: root },
-      }));
+      const root = shared.root;
+      if (root !== null) {
+        // Here the checkout stays where it is; colleagues clone it under their workspace root.
+        yield* updatePersisted((p) => ({
+          ...p,
+          localCheckouts: {
+            ...p.localCheckouts,
+            [`${input.workspace}/${id}/${shared.repoId}`]: root,
+          },
+        }));
+      }
       return yield* syncNow;
     },
     lock.withPermits(1),
@@ -1599,6 +1843,7 @@ const make = Effect.gen(function* () {
     Effect.forever,
     Effect.forkScoped,
   );
+  yield* background(refreshGitHub);
   // Publish the persisted state right away so policy and tools apply before the first sync.
   yield* publish.pipe(
     Effect.andThen(requireSession.pipe(Effect.option)),
@@ -1630,6 +1875,8 @@ const make = Effect.gen(function* () {
     invite,
     findWorkspace,
     openProject,
+    connectGitHub,
+    cancelGitHubSignIn,
     setSharedCapacity,
     projectUsage,
     createTask,

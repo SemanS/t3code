@@ -505,6 +505,8 @@ export const WS_METHODS = {
   peerHubUnshareProject: "peerHub.unshareProject",
   peerHubInvite: "peerHub.invite",
   peerHubOpenProject: "peerHub.openProject",
+  peerHubConnectGitHub: "peerHub.connectGitHub",
+  peerHubCancelGitHubSignIn: "peerHub.cancelGitHubSignIn",
   peerHubSetSharedCapacity: "peerHub.setSharedCapacity",
   peerHubProjectUsage: "peerHub.projectUsage",
 
@@ -1740,6 +1742,18 @@ const WsPeerHubOpenProjectRpc = Rpc.make(WS_METHODS.peerHubOpenProject, {
   error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
 });
 
+const WsPeerHubConnectGitHubRpc = Rpc.make(WS_METHODS.peerHubConnectGitHub, {
+  payload: Schema.Struct({}),
+  success: PeerHubStatus,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
+const WsPeerHubCancelGitHubSignInRpc = Rpc.make(WS_METHODS.peerHubCancelGitHubSignIn, {
+  payload: Schema.Struct({}),
+  success: PeerHubStatus,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
 const WsPeerHubSetSharedCapacityRpc = Rpc.make(WS_METHODS.peerHubSetSharedCapacity, {
   payload: PeerHubSharedCapacityInput,
   success: PeerHubStatus,
@@ -1911,6 +1925,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsPeerHubUnshareProjectRpc,
   WsPeerHubInviteRpc,
   WsPeerHubOpenProjectRpc,
+  WsPeerHubConnectGitHubRpc,
+  WsPeerHubCancelGitHubSignInRpc,
   WsPeerHubSetSharedCapacityRpc,
   WsPeerHubProjectUsageRpc,
   WsScheduledTasksListRpc,

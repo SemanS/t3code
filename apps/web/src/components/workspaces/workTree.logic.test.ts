@@ -159,6 +159,7 @@ function status(project: PeerProjectState): PeerHubStatus {
         },
       ],
     },
+    github: { cli: true, account: "slavo", signIn: null, error: null },
     syncing: false,
     lastSyncAt: null,
     error: null,

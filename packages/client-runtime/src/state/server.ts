@@ -1153,6 +1153,14 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:peer-hub:open-project",
       tag: WS_METHODS.peerHubOpenProject,
     }),
+    peerHubConnectGitHub: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:connect-github",
+      tag: WS_METHODS.peerHubConnectGitHub,
+    }),
+    peerHubCancelGitHubSignIn: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:cancel-github-sign-in",
+      tag: WS_METHODS.peerHubCancelGitHubSignIn,
+    }),
     peerHubSetSharedCapacity: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:peer-hub:shared-capacity",
       tag: WS_METHODS.peerHubSetSharedCapacity,
