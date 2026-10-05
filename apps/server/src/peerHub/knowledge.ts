@@ -24,13 +24,14 @@ export interface KontextRun {
 }
 
 /**
- * kontext's environment: Peer's own. The coordination lab keeps its Peers'
+ * The environment of a model run on the person's own Claude Code (kontext's, and the one that
+ * judges related work, `relatedModel`): Peer's own. The coordination lab keeps its Peers'
  * Claude Code settings apart (CLAUDE_CONFIG_DIR) and names, in
  * `PEER_KONTEXT_CLAUDE_CONFIG_DIR`, the person's own Claude Code that
  * kontext's llm adapter runs on; empty for Claude Code's default. Naming
  * ~/.claude is not the same: Claude Code then looks for another sign-in.
  */
-function kontextEnv(): NodeJS.ProcessEnv {
+export function kontextEnv(): NodeJS.ProcessEnv {
   // The agent kontext runs to word knowledge is Peer's own tool, no agent at work on the project:
   // Peer's hooks let it be.
   const env: NodeJS.ProcessEnv = { ...process.env, PEER_COORDINATION: "off" };

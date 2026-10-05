@@ -170,6 +170,23 @@ export function capacityRejection(
   }
 }
 
+/**
+ * Whether a workspace project accepts the member's own login for what is not an agent's thread:
+ * a model that reads the project's text on it (`relatedModel`). Only `personal: any` does; a
+ * project that wants commercial seats or shared capacity only, or one this does not know, does not.
+ */
+export function projectAcceptsPersonal(
+  state: HubPolicyState | null,
+  workspace: string,
+  project: string,
+): boolean {
+  if (state === null) return false;
+  const bound = [...state.projects.values(), ...state.roots.values()].find(
+    (candidate) => candidate.workspace.slug === workspace && candidate.project.id === project,
+  );
+  return bound?.project.capacity.personal === "any";
+}
+
 /** Resolves ${project.root}, ${company.knowledge} and ${secret:NAME} in a tool value. */
 export function resolveToolValue(
   value: string,

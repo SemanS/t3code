@@ -1,4 +1,5 @@
 import type { EnvironmentId, PeerContextVersion, PeerProjectState } from "@t3tools/contracts";
+import { useNavigate } from "@tanstack/react-router";
 import { ChevronRightIcon, FileTextIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 
@@ -20,10 +21,13 @@ import { confirmed, reportFailure, useWorkActions } from "./WorkPanel";
 import { StatusGlyph } from "./workStatus";
 import { usePeerHubStatus } from "./WorkspaceAccess";
 import {
+  adviceLabel,
+  adviceOnWork,
   buildWorkTree,
   contextSize,
   personName,
   taskLabel,
+  type WorkAdviceRow,
   type WorkContextNode,
   type WorkOpen,
   type WorkThreadNode,
@@ -50,6 +54,7 @@ export function WorkContextView({ workspace, project, scope }: Place) {
   const localThreads = useThreadShells();
   const now = useRelativeTimeTick(30_000);
   const actions = useWorkActions(environmentId);
+  const navigate = useNavigate();
   const restoreContext = useAtomCommand(serverEnvironment.peerHubRestoreContext, {
     reportFailure: false,
   });
@@ -88,6 +93,10 @@ export function WorkContextView({ workspace, project, scope }: Place) {
       ? taskLabel(task)
       : `${node?.name ?? project}${scope === "project" ? " · work outside tasks" : ""}`;
   const agents = (scope === "project" ? node?.unsorted : task?.threads) ?? [];
+  const advice = useMemo(
+    () => (status === null ? [] : adviceOnWork({ status, workspace, project, scope })),
+    [status, workspace, project, scope],
+  );
 
   /** kontext reads the context for what the project should keep; people decide in Knowledge to keep. */
   const harvest = async () => {
@@ -187,6 +196,17 @@ export function WorkContextView({ workspace, project, scope }: Place) {
                 </ul>
               )}
             </section>
+            {advice.length === 0 ? null : (
+              <Advice
+                rows={advice}
+                onOpenWork={(work) =>
+                  void navigate({
+                    to: "/context/$workspace/$project/$scope",
+                    params: { workspace, project, scope: work },
+                  })
+                }
+              />
+            )}
             {context === undefined || context.version === 0 || environmentId === null ? null : (
               <History
                 environmentId={environmentId}
@@ -250,6 +270,50 @@ function Reports({ context }: { readonly context: WorkContextNode }) {
       <p className="pt-1 text-xs text-muted-foreground">
         The agent keeping the context folds in what holds.
       </p>
+    </section>
+  );
+}
+
+/**
+ * What Peer told this work's agents: other work on the project that relates to what they were asked
+ * (and why), and the project's reviewed knowledge that bears on their files. Peer tells, the agent
+ * decides; people see it here to trust it or to correct what their agents are pointed to.
+ */
+function Advice({
+  rows,
+  onOpenWork,
+}: {
+  readonly rows: ReadonlyArray<WorkAdviceRow>;
+  readonly onOpenWork: (scope: string) => void;
+}) {
+  return (
+    <section aria-label="What Peer told these agents">
+      <SectionTitle>Peer pointed these agents to · {rows.length}</SectionTitle>
+      <ul className="flex flex-col">
+        {rows.map((row) => (
+          <li key={row.key} className="flex min-w-0 items-start gap-2 py-1.5">
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-sm text-foreground">{row.name}</span>
+              <span className="block truncate text-xs text-muted-foreground">
+                {adviceLabel(row)} · {formatRelativeTimeLabel(row.at)}
+              </span>
+              {row.why === "" ? null : (
+                <span className="line-clamp-2 block text-xs text-muted-foreground">{row.why}</span>
+              )}
+              {row.path === undefined ? null : (
+                <span className="block truncate font-mono text-xs text-muted-foreground">
+                  {row.path}
+                </span>
+              )}
+            </span>
+            {row.about === "work" ? (
+              <Button size="xs" variant="outline" onClick={() => onOpenWork(row.scope)}>
+                Open
+              </Button>
+            ) : null}
+          </li>
+        ))}
+      </ul>
     </section>
   );
 }

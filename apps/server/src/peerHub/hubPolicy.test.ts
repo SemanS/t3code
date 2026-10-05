@@ -7,6 +7,7 @@ import {
   claudeHubMcpServers,
   codexHubMcpServers,
   hubInstructionsForThread,
+  projectAcceptsPersonal,
   resolveToolValue,
   setHubPolicyState,
   type HubPolicyState,
@@ -92,6 +93,26 @@ function state(
 }
 
 afterEach(() => setHubPolicyState(null));
+
+describe("projectAcceptsPersonal", () => {
+  it("accepts the member's own login only where the project does", () => {
+    const hub = state([
+      ["t3-kw", project()],
+      ["t3-cm", project({ id: "commercial", personal: "commercial" })],
+      ["t3-none", project({ id: "closed", personal: "none" })],
+    ]);
+    assert.isTrue(projectAcceptsPersonal(hub, "acme", "kirkwood"));
+    assert.isFalse(projectAcceptsPersonal(hub, "acme", "commercial"));
+    assert.isFalse(projectAcceptsPersonal(hub, "acme", "closed"));
+  });
+
+  it("does not, for a project it does not know or before the workspace is provisioned", () => {
+    assert.isFalse(projectAcceptsPersonal(null, "acme", "kirkwood"));
+    const hub = state([["t3-kw", project()]]);
+    assert.isFalse(projectAcceptsPersonal(hub, "acme", "elsewhere"));
+    assert.isFalse(projectAcceptsPersonal(hub, "other", "kirkwood"));
+  });
+});
 
 describe("capacityRejection", () => {
   it("lets anything run outside workspace projects and before sign-in", () => {

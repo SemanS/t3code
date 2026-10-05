@@ -458,6 +458,93 @@ function projectTree(input: {
   };
 }
 
+/** What Peer told one agent, as the work's page lists it. */
+export interface WorkAdviceRow {
+  readonly key: string;
+  /** Whose agent was told, and what it is called. */
+  readonly person: string;
+  readonly mine: boolean;
+  readonly agent: string;
+  readonly about: "work" | "knowledge";
+  /** A work's scope to open its page, or `kx:<id>` for an entry of the project's knowledge. */
+  readonly scope: string;
+  readonly name: string;
+  readonly level: number;
+  readonly kind: "new" | "closer" | "changed";
+  readonly why: string;
+  readonly source: "words" | "paths" | "model";
+  /** For knowledge: decision, convention, learning or incident, and where its file is. */
+  readonly entryKind: string | undefined;
+  readonly path: string | undefined;
+  readonly at: string;
+}
+
+/**
+ * What Peer told the agents on one work (a task, or the project's work on no task) of related work
+ * and of the project's knowledge, newest first: people see what their agents are pointed to.
+ */
+export function adviceOnWork(input: {
+  readonly status: PeerHubStatus;
+  readonly workspace: string;
+  readonly project: string;
+  readonly scope: string;
+}): ReadonlyArray<WorkAdviceRow> {
+  const { status, workspace, project, scope } = input;
+  const state = status.workspaces
+    .find((w) => w.slug === workspace)
+    ?.projects.find((p) => p.project.id === project);
+  const sessions = new Map(status.coordination.sessions.map((session) => [session.id, session]));
+  return (status.coordination.advice ?? [])
+    .flatMap((advice) => {
+      const session = sessions.get(advice.session);
+      if (advice.workspace !== workspace || advice.project !== project || session === undefined) {
+        return [];
+      }
+      const on = session.task === undefined ? "project" : `task:${session.task}`;
+      if (on !== scope) return [];
+      return [
+        {
+          key: `${advice.session}:${advice.scope}:${advice.at}`,
+          person: state === undefined ? session.email : personName(state, session.email),
+          mine: session.email === status.email,
+          agent: session.label,
+          about: advice.about,
+          scope: advice.scope,
+          name: advice.name,
+          level: advice.level,
+          kind: advice.kind,
+          why: advice.why,
+          source: advice.source,
+          entryKind: advice.entryKind,
+          path: advice.path,
+          at: advice.at,
+        } satisfies WorkAdviceRow,
+      ];
+    })
+    .toSorted((a, b) => Date.parse(b.at) - Date.parse(a.at))
+    .slice(0, 12);
+}
+
+/** What one telling says, in a line: whose agent, and what happened. */
+export function adviceLabel(row: WorkAdviceRow): string {
+  const who = row.mine ? "Your agent" : `${row.person}’s agent`;
+  const what =
+    row.about === "knowledge"
+      ? `was reminded of ${row.entryKind === undefined ? "an entry" : `a ${row.entryKind}`} of the project`
+      : row.kind === "closer"
+        ? "was told this work came closer to its own"
+        : row.kind === "changed"
+          ? "heard this work said more where it bears on its own"
+          : "was pointed to this related work";
+  const how =
+    row.source === "model"
+      ? " (a model that read both said so)"
+      : row.source === "paths"
+        ? " (it governs files the agent works on)"
+        : "";
+  return `${who} ${what}${how}`;
+}
+
 /** Every workspace project this person is on, as a tree. */
 export function buildWorkTree(input: {
   readonly status: PeerHubStatus;

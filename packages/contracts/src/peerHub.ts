@@ -551,6 +551,37 @@ export const PeerContextVersionText = Schema.Struct({
 });
 export type PeerContextVersionText = typeof PeerContextVersionText.Type;
 
+/**
+ * What Peer told one of this computer's agents: a work on the project that relates to what it does,
+ * or reviewed knowledge of the project (`.ai`) that bears on it. People see it to trust, or
+ * correct, what their agents are pointed to.
+ */
+export const PeerAdvice = Schema.Struct({
+  workspace: Schema.String,
+  project: Schema.String,
+  /** The agent session that was told: `claude:<session id>` or `codex:<session id>`. */
+  session: Schema.String,
+  about: Schema.Literals(["work", "knowledge"]),
+  /** A work: `task:<id>` or `project`. Knowledge: `kx:<entry id>`. */
+  scope: Schema.String,
+  /** How people name it: the work, or the knowledge entry's title. */
+  name: Schema.String,
+  /** How closely it relates: 1 it is about the same things, 2 the same files or symbols, 3 your files use what it changes. */
+  level: Schema.Number,
+  /** First told, came closer, or said more where it bears on the agent. */
+  kind: Schema.Literals(["new", "closer", "changed"]),
+  /** Why, in a sentence. */
+  why: Schema.String,
+  /** What matched: words, the paths an entry governs, or a model that read both. */
+  source: Schema.Literals(["words", "paths", "model"]),
+  /** For knowledge: decision, convention, learning or incident. */
+  entryKind: Schema.optional(Schema.String),
+  /** For knowledge: where the entry is, relative to the repository. */
+  path: Schema.optional(Schema.String),
+  at: Schema.String,
+});
+export type PeerAdvice = typeof PeerAdvice.Type;
+
 export const PeerCoordinationState = Schema.Struct({
   enabled: Schema.Boolean,
   policy: PeerCoordinationPolicy,
@@ -568,6 +599,8 @@ export const PeerCoordinationState = Schema.Struct({
   findings: Schema.Array(PeerFinding),
   /** The shared contexts of your projects' tasks, without their text. */
   contexts: Schema.Array(PeerWorkContext),
+  /** What Peer told this computer's agents of related work and the project's knowledge, newest first. */
+  advice: Schema.optional(Schema.Array(PeerAdvice)),
   /** How many knowledge candidates wait for people, per project. */
   candidates: Schema.Array(
     Schema.Struct({ workspace: Schema.String, project: Schema.String, proposed: Schema.Number }),

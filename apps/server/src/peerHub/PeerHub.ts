@@ -940,6 +940,7 @@ const make = Effect.gen(function* () {
       overlaps: [],
       findings: [],
       contexts: [],
+      advice: [],
       candidates: [],
     };
     return {
@@ -986,6 +987,21 @@ const make = Effect.gen(function* () {
         ...(context.restoredFrom === undefined ? {} : { restoredFrom: context.restoredFrom }),
         ...(context.gist === undefined ? {} : { gist: context.gist }),
         bytes: context.bytes ?? 0,
+      })),
+      advice: snapshot.advice.map((told) => ({
+        workspace: told.workspace,
+        project: told.project,
+        session: told.session,
+        about: told.about,
+        scope: told.scope,
+        name: told.name,
+        level: told.level,
+        kind: told.kind,
+        why: told.why,
+        source: told.source,
+        ...(told.entryKind === undefined ? {} : { entryKind: told.entryKind }),
+        ...(told.path === undefined ? {} : { path: told.path }),
+        at: told.at,
       })),
       candidates: snapshot.candidates.map((waiting) => ({
         workspace: waiting.workspace,

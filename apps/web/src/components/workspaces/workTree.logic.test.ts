@@ -11,6 +11,8 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   activeAgents,
+  adviceLabel,
+  adviceOnWork,
   buildWorkTree,
   taskMenuItems,
   taskNamedIn,
@@ -531,5 +533,124 @@ describe("activeAgents", () => {
       ["Main implementation", "working", "Kirkwood"],
       ["Side project", "working", "side"],
     ]);
+  });
+});
+
+describe("what Peer told an agent", () => {
+  const told = (
+    over: Partial<NonNullable<PeerHubStatus["coordination"]["advice"]>[number]> = {},
+  ): NonNullable<PeerHubStatus["coordination"]["advice"]>[number] => ({
+    workspace: "acme",
+    project: "kirkwood",
+    session: "claude:a",
+    about: "work",
+    scope: "task:str",
+    name: "STR",
+    level: 1,
+    kind: "new",
+    why: 'it shares "variance calculation" with what you do',
+    source: "words",
+    at: "2026-10-03T11:55:00Z",
+    ...over,
+  });
+  const withAdvice = (advice: ReadonlyArray<ReturnType<typeof told>>): PeerHubStatus => {
+    const base = status(kirkwood());
+    return {
+      ...base,
+      coordination: {
+        ...base.coordination,
+        sessions: [
+          {
+            id: "claude:a",
+            workspace: "acme",
+            project: "kirkwood",
+            email: "slavo@acme.test",
+            label: "Split payments",
+            status: "working",
+            task: "krk-812",
+            files: [],
+            claims: [],
+            local: true,
+          },
+          {
+            id: "codex:b",
+            workspace: "acme",
+            project: "kirkwood",
+            email: "yev@acme.test",
+            label: "UI",
+            status: "working",
+            task: "krk-812",
+            files: [],
+            claims: [],
+            local: false,
+          },
+          {
+            id: "claude:c",
+            workspace: "acme",
+            project: "kirkwood",
+            email: "chino@acme.test",
+            label: "Loose",
+            status: "working",
+            files: [],
+            claims: [],
+            local: false,
+          },
+        ],
+        advice,
+      },
+    };
+  };
+  const on = (status: PeerHubStatus, scope: string) =>
+    adviceOnWork({ status, workspace: "acme", project: "kirkwood", scope });
+
+  it("is listed on the work its agent is on, newest first, with whose agent it was", () => {
+    const status = withAdvice([
+      told({ at: "2026-10-03T11:50:00Z", name: "Partner Rec", scope: "task:partner-rec" }),
+      told({ at: "2026-10-03T11:58:00Z", session: "codex:b", kind: "closer", level: 3 }),
+      told({ session: "claude:c", name: "Loose ends" }),
+    ]);
+    const rows = on(status, "task:krk-812");
+    expect(rows.map((row) => [row.person, row.name, row.mine])).toEqual([
+      ["Yev", "STR", false],
+      ["Slavo", "Partner Rec", true],
+    ]);
+    // An agent on no task is the project's work.
+    expect(on(status, "project").map((row) => row.name)).toEqual(["Loose ends"]);
+    expect(on(status, "task:str")).toEqual([]);
+  });
+
+  it("leaves out an agent that no longer reports, other projects and other workspaces", () => {
+    const status = withAdvice([
+      told({ session: "claude:gone" }),
+      told({ project: "elsewhere" }),
+      told({ workspace: "globex" }),
+    ]);
+    expect(on(status, "task:krk-812")).toEqual([]);
+    // A Peer from before advice lists none.
+    const base = withAdvice([]);
+    const { advice: _gone, ...coordination } = base.coordination;
+    expect(on({ ...base, coordination }, "task:krk-812")).toEqual([]);
+  });
+
+  it("says in a line what happened, and what made Peer say it", () => {
+    const row = (over: Parameters<typeof told>[0]) => {
+      const rows = on(withAdvice([told({ session: "codex:b", ...over })]), "task:krk-812");
+      return adviceLabel(rows[0]!);
+    };
+    expect(row({})).toBe("Yev’s agent was pointed to this related work");
+    expect(row({ kind: "closer" })).toBe("Yev’s agent was told this work came closer to its own");
+    expect(row({ kind: "changed" })).toBe(
+      "Yev’s agent heard this work said more where it bears on its own",
+    );
+    expect(row({ source: "model" })).toBe(
+      "Yev’s agent was pointed to this related work (a model that read both said so)",
+    );
+    expect(
+      row({ about: "knowledge", scope: "kx:d1", entryKind: "decision", source: "paths" }),
+    ).toBe(
+      "Yev’s agent was reminded of a decision of the project (it governs files the agent works on)",
+    );
+    const mine = on(withAdvice([told({})]), "task:krk-812");
+    expect(adviceLabel(mine[0]!)).toBe("Your agent was pointed to this related work");
   });
 });
