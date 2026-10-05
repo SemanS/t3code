@@ -927,6 +927,39 @@ function TitleInput({
   );
 }
 
+/** A person on a task: their mark, and their whole name on hover or click. */
+function TaskPerson({ name, mine }: { readonly name: string; readonly mine: boolean }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Tooltip
+      open={open}
+      onOpenChange={(next, details) => {
+        // A click shows the name; it does not take it away again.
+        if (!next && details.reason === "trigger-press") return;
+        setOpen(next);
+      }}
+    >
+      <TooltipTrigger
+        render={
+          <button
+            type="button"
+            aria-label={name}
+            className="flex rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            onClick={(event) => {
+              event.stopPropagation();
+              setOpen(true);
+            }}
+            onDoubleClick={(event) => event.stopPropagation()}
+          />
+        }
+      >
+        <PersonMark name={name} mine={mine} />
+      </TooltipTrigger>
+      <TooltipPopup side="top">{name}</TooltipPopup>
+    </Tooltip>
+  );
+}
+
 /** Up to three people on a task, you first. */
 function TaskPeople({ threads }: { readonly threads: ReadonlyArray<WorkThreadNode> }) {
   const people = [
@@ -936,7 +969,7 @@ function TaskPeople({ threads }: { readonly threads: ReadonlyArray<WorkThreadNod
   return (
     <span className="flex items-center -space-x-1">
       {people.map((t) => (
-        <PersonMark key={`${t.mine}:${t.person}`} name={t.person} mine={t.mine} />
+        <TaskPerson key={`${t.mine}:${t.person}`} name={t.person} mine={t.mine} />
       ))}
     </span>
   );
@@ -1040,15 +1073,15 @@ function TaskRow({
             {task.title}
           </span>
         )}
-        {/* Who is on it at rest; the task's actions take the slot on hover or keyboard focus. */}
-        <span className="group/task-slot relative flex h-5 shrink-0 items-center justify-end">
-          <span className="flex items-center gap-1.5 text-xs text-muted-foreground group-hover/task:pointer-events-none group-hover/task:absolute group-hover/task:right-0 group-hover/task:opacity-0 group-has-[:focus-visible]/task-slot:pointer-events-none group-has-[:focus-visible]/task-slot:absolute group-has-[:focus-visible]/task-slot:right-0 group-has-[:focus-visible]/task-slot:opacity-0">
+        {/* Who is on it, always; the task's actions join them on hover or keyboard focus. */}
+        <span className="flex h-5 shrink-0 items-center text-xs text-muted-foreground">
+          <span className="flex items-center gap-1.5">
             <TaskPeople threads={task.threads} />
             {task.threads.length > 0 ? (
               <span className="tabular-nums">{task.threads.length}</span>
             ) : null}
           </span>
-          <span className="pointer-events-none absolute inset-y-0 right-0 flex items-center opacity-0 group-hover/task:pointer-events-auto group-hover/task:static group-hover/task:opacity-100 has-[:focus-visible]:pointer-events-auto has-[:focus-visible]:static has-[:focus-visible]:opacity-100">
+          <span className="flex w-0 items-center overflow-hidden opacity-0 group-hover/task:ml-1 group-hover/task:w-auto group-hover/task:opacity-100 has-[:focus-visible]:ml-1 has-[:focus-visible]:w-auto has-[:focus-visible]:opacity-100">
             <Tooltip>
               <TooltipTrigger
                 render={
