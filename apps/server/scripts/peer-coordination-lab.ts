@@ -18,6 +18,9 @@
 //   9. A line the keeper marks [project] becomes a knowledge candidate that a person dismisses.
 //  10. With kontext installed, Keep writes a candidate into the project's knowledge (staged), and
 //      the project's reviewed guidance on what to mark reaches a new agent.
+//  11. Codex agents take part as Claude Code's do.
+//  12. Two related tasks: an agent hears of the other task's work and context, reads it as a file
+//      or with `peer context`, and asks its agents with `peer ask` before any file is shared.
 //
 // It prints what each agent was told and leaves both computers' coordination logs.
 //
@@ -64,6 +67,8 @@ const hubPort = 42000 + Math.floor(Math.random() * 1000);
 const hubUrl = `http://127.0.0.1:${hubPort}`;
 const lab = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "peer-lab-"));
 const REAL = process.env.REAL_AGENTS === "1";
+/** REAL_SCENARIO=tasks: two related tasks on two computers instead of one task (A–D). */
+const TASKS = REAL && process.env.REAL_SCENARIO === "tasks";
 /** With real agents, a keeper idle this long gives way (production waits ten minutes). */
 const REAL_IDLE_SECS = 45;
 const bin = NodePath.join(repoRoot, "apps/server/dist/bin.mjs");
@@ -237,7 +242,14 @@ async function setUpWorkspace() {
     await hubCall("/v1/workspaces/acme/projects/lab/tasks", {
       method: "POST",
       session: admin,
-      body: { title: "Pricing", key: "KRK-1" },
+      body: { title: TASKS ? "Discount codes" : "Pricing", key: "KRK-1" },
+    });
+  }
+  if (TASKS) {
+    await hubCall("/v1/workspaces/acme/projects/lab/tasks", {
+      method: "POST",
+      session: admin,
+      body: { title: "Receipts show the discount", key: "KRK-2" },
     });
   }
 }
@@ -1076,6 +1088,196 @@ const program = Effect.gen(function* () {
     "taking Peer's hooks out of Codex leaves its person's own",
   );
 
+  // 12. Two related tasks on two computers (after the paper's coexisting contexts): an agent
+  //     hears of the other task's work and its shared context, reads it as a file or with
+  //     `peer context`, and asks its agents with `peer ask` before they share any file.
+  const createTask = (title: string, key: string) =>
+    hubCall("/v1/workspaces/acme/projects/lab/tasks", {
+      method: "POST",
+      session: hubSession,
+      body: { title, key },
+    });
+  const names = yield* Effect.promise(() => createTask("Speaker names", "KRK-7"));
+  yield* Effect.promise(() => createTask("Names in exports", "KRK-8"));
+  for (const computer of [ana, bob]) {
+    // Peer reads the work in the background after a sync.
+    let known = false;
+    for (let attempt = 0; attempt < 20 && !known; attempt += 1) {
+      const synced = yield* computer.client[WS_METHODS.peerHubSync]({});
+      const tasks = synced.workspaces[0]?.projects.find((p) => p.project.id === "lab")?.work.tasks;
+      known = tasks?.some((task) => task.key === "KRK-8") === true;
+      if (!known) yield* Effect.promise(() => sleep(500));
+    }
+    check(known, `${computer.name}'s Peer knows both tasks`);
+  }
+  git(ana.checkout, "checkout", "--quiet", "-b", "krk-7-speaker-names");
+  git(bob.checkout, "checkout", "--quiet", "-b", "krk-8-exports");
+  const namer = agent(ana, "lab-ana-names", "w2:p1");
+  const namerStart = namer.start().told;
+  told(`${namer.name} (on KRK-7)`, namerStart);
+  check(
+    namerStart?.includes("Peer connects you with the other agents on this project") === true &&
+      namerStart.includes(`peer ask <task> "<question>"`),
+    "an agent starts knowing what Peer's command offers",
+  );
+  check(
+    namerStart?.includes("You keep the shared context of KRK-7 · Speaker names") === true,
+    "the first agent on a task keeps its shared context",
+  );
+  yield* Effect.promise(() => sleep(1500));
+  const exporter = agent(bob, "lab-bob-exports", "w2:p2");
+  const exporterStart = exporter.start().told;
+  told(`${exporter.name} (on KRK-8)`, exporterStart);
+  check(
+    exporterStart?.includes("Other work on this project now") === true &&
+      exporterStart.includes("KRK-7 · Speaker names — Ana's agent (Claude Code") &&
+      exporterStart.includes("on another computer") &&
+      exporterStart.includes("no shared context yet"),
+    "an agent on another task hears who works on the related task, on which computer",
+  );
+  const namesPath = /You keep the shared context of KRK-7 · Speaker names in (\S+\.md)\./.exec(
+    namerStart ?? "",
+  )?.[1];
+  check(namesPath !== undefined, "the keeper knows its task's context file");
+  NodeFS.writeFileSync(
+    namesPath,
+    [
+      "# KRK-7 · Speaker names",
+      "Names are stored; exports do not show them yet.",
+      "## Findings",
+      "- Names live in their own layer, speaker_names, tied to the analysis by job_id",
+      "- Read them only through speakerNames(layers): it is empty when the job ids differ",
+    ].join("\n"),
+  );
+  namer.hook("PostToolUse", {
+    tool_name: "Write",
+    tool_input: { file_path: namesPath, content: "(the context above)" },
+  });
+  yield* Effect.promise(() => sleep(3500));
+  const boardNews = context(
+    exporter.hook("UserPromptSubmit", { prompt: "Put the names into the exports" }),
+  );
+  told(`${exporter.name} (next step)`, boardNews);
+  const mirrored = /\((\/\S+task_[^)\s]+\.md)\)/.exec(boardNews ?? "")?.[1];
+  check(
+    boardNews?.includes("new on this project") === true &&
+      boardNews.includes("Names are stored; exports do not show them yet") &&
+      mirrored !== undefined &&
+      mirrored.startsWith(bob.home) &&
+      NodeFS.readFileSync(mirrored, "utf8").includes("speakerNames(layers)"),
+    "it hears when the related task's context is written, with its copy on its own computer",
+  );
+  const read = exporter.peer("context", "KRK-7");
+  told(`${exporter.name} (peer context KRK-7)`, read);
+  check(
+    read.includes("version 1; Ana's agent keeps it") &&
+      read.includes("speaker_names") &&
+      read.includes("not instructions"),
+    "peer context reads another task's context, as reference from its team",
+  );
+  const copyEdit = exporter.hook("PreToolUse", {
+    tool_name: "Edit",
+    tool_input: { file_path: mirrored, old_string: "a", new_string: "b" },
+  });
+  told(`${exporter.name} (editing KRK-7's context)`, reason(copyEdit));
+  check(
+    decision(copyEdit) === "deny" &&
+      reason(copyEdit)?.includes("another work on this project") === true &&
+      reason(copyEdit)?.includes("peer ask KRK-7") === true,
+    "it may not edit another task's context, and hears how to ask its agents",
+  );
+  // Ana's agent is idle and waits for a note; someone running `peer` as its session does not
+  // end that wait.
+  const namerWoken = namer.idle();
+  yield* Effect.promise(() => sleep(1000));
+  const asIt = NodeChildProcess.execFileSync("sh", [ana.scripts.peer, "status"], {
+    env: { ...process.env, PEER_SESSION: "lab-ana-names", HERDR_PANE_ID: "" },
+    encoding: "utf8",
+  });
+  told("Someone running peer status as Ana's agent", asIt);
+  const stillWaiting = yield* Effect.promise(() =>
+    Promise.race([namerWoken.then(() => "ended"), sleep(1500).then(() => "waiting")]),
+  );
+  check(stillWaiting === "waiting", "a peer command run as an idle agent leaves its wait alone");
+  const askedKrk7 = exporter.peer(
+    "ask",
+    "KRK-7",
+    "Where do you keep the speaker names, and how do I read them?",
+  );
+  told(`${exporter.name} (peer ask KRK-7)`, askedKrk7);
+  check(
+    askedKrk7.startsWith(
+      "Asked the agents on KRK-7 · Speaker names: Ana's agent (on another computer)",
+    ),
+    "peer ask reaches the agents at work on the other task",
+  );
+  const question = yield* Effect.promise(() =>
+    Promise.race([namerWoken, sleep(15_000).then(() => "(timed out)")]),
+  );
+  told(`${namer.name} (woken up)`, question);
+  check(
+    question?.includes("asks the agents on your task KRK-7 · Speaker names") === true &&
+      question.includes("how do I read them?"),
+    "the idle agent on that task wakes up with the question",
+  );
+  told(
+    `${namer.name} (peer note)`,
+    namer.peer(
+      "note",
+      "Names are the speaker_names layer; read them with speakerNames(layers), never by label.",
+    ),
+  );
+  yield* Effect.promise(() => sleep(3500));
+  const answer = context(exporter.hook("UserPromptSubmit", { prompt: "go on" }));
+  told(`${exporter.name} (next step)`, answer);
+  check(
+    answer?.includes("your question about KRK-7 · Speaker names") === true &&
+      answer.includes("speakerNames(layers), never by label"),
+    "the asking agent hears the answer at its next step",
+  );
+  told(
+    `${exporter.name} (peer resolve)`,
+    exporter.peer("resolve", "Exports read names with speakerNames(layers); KRK-7 owns the layer."),
+  );
+  yield* Effect.promise(() => sleep(3500));
+  const afterAsk = yield* Effect.promise(() =>
+    hubCall("/v1/workspaces/acme/coord", { session: hubSession }),
+  );
+  const exporterNow = (
+    afterAsk.sessions as ReadonlyArray<{ id: string; claims: ReadonlyArray<string> }>
+  ).find((session) => session.id === "claude:lab-bob-exports");
+  check(
+    exporterNow !== undefined && !exporterNow.claims.some((claim) => claim.startsWith("task:")),
+    "once settled, the question no longer claims the task",
+  );
+  check(
+    (afterAsk.overlaps as ReadonlyArray<{ files: ReadonlyArray<string>; state: string }>).some(
+      (o) => o.files.includes(`task:${String(names.id)}`) && o.state === "resolved",
+    ),
+    "and people see the question and its agreement among the overlaps",
+  );
+  // Peer's own runs of an agent, like kontext wording knowledge, are no agents at work.
+  const toolRun = NodeChildProcess.execFileSync("sh", [bob.scripts.hook], {
+    env: { ...process.env, PEER_COORDINATION: "off" },
+    input: JSON.stringify({
+      session_id: "lab-kontext-run",
+      cwd: bob.checkout,
+      transcript_path: "/dev/null",
+      hook_event_name: "SessionStart",
+      source: "startup",
+    }),
+    encoding: "utf8",
+  }).trim();
+  check(
+    toolRun === "" &&
+      !events(bob).some(
+        (entry) => entry.event === "session.started" && entry.session === "claude:lab-kontext-run",
+      ),
+    "Peer's own runs of an agent stay out of coordination",
+  );
+  namer.hook("SessionEnd", { reason: "exit" });
+  exporter.hook("SessionEnd", { reason: "exit" });
+
   for (const computer of [ana, bob]) {
     const lines = NodeFS.readFileSync(computer.log, "utf8").trim().split("\n");
     const events = lines.map((line) => (JSON.parse(line) as { event: string }).event);
@@ -1659,8 +1861,176 @@ const realProgram = Effect.gen(function* () {
   }
 }).pipe(Effect.scoped);
 
+/**
+ * REAL_SCENARIO=tasks: the demo's situation. Ana's agent builds discount codes on KRK-1; Bob's,
+ * on KRK-2, shows them on receipts and needs what KRK-1 builds, which its own checkout does not
+ * have yet (another computer, nothing committed). Bob's agent starts once KRK-1's context says
+ * where that work stands. It checks Bob's agent hears of KRK-1's work and context as it starts,
+ * and reports whether it read that context, asked KRK-1's agent, and got an answer.
+ */
+const realTasksProgram = Effect.gen(function* () {
+  yield* Effect.promise(() =>
+    waitFor("the hub", async () => (await fetch(`${hubUrl}/health`)).ok, hub.output),
+  );
+  yield* Effect.promise(setUpWorkspace);
+  const anaHerdr = startHerdr("Ana");
+  const bobHerdr = startHerdr("Bob");
+  const ana = yield* startComputer("Ana", "ana@acme.test", anaHerdr.socket);
+  const bob = yield* startComputer("Bob", "bob@acme.test", bobHerdr.socket);
+  git(ana.checkout, "checkout", "--quiet", "-b", "krk-1-discounts");
+  git(bob.checkout, "checkout", "--quiet", "-b", "krk-2-receipts");
+  for (const computer of [ana, bob]) {
+    let known = false;
+    for (let attempt = 0; attempt < 20 && !known; attempt += 1) {
+      const synced = yield* computer.client[WS_METHODS.peerHubSync]({});
+      const tasks = synced.workspaces[0]?.projects.find((p) => p.project.id === "lab")?.work.tasks;
+      known = tasks?.some((task) => task.key === "KRK-2") === true;
+      if (!known) yield* Effect.promise(() => sleep(500));
+    }
+    check(known, `${computer.name}'s Peer knows both tasks`);
+  }
+  const [anaKind, bobKind] = (process.env.REAL_KINDS ?? "claude,claude").split(",");
+  const start = (kind: string | undefined, h: HerdrServer, computer: Computer, name: string) =>
+    kind === "codex" ? startCodex(h, computer, name) : startClaude(h, computer, name);
+  const anaPane = yield* Effect.promise(() => start(anaKind, anaHerdr, ana, "ana"));
+  const agents: Array<{ computer: Computer; h: HerdrServer; pane: string }> = [
+    { computer: ana, h: anaHerdr, pane: anaPane },
+  ];
+  const report = () => {
+    for (const { computer, h, pane } of agents) {
+      console.log(`\n===== ${computer.name}'s agent, last screen =====`);
+      console.log(
+        herdrText(h, "pane", "read", pane, "--source", "recent-unwrapped", "--lines", "220"),
+      );
+      console.log(`===== ${computer.name}'s checkout: git diff and new files =====`);
+      console.log(git(computer.checkout, "diff"));
+      console.log(git(computer.checkout, "status", "--short"));
+      console.log(`===== ${computer.name}'s coordination log =====`);
+      for (const entry of events(computer)) {
+        if (
+          /^(shared|context|finding|files|session|board|ask)\.|^(decision|note\.agent|resolve\.agent|news|wake|overlap\.opened|cli|ask)$/.test(
+            entry.event,
+          )
+        ) {
+          console.log(JSON.stringify(entry).slice(0, 1200));
+        }
+      }
+    }
+    herdrText(anaHerdr, "server", "stop");
+    herdrText(bobHerdr, "server", "stop");
+  };
+  const approve = () => {
+    for (const { computer, h, pane } of agents) {
+      if (statusOf(h, pane) !== "blocked") continue;
+      const screen = herdrText(h, "pane", "read", pane, "--source", "visible");
+      if (/Do you want to proceed\?|❯\s*1\. Yes/.test(screen)) {
+        herdrText(h, "pane", "send-keys", pane, "enter");
+        say("approved", `${computer.name}'s agent's permission prompt`);
+      }
+    }
+  };
+  const readContext = (scope: string) =>
+    hubCall(`/v1/workspaces/acme/contexts/lab/${scope}`, { session: hubSession }).catch(
+      () => null,
+    ) as Promise<Record<string, any> | null>;
+  try {
+    const anaTask =
+      "Add discount codes: create src/discounts.ts with a map of two codes of your choice to percentages, and applyDiscount(cents, code) that returns the discounted price and the amount saved. Prices are integer cents. Keep it small; do not run tests or builds.";
+    herdrJson(anaHerdr, "agent", "prompt", anaPane, anaTask);
+    say("Ana's agent prompted (KRK-1)", anaTask);
+    // Bob's agent starts once KRK-1's context says where that work stands, and Ana's agent is done.
+    for (let waited = 0; waited < 8 * 60_000; waited += 3000) {
+      yield* Effect.promise(() => sleep(3000));
+      approve();
+      const krk1 = yield* Effect.promise(() => readContext("task:krk-1"));
+      const idle = ["idle", "done"].includes(statusOf(anaHerdr, anaPane));
+      if (krk1 !== null && Number(krk1.version) >= 1 && idle) break;
+    }
+    const krk1 = yield* Effect.promise(() => readContext("task:krk-1"));
+    told(
+      "KRK-1's shared context when Bob's agent starts",
+      krk1 === null ? null : String(krk1.text),
+    );
+    check(krk1 !== null && Number(krk1.version) >= 1, "KRK-1's agent wrote its task's context");
+    const bobPane = yield* Effect.promise(() => start(bobKind, bobHerdr, bob, "bob"));
+    agents.push({ computer: bob, h: bobHerdr, pane: bobPane });
+    // REAL_ASK=1: Bob's person also tells it to agree with KRK-1's agent, as the demo's did.
+    const agree =
+      process.env.REAL_ASK === "1"
+        ? " Before you change anything, agree with that agent how a receipt line looks when a code is unknown."
+        : "";
+    const bobTask = `Receipts should show which discount code was applied and how much it saved: change src/receipt.ts. Another agent builds the discount codes on task KRK-1, and its code is not in your checkout yet: use what it builds, do not write discount logic of your own.${agree} Keep it small; do not run tests or builds.`;
+    herdrJson(bobHerdr, "agent", "prompt", bobPane, bobTask);
+    say("Bob's agent prompted (KRK-2)", bobTask);
+    let quiet = 0;
+    for (let elapsed = 0; elapsed < 12 * 60_000 && quiet < 45_000; elapsed += 5000) {
+      yield* Effect.promise(() => sleep(5000));
+      approve();
+      const statuses = agents.map(({ h, pane }) => statusOf(h, pane));
+      quiet = statuses.every((s) => s === "idle" || s === "done") ? quiet + 5000 : 0;
+      say("agents", `Ana's ${statuses[0]}, Bob's ${statuses[1]}`);
+    }
+
+    const bobEvents = events(bob);
+    check(
+      bobEvents.some(
+        (e) =>
+          e.event === "context.injected" &&
+          ((e.board as ReadonlyArray<string> | undefined) ?? []).includes("task:krk-1"),
+      ),
+      "Bob's agent starts knowing KRK-1's work and where its context is",
+    );
+    const bobScreen = herdrText(
+      bobHerdr,
+      "pane",
+      "read",
+      bobPane,
+      "--source",
+      "recent-unwrapped",
+      "--lines",
+      "400",
+    );
+    const cli = bobEvents.filter((e) => e.event === "cli");
+    // What its harness ran: Claude Code's transcript has every tool call (Codex's is elsewhere).
+    const transcripts = bobEvents
+      .filter((e) => e.event === "session.started" && typeof e.transcript === "string")
+      .map((e) => String(e.transcript))
+      .filter((path) => NodeFS.existsSync(path))
+      .map((path) => NodeFS.readFileSync(path, "utf8"));
+    const readIt =
+      cli.some((e) => e.command === "context" && /krk-1/i.test(String((e.args as string[])[0]))) ||
+      transcripts.some((text) => /"tool_use"[^\n]*task_krk-1\.md/.test(text)) ||
+      /task_krk-1\.md/.test(bobScreen);
+    observe(readIt, "Bob's agent read KRK-1's context (peer context KRK-1, or its file)");
+    const asked = cli.some((e) => e.command === "ask");
+    observe(asked, "Bob's agent asked KRK-1's agent (peer ask)");
+    if (asked) {
+      observe(
+        events(ana).some((e) => e.event === "wake" || e.event === "news"),
+        "Ana's agent heard the question",
+      );
+      observe(
+        events(ana).some((e) => e.event === "note.agent"),
+        "Ana's agent answered it",
+      );
+    }
+    const bobDiff = git(bob.checkout, "diff");
+    observe(/applyDiscount|discounts/.test(bobDiff), "Bob's change builds on what KRK-1 built");
+    observe(
+      !NodeFS.existsSync(NodePath.join(bob.checkout, "src/discounts.ts")),
+      "Bob's agent wrote no discount logic of its own",
+    );
+    const krk2 = yield* Effect.promise(() => readContext("task:krk-2"));
+    told("KRK-2's shared context at the end", krk2 === null ? null : String(krk2.text));
+  } finally {
+    report();
+  }
+}).pipe(Effect.scoped);
+
 try {
-  await Effect.runPromise(process.env.REAL_AGENTS === "1" ? realProgram : program);
+  await Effect.runPromise(
+    TASKS ? realTasksProgram : process.env.REAL_AGENTS === "1" ? realProgram : program,
+  );
   say("PASS");
   process.exitCode = 0;
 } catch (error) {

@@ -16,6 +16,7 @@ import { Switch } from "../ui/switch";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { failureMessage } from "./WorkspaceAccess";
+import { taskLabel } from "./workTree.logic";
 
 const POLICIES: ReadonlyArray<{
   readonly value: PeerCoordinationPolicy;
@@ -55,6 +56,34 @@ export function personName(status: PeerHubStatus, workspace: string, email: stri
   }
   const local = email.split("@")[0]?.split(/[._-]/)[0] ?? email;
   return local === "" ? email : `${local[0]?.toUpperCase() ?? ""}${local.slice(1)}`;
+}
+
+/** The tasks of the project an overlap is in. */
+function projectTasks(status: PeerHubStatus, overlap: PeerOverlap) {
+  return (
+    status.workspaces
+      .find((w) => w.slug === overlap.workspace)
+      ?.projects.find((p) => p.project.id === overlap.project)?.work.tasks ?? []
+  );
+}
+
+/**
+ * What an overlap is about: the files both agents change, or the task one
+ * agent asked the agents of (`peer ask` claims `task:<id>`).
+ */
+export function overlapTopic(status: PeerHubStatus, overlap: PeerOverlap): string {
+  const tasks = projectTasks(status, overlap);
+  const asked = overlap.files.flatMap((path) => {
+    if (!path.startsWith("task:")) return [];
+    const id = path.slice("task:".length);
+    const task = tasks.find((candidate) => candidate.id === id);
+    return [task === undefined ? id : taskLabel(task)];
+  });
+  const files = overlap.files.filter((path) => !path.startsWith("task:"));
+  return [
+    ...(asked.length === 0 ? [] : [`A question about ${asked.join(", ")}`]),
+    ...(files.length === 0 ? [] : [files.join(", ")]),
+  ].join(" · ");
 }
 
 /** The agents Peer adds its hooks to, so they take part wherever they run (herdr, Peer, a terminal). */
@@ -255,10 +284,13 @@ function OverlapCard({
   const [busy, setBusy] = useState(false);
   const scope = { workspace: overlap.workspace, project: overlap.project, overlap: overlap.id };
   const nameOf = (email: string) => personName(status, overlap.workspace, email);
+  const tasks = projectTasks(status, overlap);
   const sides = overlap.sessions.map((id) => {
     const session = status.coordination.sessions.find((s) => s.id === id);
     if (session === undefined) return "an agent no longer at work";
-    return `${session.local ? "your" : `${nameOf(session.email)}'s`} agent (“${session.label}”)`;
+    const task = tasks.find((candidate) => candidate.id === session.task);
+    const on = task === undefined ? "" : ` on ${taskLabel(task)}`;
+    return `${session.local ? "your" : `${nameOf(session.email)}'s`} agent${on} (“${session.label}”)`;
   });
   const act = async (title: string, action: () => Promise<AtomCommandResult<unknown, unknown>>) => {
     setBusy(true);
@@ -274,7 +306,7 @@ function OverlapCard({
     <div className="mx-1 flex flex-col gap-1.5 rounded-md border border-sidebar-border p-2 text-xs">
       <p className="flex items-center gap-1.5 font-medium text-sidebar-foreground">
         <CircleAlertIcon className="size-3.5 shrink-0 text-warning" />
-        <span className="min-w-0 truncate">{overlap.files.join(", ")}</span>
+        <span className="min-w-0 truncate">{overlapTopic(status, overlap)}</span>
       </p>
       <p className="text-muted-foreground">{sides.join(" and ")}</p>
       {overlap.notes.slice(-4).map((entry) => (

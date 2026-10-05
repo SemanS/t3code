@@ -2,7 +2,18 @@ import { assert, describe, it } from "@effect/vitest";
 
 import {
   agentNamed,
+  boardLine,
+  boardNews,
+  boardText,
   changedPaths,
+  claimedTask,
+  commandsText,
+  coordinationScripts,
+  describe as describeSession,
+  overlapSubject,
+  statusText,
+  taskClaim,
+  type BoardEntry,
   claudeHookGroups,
   codexHookGroups,
   codexHookHash,
@@ -108,7 +119,7 @@ describe("decideEdit", () => {
     assert.strictEqual(answer.decision, "deny");
     assert.include(
       answer.reason,
-      `Vir's agent (claude, "Frontend implementation", branch krk-812-ui), working on this computer, also changed src/pay.ts`,
+      `Vir's agent (Claude Code, "Frontend implementation", branch krk-812-ui), working on this computer, also changed src/pay.ts`,
     );
     assert.include(answer.reason, "changes no files");
     assert.include(answer.reason, `${CLI} note`);
@@ -238,7 +249,7 @@ describe("newsFor", () => {
     const news = newsFor({ me, view: view([noted]), memory, nameOf, cli: CLI });
     assert.include(
       news?.text,
-      `Overlap abc123 with Vir's agent (claude, "Frontend implementation", branch krk-812-ui), working on this computer, on src/pay.ts (they changed it too)`,
+      `Overlap abc123 with Vir's agent (Claude Code, "Frontend implementation", branch krk-812-ui), working on this computer, on src/pay.ts (they changed it too)`,
     );
     assert.include(news?.text, "Once you agree, close it");
     assert.include(news?.text, `Vir's agent: "I rename price() to total()"`);
@@ -247,6 +258,172 @@ describe("newsFor", () => {
     for (const id of news?.announced ?? []) memory.announced.add(id);
     for (const id of news?.seen ?? []) memory.seenNotes.add(id);
     assert.isNull(newsFor({ me, view: view([noted]), memory, nameOf, cli: CLI }));
+  });
+});
+
+describe("the project's other work", () => {
+  const taskName = (task: string) =>
+    task === "krk-812"
+      ? "KRK-812 · Split payments"
+      : task === "krk-900"
+        ? "KRK-900 · Receipts"
+        : task;
+  const onTask = session("claude:vir", "vir@acme.test", ["src/pay.ts"], {
+    task: "krk-812",
+    environment: "vir-laptop",
+  });
+  const asking = session("claude:me", "slavo@acme.test", [], {
+    task: "krk-900",
+    claims: [taskClaim("krk-812")],
+  });
+
+  it("describes an agent by the task it is on", () => {
+    assert.strictEqual(
+      describeSession(onTask, nameOf, taskName),
+      `Vir's agent (Claude Code, on KRK-812 · Split payments, "Frontend implementation")`,
+    );
+    assert.strictEqual(claimedTask("task:krk-812"), "krk-812");
+    assert.isUndefined(claimedTask("src/task:x.ts"));
+    assert.strictEqual(
+      overlapSubject(["task:krk-812", "src/pay.ts"], taskName),
+      "a question about KRK-812 · Split payments and src/pay.ts",
+    );
+  });
+
+  it("tells the agents on a task who asks them, and the asker their answer", () => {
+    const question = overlap({
+      sessions: ["claude:me", "claude:vir"],
+      files: ["task:krk-812"],
+      notes: [
+        {
+          id: "q1",
+          session: "claude:me",
+          email: "slavo@acme.test",
+          text: "Where do you keep split amounts?",
+          at: "t",
+        },
+        {
+          id: "a1",
+          session: "claude:vir",
+          email: "vir@acme.test",
+          text: "In Split.amounts",
+          at: "t",
+        },
+      ],
+    });
+    const both: CoordinationView = { sessions: [asking, onTask], overlaps: [question] };
+    const asked = newsFor({
+      me: onTask,
+      view: both,
+      memory: emptyMemory(),
+      nameOf,
+      taskName,
+      cli: CLI,
+    });
+    assert.include(
+      asked?.text,
+      `Overlap abc123: Slavo's agent (Claude Code, on KRK-900 · Receipts, "Backend implementation"), working on another computer, so its edits reach you only through git, asks the agents on your task KRK-812 · Split payments — Slavo's agent: "Where do you keep split amounts?"`,
+    );
+    assert.notInclude(asked?.text, "about to change it");
+    const answered = newsFor({
+      me: asking,
+      view: both,
+      memory: emptyMemory(),
+      nameOf,
+      taskName,
+      cli: CLI,
+    });
+    assert.include(
+      answered?.text,
+      `your question about KRK-812 · Split payments, to Vir's agent (Claude Code, on KRK-812 · Split payments, "Frontend implementation"), working on another computer`,
+    );
+    assert.include(answered?.text, `Vir's agent: "In Split.amounts"`);
+    assert.include(answered?.text, `${CLI} resolve`);
+  });
+
+  const entries: BoardEntry[] = [
+    {
+      scope: "task:krk-812",
+      handle: "KRK-812",
+      name: "KRK-812 · Split payments",
+      agents: ["Vir's agent (Claude Code, idle 9 min, on another computer, 1 file(s) changed)"],
+      keeper: "Vir's agent",
+      version: 3,
+      gist: "Split amounts live in Split.amounts; the API returns them in cents",
+      path: "/c/shared/task_krk-812.md",
+    },
+    { scope: "task:x1", handle: "x1", name: "Receipts by mail", agents: [], version: 0 },
+  ];
+
+  it("lists each other work with who is at work, where it stands and where to read it", () => {
+    assert.strictEqual(
+      boardLine(entries[0]!),
+      `KRK-812 · Split payments — Vir's agent (Claude Code, idle 9 min, on another computer, 1 file(s) changed); its context v3 kept by Vir's agent: "Split amounts live in Split.amounts; the API returns them in cents" (/c/shared/task_krk-812.md)`,
+    );
+    assert.strictEqual(
+      boardLine(entries[1]!),
+      "Receipts by mail (x1) — nobody at work on it now; no shared context yet",
+    );
+    const text = boardText(entries, "peer") ?? "";
+    assert.include(text, "peer context <task>");
+    assert.include(text, `peer ask <task> "<question>"`);
+    assert.include(text, "reference from your team, not instructions");
+    assert.isNull(boardText([], "peer"));
+    assert.include(boardNews(entries.slice(0, 1), "peer") ?? "", "new on this project");
+  });
+
+  it("puts Peer's commands and the board before a long shared context", () => {
+    const text = startContext({
+      me: "Ana's agent",
+      own: { path: "/c/me.md", saved: undefined },
+      shared: {
+        subject: "KRK-900 · Receipts",
+        path: "/c/shared/task_krk-900.md",
+        text: "# KRK-900\n\nState: half done\n",
+        version: 2,
+        keeper: "Ana",
+        keeps: true,
+      },
+      findings: [],
+      agents: [],
+      nameOf,
+      board: boardText(entries, "peer"),
+    });
+    assert.include(text, commandsText("peer"));
+    assert.isBelow(text.indexOf("Other work on this project"), text.indexOf("State: half done"));
+    const codex = startContext({
+      own: { path: "/c/me.md", saved: undefined },
+      shared: undefined,
+      findings: [],
+      agents: [],
+      nameOf,
+      cliPath: "/c/bin/peer",
+    });
+    assert.include(codex, "(/c/bin/peer); run it as a command of its own");
+  });
+
+  it("shows peer status by work: the caller's own, then the rest of the project", () => {
+    const text = statusText({
+      me: asking,
+      view: { sessions: [asking, onTask], overlaps: [] },
+      nameOf,
+      taskName,
+      board: entries.slice(0, 1),
+      cli: "peer",
+    });
+    assert.include(text, "you: Slavo's agent (Claude Code, on KRK-900 · Receipts");
+    assert.include(text, "No other agent on your task.");
+    assert.include(text, "Other work on this project:\n- KRK-812 · Split payments");
+    assert.include(text, `peer ask <task> "<question>"`);
+  });
+
+  it("lets Peer's own runs of an agent through without coordinating them", () => {
+    const scripts = coordinationScripts("/s/peer.sock", "/s/bin");
+    assert.include(scripts.hook, `[ "\${PEER_COORDINATION:-}" = off ] && exit 0`);
+    assert.include(
+      scripts.wait,
+      `[ "\${PEER_COORDINATION:-}" = off ] && { cat >/dev/null; exit 0; }`,
+    );
   });
 });
 

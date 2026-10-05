@@ -31,9 +31,11 @@ export interface KontextRun {
  * ~/.claude is not the same: Claude Code then looks for another sign-in.
  */
 function kontextEnv(): NodeJS.ProcessEnv {
+  // The agent kontext runs to word knowledge is Peer's own tool, no agent at work on the project:
+  // Peer's hooks let it be.
+  const env: NodeJS.ProcessEnv = { ...process.env, PEER_COORDINATION: "off" };
   const own = process.env.PEER_KONTEXT_CLAUDE_CONFIG_DIR;
-  if (own === undefined) return process.env;
-  const env = { ...process.env };
+  if (own === undefined) return env;
   delete env.CLAUDE_CONFIG_DIR;
   if (own !== "") env.CLAUDE_CONFIG_DIR = own;
   return env;

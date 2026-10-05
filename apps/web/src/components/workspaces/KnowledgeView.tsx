@@ -99,6 +99,11 @@ export function KnowledgeView({
 
   const settle = (candidate: PeerKnowledgeCandidate, next: PeerKnowledgeCandidate) =>
     setDecided((list) => [...list.filter((c) => c.id !== candidate.id), next]);
+  /** Who decided, until the hub's list says so itself: the person signed in here, now. */
+  const decidedNow = () => ({
+    ...(status?.email === null || status?.email === undefined ? {} : { decidedBy: status.email }),
+    decidedAt: new Date().toISOString(),
+  });
 
   const decide = async (candidate: PeerKnowledgeCandidate, next: Status) => {
     if (environmentId === null) return;
@@ -107,8 +112,11 @@ export function KnowledgeView({
       input: { workspace, project, id: candidate.id, status: next },
     });
     if (!reportFailure("Could not record that", result)) return;
-    const { keptAs: _kept, ...rest } = candidate;
-    settle(candidate, { ...rest, status: next });
+    const { keptAs: _kept, decidedBy: _by, decidedAt: _at, ...rest } = candidate;
+    settle(
+      candidate,
+      next === "proposed" ? { ...rest, status: next } : { ...rest, ...decidedNow(), status: next },
+    );
   };
 
   /** Into the project's knowledge through kontext when it keeps knowledge here, else by hand. */
@@ -127,7 +135,7 @@ export function KnowledgeView({
     setBusy(null);
     if (!reportFailure("Could not keep it", result) || result._tag !== "Success") return;
     const kept = result.value;
-    settle(candidate, { ...candidate, status: "promoted", keptAs: kept.keptAs });
+    settle(candidate, { ...candidate, ...decidedNow(), status: "promoted", keptAs: kept.keptAs });
     toastManager.add(
       stackedThreadToast({
         type: "success",
@@ -325,11 +333,15 @@ function Guidance({
 }
 
 /** What this page decided wins over the list it read before. */
+/** The hub's list with what was decided here since it was read; the hub's word once it has it. */
 function mergeDecided(
   read: ReadonlyArray<PeerKnowledgeCandidate>,
   decided: ReadonlyArray<PeerKnowledgeCandidate>,
 ): ReadonlyArray<PeerKnowledgeCandidate> {
-  return read.map((candidate) => decided.find((d) => d.id === candidate.id) ?? candidate);
+  return read.map((candidate) => {
+    const here = decided.find((d) => d.id === candidate.id);
+    return here === undefined || here.status === candidate.status ? candidate : here;
+  });
 }
 
 /** Who found it and where, as people name them. */

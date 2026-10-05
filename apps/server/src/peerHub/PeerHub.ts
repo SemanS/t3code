@@ -2077,6 +2077,35 @@ const make = Effect.gen(function* () {
     return local === "" ? email : `${local[0]?.toUpperCase() ?? ""}${local.slice(1)}`;
   };
 
+  /**
+   * The Peer thread whose agent runs as a provider session, by the session id
+   * its harness gives hooks: Peer starts Claude Code with its thread's native
+   * id, and Codex's thread id is it too. Threads at work come first, since a
+   * session's hooks start as its thread's turn does.
+   */
+  const threadOfSession = (nativeId: string) =>
+    Effect.gen(function* () {
+      const shell = yield* projections.getShellSnapshot({ location: "active" });
+      // Only threads at work, or whose run started lately: a session's hooks start with its run.
+      const lately = DateTime.toEpochMillis(yield* DateTime.now) - 15 * 60 * 1000;
+      const candidates = shell.threads
+        .filter(
+          (thread) =>
+            (thread.activityRunStatus ?? null) !== null ||
+            (thread.latestRunStartedAt !== undefined &&
+              thread.latestRunStartedAt !== null &&
+              DateTime.toEpochMillis(thread.latestRunStartedAt) > lately),
+        )
+        .slice(0, 20);
+      for (const thread of candidates) {
+        const records = yield* projections.getThreadRecords(thread.id, ["providerThreads"]);
+        if (records.providerThreads.some((p) => p.nativeThreadRef?.nativeId === nativeId)) {
+          return `peer:${thread.id}`;
+        }
+      }
+      return undefined;
+    }).pipe(Effect.orElseSucceed(() => undefined));
+
   const withHub = <A>(
     call: (hubUrl: string, session: string) => Effect.Effect<A, PeerHubError>,
   ): Promise<A> =>
@@ -2155,18 +2184,23 @@ const make = Effect.gen(function* () {
         notify: (title, body) => void Herdr.notifyHerdr(title, body),
         changed: () => void Effect.runFork(publish.pipe(Effect.ignore)),
         contextsDir: coordinationContexts,
-        taskOf: (workspace, project, key, texts) => {
+        taskOf: (workspace, project, keys, texts) => {
           const s = currentState();
-          const assigned = s.persisted.assignments?.[key];
-          if (
-            assigned !== undefined &&
-            assigned.workspace === workspace &&
-            assigned.project === project
-          ) {
-            return assigned.task;
+          for (const key of keys) {
+            const assigned = s.persisted.assignments?.[key];
+            if (
+              assigned !== undefined &&
+              assigned.workspace === workspace &&
+              assigned.project === project
+            ) {
+              return assigned.task;
+            }
           }
           return taskNamed(s.work.get(sharedKey(workspace, project))?.tasks ?? [], texts);
         },
+        threadOf: (nativeId) => Effect.runPromise(threadOfSession(nativeId)),
+        tasks: (workspace, project) =>
+          currentState().work.get(sharedKey(workspace, project))?.tasks ?? [],
         taskName: (workspace, project, task) => {
           const found = currentState()
             .work.get(sharedKey(workspace, project))

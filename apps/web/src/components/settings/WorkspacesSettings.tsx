@@ -14,7 +14,7 @@ import type { EnvironmentPresentation } from "../../state/environments";
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { formatRelativeTime } from "../../timestampFormat";
+import { formatRelativeTimeLabel } from "../../timestampFormat";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -154,7 +154,7 @@ function SignedIn({
         title={`Signed in as ${status.email ?? "you"}`}
         description={[
           status.hubUrl,
-          status.lastSyncAt ? `synced ${formatRelativeTime(status.lastSyncAt)}` : null,
+          status.lastSyncAt ? `synced ${formatRelativeTimeLabel(status.lastSyncAt)}` : null,
         ]
           .filter(Boolean)
           .join(" · ")}

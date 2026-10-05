@@ -20,13 +20,17 @@ import {
   AGENT_NAMES,
   agentNamed,
   announcementKey,
+  boardNews,
+  boardText,
   changedPaths,
+  claimedTask,
   closeOutText,
   contestKey,
   contextTemplate,
   contextWritten,
   coordinationScripts,
   decideEdit,
+  describe,
   editedFiles,
   emptyMemory,
   compactionNudge,
@@ -48,10 +52,12 @@ import {
   shortId,
   startContext,
   statusText,
+  taskClaim,
   teamLines,
   withoutOutputTrim,
   teamNews,
   touches,
+  type BoardEntry,
   type ContextHolder,
   type CoordinationView,
   type SessionMemory,
@@ -135,15 +141,32 @@ export interface BrokerDeps {
   /** Where agents keep their working contexts, one file per session. */
   readonly contextsDir: string;
   /**
-   * The task a session works on: the one its herdr agent was put on, else the
-   * one its branch or label names by key.
+   * The task a session works on: the one its thread was put on (a Peer thread,
+   * a herdr agent: the first of `keys` with one), else the one its branch or
+   * label names by key.
    */
   readonly taskOf: (
     workspace: string,
     project: string,
-    session: string,
+    keys: ReadonlyArray<string>,
     texts: ReadonlyArray<string | undefined>,
   ) => string | undefined;
+  /**
+   * The Peer thread (`peer:<thread id>`) whose agent runs as this provider
+   * session, by the session id its harness gives hooks; none for an agent
+   * Peer does not run (herdr, a terminal).
+   */
+  readonly threadOf: (nativeId: string) => Promise<string | undefined>;
+  /** A project's tasks as Peer knows them. */
+  readonly tasks: (
+    workspace: string,
+    project: string,
+  ) => ReadonlyArray<{
+    readonly id: string;
+    readonly key?: string | undefined;
+    readonly title: string;
+    readonly status?: string | undefined;
+  }>;
   /** A task as people name it, e.g. `KRK-335 · DNS errors`. */
   readonly taskName: (workspace: string, project: string, task: string) => string;
   /** A shared context with its text, or null when it has none. */
@@ -246,6 +269,14 @@ interface LocalSession {
   /** It was reminded once, at its first change, that its working context was still empty. */
   remindedAtStart: boolean;
   task: string | undefined;
+  /** The Peer thread it runs in (`peer:<thread id>`), once Peer found it. */
+  thread: string | undefined;
+  /** How often Peer looked for its thread: a thread's session id may be recorded after it starts. */
+  threadTries: number;
+  /** Tasks it asked the agents of (`task:<id>` claims), and when. */
+  readonly asks: Map<string, number>;
+  /** The other works whose shared context it has been told of, as they were written then. */
+  readonly boardHeard: Set<string>;
   /** Findings of other agents it has heard. */
   readonly heard: Set<string>;
 }
@@ -300,8 +331,30 @@ const SHARED_COMPACT_STEP = 4 * 1024;
  * hub decides): ten minutes, or `PEER_KEEPER_IDLE_MS` (the coordination lab shortens it).
  */
 const KEEPER_IDLE_MS = Number(process.env.PEER_KEEPER_IDLE_MS) || 10 * 60 * 1000;
+/** The other works an agent hears of when it starts; `peer status` lists up to `BOARD_ALL`. */
+const BOARD_SHOWN = 8;
+const BOARD_ALL = 30;
+/** A work nobody is at counts while its shared context changed this many days ago at most. */
+const BOARD_DAYS = 14;
+/** The other works' shared contexts this computer keeps a copy of, per project. */
+const BOARD_MIRRORS = 12;
+/** How long a session's start waits for those copies: its hook has a few seconds in all. */
+const BOARD_START_WAIT_MS = 1200;
+/** A question about a task goes once settled, after this long when no conversation opened, or after `ASK_MAX_MS`. */
+const ASK_SETTLE_MS = 60_000;
+const ASK_MAX_MS = 2 * 60 * 60 * 1000;
 
 const clip = (text: string, max: number) => text.replace(/\s+/g, " ").trim().slice(0, max);
+
+const sleepMs = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** How long ago a time was, as people say it: `4 min`, `2 h`. */
+function sinceText(iso: string): string {
+  const minutes = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60_000));
+  if (Number.isNaN(minutes)) return "a while";
+  if (minutes === 0) return "under a minute";
+  return minutes < 90 ? `${minutes} min` : `${Math.round(minutes / 60)} h`;
+}
 
 /** A part of a path made of one id: no separators, no dots to climb with. */
 const safePart = (part: string) => part.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 120);
@@ -317,6 +370,8 @@ export class CoordinationBroker {
   private readonly waiters = new Set<Waiter>();
   /** Codex sessions Peer is handing a note to through Codex now. */
   private readonly queueing = new Set<string>();
+  /** Copies of the project's other works' contexts being made, per workspace. */
+  private readonly boardMirroring = new Map<string, Promise<void>>();
   private readonly ignoredCwds = new Map<string, number>();
   /** Shared contexts of the work this computer's agents are on, by `sharedKey`. */
   private readonly shared = new Map<string, SharedMirror>();
@@ -486,6 +541,7 @@ export class CoordinationBroker {
       files: session.files,
       claims: session.claims,
       seenAt: new Date(session.lastActivity).toISOString(),
+      activeAt: new Date(session.lastActivity).toISOString(),
     };
   }
 
@@ -524,6 +580,8 @@ export class CoordinationBroker {
     }
     const title = pane === undefined ? undefined : this.deps.herdrTitle(pane);
     const branch = await this.deps.branchOf(place.root);
+    // An agent Peer runs in a thread is on the task its thread was put on, whatever its branch.
+    const thread = await this.deps.threadOf(sid).catch(() => undefined);
     const now = Date.now();
     const ownContextPath = NodePath.join(
       this.deps.contextsDir,
@@ -570,10 +628,17 @@ export class CoordinationBroker {
       nudgedAt: 0,
       contextKept: false,
       remindedAtStart: false,
-      task: this.deps.taskOf(place.workspace, place.project, `herdr:${agent}:${sid}`, [
-        branch,
-        title,
-      ]),
+      task: this.deps.taskOf(
+        place.workspace,
+        place.project,
+        [...(thread === undefined ? [] : [thread]), `herdr:${agent}:${sid}`],
+        [branch, title],
+      ),
+      thread,
+      threadTries: 1,
+      asks: new Map(),
+      // What the project already had is no news to it; its start tells it, or Peer restarted.
+      boardHeard: new Set(this.writtenScopes(place.workspace, place.project)),
       heard: new Set(),
     };
     // A session Peer meets again (Peer restarted, or the session outlived its TTL) keeps what
@@ -587,6 +652,9 @@ export class CoordinationBroker {
       root: place.root,
       pane,
       branch: session.branch,
+      thread,
+      task: session.task,
+      transcript: session.transcript,
     });
     return session;
   }
@@ -833,11 +901,18 @@ export class CoordinationBroker {
             ? "another agent"
             : `${this.deps.nameOf(mirror.workspace, mirror.keeper.email)}'s agent`;
         this.log("shared.denied", { session: session.id, scope: mirror.scope });
+        const subject = this.subjectOf(mirror.workspace, mirror.project, mirror.scope);
+        const ownWork =
+          mirror.workspace === session.workspace &&
+          mirror.project === session.project &&
+          mirror.scope === scopeOf(session.task);
         return {
           hookSpecificOutput: {
             hookEventName: "PreToolUse",
             permissionDecision: "deny",
-            permissionDecisionReason: `Peer: ${keeper} keeps the shared context of ${this.subjectOf(mirror.workspace, mirror.project, mirror.scope)}; the other agents on it only read it. Put what the work should know under "## For the team" in your working context (${session.ownContextPath}); Peer passes it to the keeper.`,
+            permissionDecisionReason: ownWork
+              ? `Peer: ${keeper} keeps the shared context of ${subject}; the other agents on it only read it. Put what the work should know under "## For the team" in your working context (${session.ownContextPath}); Peer passes it to the keeper.`
+              : `Peer: this is the shared context of ${subject}, another work on this project, and ${keeper} keeps it: only its keeper writes it. Read it; if your work depends on it, ask its agents: ${this.cli} ask ${this.handleOf(mirror.workspace, mirror.project, mirror.scope)} "<question>".`,
           },
         };
       }
@@ -982,6 +1057,7 @@ export class CoordinationBroker {
       view: this.merged(session.workspace, this.views.get(session.workspace)),
       memory: session.memory,
       nameOf: this.nameOf(session.workspace),
+      taskName: this.taskNamer(session.workspace, session.project),
       cli: this.cli,
     });
   }
@@ -1004,6 +1080,7 @@ export class CoordinationBroker {
       view: this.merged(session.workspace, this.views.get(session.workspace)),
       memory: session.memory,
       nameOf: this.nameOf(session.workspace),
+      taskName: this.taskNamer(session.workspace, session.project),
       cli: this.cli,
     });
     if (news !== null) {
@@ -1025,6 +1102,7 @@ export class CoordinationBroker {
         this.rosterNews(session),
         this.sharedNews(session),
         this.findingNews(session),
+        this.boardNewsFor(session),
       );
     }
     const said = parts.filter((part) => part !== null);
@@ -1221,9 +1299,17 @@ export class CoordinationBroker {
       session.sharedToldAt = 0;
     }
     const guidance = await this.deps.projectGuidance(session.root).catch(() => null);
+    // The project's other work, and where to read each: what this agent's work may depend on.
+    // Its hook waits a few seconds at most: copies still on their way are named by `peer context`.
+    await Promise.race([this.mirrorBoard(session.workspace), sleepMs(BOARD_START_WAIT_MS)]);
+    const board = this.board(session);
+    for (const scope of this.writtenScopes(session.workspace, session.project)) {
+      session.boardHeard.add(scope);
+    }
     const text = startContext({
       me: this.me(session),
       ...(session.agent === "codex" ? { cliPath: this.scripts.peer } : {}),
+      board: boardText(board, this.cli),
       guidance,
       own: {
         path: session.ownContextPath,
@@ -1242,6 +1328,7 @@ export class CoordinationBroker {
       shared: mirror === undefined ? undefined : { scope: mirror.scope, version: mirror.version },
       saved: saved?.length ?? 0,
       findings: findings.map((finding) => finding.id),
+      board: board.map((entry) => entry.scope),
       bytes: text.length,
     });
     return text;
@@ -1757,13 +1844,321 @@ export class CoordinationBroker {
     }
   }
 
-  /** The task a session works on now: the one its herdr agent was put on, or the one its branch names. */
+  /**
+   * The task a session works on now: the one its Peer thread or herdr agent was
+   * put on, or the one its branch names.
+   */
   private taskFor(session: LocalSession) {
     const title = session.pane === undefined ? undefined : this.deps.herdrTitle(session.pane);
-    return this.deps.taskOf(session.workspace, session.project, `herdr:${session.id}`, [
-      session.branch,
-      title,
+    return this.deps.taskOf(
+      session.workspace,
+      session.project,
+      [...(session.thread === undefined ? [] : [session.thread]), `herdr:${session.id}`],
+      [session.branch, title],
+    );
+  }
+
+  /** Looks for a young session's Peer thread again: its session id may be recorded after it starts. */
+  private async findThread(session: LocalSession) {
+    if (session.thread !== undefined || session.threadTries >= 6) return;
+    if (Date.now() - session.startedAt > 3 * 60_000) return;
+    session.threadTries += 1;
+    const thread = await this.deps
+      .threadOf(session.id.slice(session.agent.length + 1))
+      .catch(() => undefined);
+    if (thread === undefined) return;
+    session.thread = thread;
+    this.log("session.thread", { session: session.id, thread });
+  }
+
+  // ---- the project's other work (after the paper's coexisting contexts) ----
+
+  /** A task as people name it, in a project. */
+  private taskNamer(workspace: string, project: string) {
+    return (task: string) => this.deps.taskName(workspace, project, task);
+  }
+
+  /** What agents type for a work in `peer context` and `peer ask`: its task's key, else its id. */
+  private handleOf(workspace: string, project: string, scope: string): string {
+    const task = claimedTask(scope);
+    if (task === undefined) return "project";
+    return this.deps.tasks(workspace, project).find((t) => t.id === task)?.key ?? task;
+  }
+
+  /** The work a handle names in a project: a task by its key or id, or `project`. */
+  private scopeNamed(workspace: string, project: string, handle: string): string | undefined {
+    const wanted = handle.trim().toLowerCase();
+    if (wanted === "project") return "project";
+    const task = this.deps
+      .tasks(workspace, project)
+      .find((t) => t.id.toLowerCase() === wanted || t.key?.toLowerCase() === wanted);
+    if (task !== undefined) return `task:${task.id}`;
+    // A task the hub has a context or agents for that Peer's list of tasks does not have yet.
+    const view = this.views.get(workspace);
+    const scopes = [
+      ...(view?.contexts ?? []).filter((c) => c.project === project).map((c) => c.scope),
+      ...(view?.sessions ?? [])
+        .filter((s) => s.project === project && s.task !== undefined)
+        .map((s) => scopeOf(s.task)),
+    ];
+    return scopes.find((scope) => claimedTask(scope)?.toLowerCase() === wanted);
+  }
+
+  /** An agent at work elsewhere on the project, as the board shows it: whose, and what it does now. */
+  private boardAgent(workspace: string, other: HubCoordSession): string {
+    const agent =
+      other.agent === undefined ? "" : `${AGENT_NAMES[other.agent as AgentKind] ?? other.agent}, `;
+    const doing =
+      other.status === "working"
+        ? "working"
+        : other.status === "blocked"
+          ? "waiting for its person"
+          : `idle ${sinceText(other.activeAt ?? other.seenAt)}`;
+    const where = other.environment === this.deps.environment ? "" : ", on another computer";
+    return `${this.deps.nameOf(workspace, other.email)}'s agent (${agent}${doing}${where}, ${other.files.length} file(s) changed)`;
+  }
+
+  /** The written shared contexts of a project the hub lists, by scope. */
+  private writtenScopes(workspace: string, project: string): string[] {
+    return (this.views.get(workspace)?.contexts ?? [])
+      .filter((c) => c.project === project && c.version > 0)
+      .map((c) => c.scope);
+  }
+
+  /**
+   * The project's other works for an agent on `session`'s: each task (or the
+   * work outside tasks) with agents at work on it or a recent shared context,
+   * those with agents at work first, then the most recently written.
+   */
+  private board(session: LocalSession, limit = BOARD_SHOWN): BoardEntry[] {
+    const { workspace, project } = session;
+    const view = this.views.get(workspace);
+    const own = scopeOf(session.task);
+    const others = this.merged(workspace, view).sessions.filter(
+      (s) => s.project === project && s.id !== session.id,
+    );
+    const contexts = (view?.contexts ?? []).filter((c) => c.project === project);
+    const done = new Set(
+      this.deps
+        .tasks(workspace, project)
+        .filter((t) => t.status === "done")
+        .map((t) => `task:${t.id}`),
+    );
+    const scopes = new Set([
+      ...contexts.map((c) => c.scope),
+      ...others.map((s) => scopeOf(s.task)),
     ]);
+    scopes.delete(own);
+    const entries = [...scopes].flatMap((scope) => {
+      const context = contexts.find((c) => c.scope === scope);
+      const agents = others.filter((s) => scopeOf(s.task) === scope);
+      const written = context !== undefined && context.version > 0;
+      const recent =
+        written && Date.now() - Date.parse(context.updatedAt) < BOARD_DAYS * 24 * 60 * 60 * 1000;
+      // A closed task, or one whose context nobody wrote lately, says nothing unless agents work on it.
+      if (agents.length === 0 && (done.has(scope) || !recent)) return [];
+      const mirror = this.shared.get(this.sharedKey(workspace, project, scope));
+      return [
+        {
+          scope,
+          handle: this.handleOf(workspace, project, scope),
+          name:
+            scope === "project" ? "Work outside tasks" : this.subjectOf(workspace, project, scope),
+          agents: agents.map((s) => this.boardAgent(workspace, s)),
+          keeper:
+            context?.keeper === undefined
+              ? undefined
+              : `${this.deps.nameOf(workspace, context.keeper.email)}'s agent`,
+          version: context?.version,
+          gist: context?.gist,
+          path: mirror !== undefined && mirror.version > 0 ? mirror.path : undefined,
+          working: agents.some((s) => s.status === "working"),
+          at: written ? Date.parse(context.updatedAt) : 0,
+        },
+      ];
+    });
+    return entries
+      .toSorted(
+        (a, b) =>
+          Number(b.agents.length > 0) - Number(a.agents.length > 0) ||
+          Number(b.working) - Number(a.working) ||
+          b.at - a.at,
+      )
+      .slice(0, limit)
+      .map(({ working: _working, at: _at, ...entry }) => entry);
+  }
+
+  /** Work that showed up on the project since the session last heard: told once, at its next step. */
+  private boardNewsFor(session: LocalSession): string | null {
+    const fresh = this.board(session, BOARD_ALL)
+      .filter((entry) => (entry.version ?? 0) > 0 && !session.boardHeard.has(entry.scope))
+      .slice(0, 3);
+    if (fresh.length === 0) return null;
+    for (const entry of fresh) session.boardHeard.add(entry.scope);
+    const text = boardNews(fresh, this.cli);
+    this.log("board.told", {
+      session: session.id,
+      scopes: fresh.map((entry) => entry.scope),
+      text,
+    });
+    return text;
+  }
+
+  /** Where another work's shared context is, for an agent that needs it, or null when none is written. */
+  private contextPointer(workspace: string, project: string, scope: string): string | null {
+    const listed = this.views
+      .get(workspace)
+      ?.contexts?.find((c) => c.project === project && c.scope === scope);
+    if (listed === undefined || listed.version === 0) return null;
+    const mirror = this.shared.get(this.sharedKey(workspace, project, scope));
+    const keeper =
+      listed.keeper === undefined
+        ? ""
+        : `, kept by ${this.deps.nameOf(workspace, listed.keeper.email)}'s agent`;
+    return `Its shared context (version ${listed.version}${keeper}) is in ${mirror !== undefined && mirror.version > 0 ? mirror.path : "the hub"}; ${this.cli} context ${this.handleOf(workspace, project, scope)} prints it.`;
+  }
+
+  /**
+   * Keeps this computer's copies of the project's other works' shared contexts,
+   * which its agents read as files, like the paper's agents read the contexts
+   * of the agents beside them. A copy is read again only when the hub has a
+   * newer version.
+   */
+  private mirrorBoard(workspace: string): Promise<void> {
+    // One at a time per workspace: a sync and a session's start may both ask.
+    const running = this.boardMirroring.get(workspace);
+    if (running !== undefined) return running;
+    const run = this.copyBoard(workspace).finally(() => this.boardMirroring.delete(workspace));
+    this.boardMirroring.set(workspace, run);
+    return run;
+  }
+
+  private async copyBoard(workspace: string) {
+    const view = this.views.get(workspace);
+    if (view?.contexts === undefined) return;
+    const local = [...this.sessions.values()].filter((s) => s.workspace === workspace);
+    for (const project of new Set(local.map((s) => s.project))) {
+      // Their own work's context: followShared reads it, and its keeper here writes it.
+      const theirs = new Set(
+        local.filter((s) => s.project === project).map((s) => scopeOf(s.task)),
+      );
+      const done = new Set(
+        this.deps
+          .tasks(workspace, project)
+          .filter((t) => t.status === "done")
+          .map((t) => `task:${t.id}`),
+      );
+      const wanted = view.contexts
+        .filter(
+          (c) =>
+            c.project === project &&
+            c.version > 0 &&
+            !theirs.has(c.scope) &&
+            !done.has(c.scope) &&
+            Date.now() - Date.parse(c.updatedAt) < BOARD_DAYS * 24 * 60 * 60 * 1000,
+        )
+        .toSorted((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
+        .slice(0, BOARD_MIRRORS);
+      const stale = wanted.filter((context) => {
+        const known = this.shared.get(this.sharedKey(workspace, project, context.scope));
+        return known === undefined || known.version < context.version;
+      });
+      await Promise.all(
+        stale.map(async (context) => {
+          const current = await this.deps
+            .readContext(workspace, project, context.scope)
+            .catch(() => null);
+          if (current === null) return;
+          await this.mirror(workspace, current);
+          this.log("board.mirrored", {
+            workspace,
+            project,
+            scope: context.scope,
+            version: current.version,
+          });
+        }),
+      );
+    }
+  }
+
+  /** `peer ask <task> "<question>"`: a conversation with the agents at work on another task. */
+  private async ask(session: LocalSession, handle: string, question: string): Promise<string> {
+    const { workspace, project } = session;
+    const scope = this.scopeNamed(workspace, project, handle);
+    if (scope === undefined) {
+      const known = this.board(session, BOARD_ALL).map((entry) => entry.handle);
+      return `peer: no task "${handle}" on ${project}.${known.length === 0 ? "" : ` Work on it now: ${known.join(", ")}.`}`;
+    }
+    const name = this.subjectOf(workspace, project, scope);
+    if (scope === scopeOf(session.task)) {
+      return `peer: ${name} is your own work. Its agents read its shared context${session.keeps ? ", which you keep" : ""}; ${this.cli} note reaches the agents you share files with.`;
+    }
+    const task = claimedTask(scope);
+    if (task === undefined) {
+      return `peer: ask the agents on a task. Agents outside tasks hear you through the files you both change (${this.cli} claim <path>).`;
+    }
+    await this.syncNow(workspace, 3000);
+    const pointer = this.contextPointer(workspace, project, scope);
+    const there = this.merged(workspace, this.views.get(workspace)).sessions.filter(
+      (s) => s.project === project && s.task === task && s.id !== session.id,
+    );
+    if (there.length === 0) {
+      return `Nobody's agent works on ${name} now, so nobody can answer.${pointer === null ? "" : ` ${pointer}`} If you need its people, tell yours.`;
+    }
+    const claim = taskClaim(task);
+    session.claims = [...session.claims.filter((c) => c !== claim), claim];
+    session.asks.set(claim, Date.now());
+    this.markDirty();
+    await this.syncNow(workspace, 3000);
+    const overlaps = (this.views.get(workspace)?.overlaps ?? []).filter(
+      (o) => o.project === project && o.sessions.includes(session.id) && o.files.includes(claim),
+    );
+    if (overlaps.length === 0) {
+      session.claims = session.claims.filter((c) => c !== claim);
+      session.asks.delete(claim);
+      this.markDirty();
+      this.log("ask.unopened", { session: session.id, task });
+      return `peer: the hub opened no conversation with the agents on ${name}; it may be older than peer ask.${pointer === null ? "" : ` ${pointer}`}`;
+    }
+    for (const overlap of overlaps) {
+      const updated = await this.deps.note(workspace, project, overlap.id, question, session.id);
+      this.applyOverlap(workspace, updated);
+      this.acknowledge(session, updated);
+    }
+    this.log("ask", {
+      session: session.id,
+      task,
+      overlaps: overlaps.map((o) => o.id),
+      text: question,
+    });
+    const who = there
+      .map(
+        (s) =>
+          `${this.deps.nameOf(workspace, s.email)}'s agent${s.environment === this.deps.environment ? "" : " (on another computer)"}`,
+      )
+      .join(", ");
+    return `Asked the agents on ${name}: ${who}. They hear it at their next step, or wake up if idle, and their answer reaches you as Peer news (${this.cli} status shows the conversation). Once settled: ${this.cli} resolve "<agreement>".${pointer === null ? "" : ` Meanwhile: ${pointer}`}`;
+  }
+
+  /** Questions about a task go when their conversation is settled, or after a while without one. */
+  private dropSettledAsks(workspace: string) {
+    const overlaps = this.views.get(workspace)?.overlaps ?? [];
+    const now = Date.now();
+    for (const session of this.sessions.values()) {
+      if (session.workspace !== workspace) continue;
+      for (const [claim, at] of session.asks) {
+        const about = overlaps.filter(
+          (o) => o.sessions.includes(session.id) && o.files.includes(claim),
+        );
+        const settled = about.length > 0 && about.every((o) => o.state === "resolved");
+        const unanswered = about.length === 0 && now - at > ASK_SETTLE_MS;
+        if (!settled && !unanswered && now - at < ASK_MAX_MS) continue;
+        session.asks.delete(claim);
+        session.claims = session.claims.filter((c) => c !== claim);
+        this.markDirty();
+        this.log("ask.dropped", { session: session.id, claim, settled });
+      }
+    }
   }
 
   // ---- waking idle agents ----
@@ -1858,7 +2253,8 @@ export class CoordinationBroker {
     if (session === null) {
       return "peer: no agent session of yours is known here. Peer coordinates Claude Code and Codex sessions in workspace projects.";
     }
-    this.touch(session);
+    // Not a sign the agent is at work: its own commands come in a tool call its hooks already
+    // reported, and anyone else's (a person's, say) must not cancel its wait for a note.
     const flag = (name: string) => {
       const at = args.indexOf(name);
       return at < 0 ? undefined : args[at + 1];
@@ -1876,13 +2272,18 @@ export class CoordinationBroker {
     switch (command) {
       case "status": {
         await this.syncNow(session.workspace, 3000);
+        const board = this.board(session, BOARD_ALL);
         const out = statusText({
           me: this.asHub(session),
           view: view(),
           nameOf: this.nameOf(session.workspace),
+          taskName: this.taskNamer(session.workspace, session.project),
+          board,
           cli: this.cli,
         });
         this.markSeen(session);
+        for (const entry of board)
+          if ((entry.version ?? 0) > 0) session.boardHeard.add(entry.scope);
         return out;
       }
       case "note": {
@@ -1960,7 +2361,7 @@ export class CoordinationBroker {
         });
         return others.length === 0
           ? `Claimed ${claimed.join(", ")}. No other agent works there.`
-          : `Claimed ${claimed.join(", ")}. Already there: ${others.map((s) => `${this.deps.nameOf(session.workspace, s.email)}'s agent ("${s.label}")`).join("; ")}. ${this.cli} status shows the overlap.`;
+          : `Claimed ${claimed.join(", ")}. Already there: ${others.map((s) => describe(s, this.nameOf(session.workspace), this.taskNamer(session.workspace, session.project))).join("; ")}. ${this.cli} status shows the overlap.`;
       }
       case "release": {
         session.claims =
@@ -1973,16 +2374,37 @@ export class CoordinationBroker {
           ? "Released all claims."
           : `Still claimed: ${session.claims.join(", ")}`;
       }
-      case "context":
-        return this.contextCli(session, plain[0]);
+      case "context": {
+        // `peer context [<task>] [history|<version>]`: its own work's, or another work's.
+        const first = plain[0];
+        const own = first === undefined || first === "history" || /^\d+$/.test(first);
+        const scope = own
+          ? scopeOf(session.task)
+          : this.scopeNamed(session.workspace, session.project, first);
+        if (scope === undefined) {
+          return `peer: no task "${first}" on ${session.project}. ${this.cli} status lists the work on it.`;
+        }
+        return this.contextCli(session, scope, own ? first : plain[1]);
+      }
+      case "ask": {
+        const [handle, ...rest] = plain;
+        const question = clip(rest.join(" "), 600);
+        if (handle === undefined || question === "") {
+          return `peer: say which task and what to ask, e.g. ${this.cli} ask VL1 "Where do you keep the speaker names?"`;
+        }
+        return this.ask(session, handle, question);
+      }
       default:
         return this.help();
     }
   }
 
-  /** `peer context`: the shared context of the caller's work, its kept versions, or one of them. */
-  private async contextCli(session: LocalSession, which: string | undefined): Promise<string> {
-    const scope = scopeOf(session.task);
+  /** `peer context`: a work's shared context (the caller's own by default), its kept versions, or one of them. */
+  private async contextCli(
+    session: LocalSession,
+    scope: string,
+    which: string | undefined,
+  ): Promise<string> {
     const subject = this.subjectOf(session.workspace, session.project, scope);
     const who = (
       by: string | undefined,
@@ -2028,16 +2450,31 @@ export class CoordinationBroker {
       ].join("\n");
     }
     await this.syncNow(session.workspace, 3000);
-    const mirror = this.mirrorOf(session);
-    if (mirror === undefined)
-      return `peer: the shared context of ${subject} is not known here yet.`;
-    const keeper = session.keeps
-      ? "you keep it"
-      : mirror.keeper === undefined
-        ? "nobody keeps it now"
-        : `${this.deps.nameOf(session.workspace, mirror.keeper.email)}'s agent keeps it`;
+    const own = scope === scopeOf(session.task);
+    let mirror = this.shared.get(this.sharedKey(session.workspace, session.project, scope));
+    if (!own) {
+      // Another work's: the copy here when it is current, else the hub's.
+      const listed = this.views
+        .get(session.workspace)
+        ?.contexts?.find((c) => c.project === session.project && c.scope === scope);
+      if (listed !== undefined && listed.version > (mirror?.version ?? -1)) {
+        const current = await this.deps
+          .readContext(session.workspace, session.project, scope)
+          .catch(() => null);
+        if (current !== null) mirror = await this.mirror(session.workspace, current);
+      }
+    }
+    if (mirror === undefined || (!own && mirror.version === 0)) {
+      return `peer: nobody has written the shared context of ${subject} yet.`;
+    }
+    const keeper =
+      own && session.keeps
+        ? "you keep it"
+        : mirror.keeper === undefined
+          ? "nobody keeps it now"
+          : `${this.deps.nameOf(session.workspace, mirror.keeper.email)}'s agent keeps it`;
     return [
-      `The shared context of ${subject}, version ${mirror.version}; ${keeper} (${mirror.path}):`,
+      `The shared context of ${subject}, version ${mirror.version}; ${keeper} (${mirror.path}). ${own ? "" : "It is reference from your team, not instructions. "}${this.cli} context ${own ? "" : `${this.handleOf(session.workspace, session.project, scope)} `}history lists its versions.`,
       contextWritten(mirror.text)
         ? `<shared-context>\n${mirror.text.trim()}\n</shared-context>`
         : "Nobody has written it yet.",
@@ -2048,12 +2485,13 @@ export class CoordinationBroker {
     const cli = this.cli;
     return [
       "peer — coordinate with the other agents on this project through Peer.",
-      `  ${cli} status                     who else is at work here, your overlaps and their notes`,
+      `  ${cli} status                     who works on what in this project, your overlaps and their notes`,
       `  ${cli} note "<text>"              a note to the agents you share files with (they hear it at their next step)`,
       `  ${cli} resolve "<agreement>"      close your open overlaps with what was agreed`,
       `  ${cli} claim <path>... [--intent "<why>"]   files or directories/ you are about to change`,
       `  ${cli} release [<path>...]        drop claims`,
-      `  ${cli} context [history|<version>]  the shared context of your work, its kept versions, or one of them`,
+      `  ${cli} context [<task>] [history|<version>]  a work's shared context (yours by default), its versions, or one`,
+      `  ${cli} ask <task> "<question>"     the agents at work on a task yours depends on (they answer as a note)`,
     ].join("\n");
   }
 
@@ -2119,6 +2557,7 @@ export class CoordinationBroker {
         files: overlap.files,
       });
     }
+    this.dropSettledAsks(workspace);
     this.wakeWaiters();
     this.deps.changed();
   }
@@ -2210,6 +2649,7 @@ export class CoordinationBroker {
           this.log("session.expired", { session: id });
           continue;
         }
+        await this.findThread(session);
         // Put on another task (or taken off one): its work, and the shared context with it, change.
         const task = this.taskFor(session);
         if (task !== session.task) {
@@ -2256,6 +2696,7 @@ export class CoordinationBroker {
           });
           this.afterViewChange(workspace);
           await this.followShared(workspace);
+          await this.mirrorBoard(workspace);
         } catch (error) {
           this.log("sync.failed", {
             workspace,
