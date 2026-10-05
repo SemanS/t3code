@@ -15,9 +15,25 @@
  *
  * @module peerHub/coordination
  */
+import * as NodeCrypto from "node:crypto";
+
 import type { PeerCoordinationPolicy } from "@t3tools/contracts";
 
 import type { HubCoordSession, HubFinding, HubOverlap } from "./hubApi.ts";
+
+/** The agents Peer coordinates, each through the hooks its harness runs. */
+export type AgentKind = "claude" | "codex";
+
+/** How people name each agent. */
+export const AGENT_NAMES: Readonly<Record<AgentKind, string>> = {
+  claude: "Claude Code",
+  codex: "Codex",
+};
+
+/** The agent a hook came from, as Peer's hook script says: Claude Code when it says nothing. */
+export function agentNamed(value: string | undefined): AgentKind {
+  return value === "codex" ? "codex" : "claude";
+}
 
 /** Claude Code tools that change a file. */
 export const EDIT_TOOLS: ReadonlySet<string> = new Set([
@@ -34,6 +50,34 @@ export function editedFile(toolName: unknown, toolInput: unknown): string | null
   const input = toolInput as Record<string, unknown>;
   const path = input.file_path ?? input.notebook_path;
   return typeof path === "string" && path !== "" ? path : null;
+}
+
+/**
+ * The files a Codex `apply_patch` changes, as the patch names them: added,
+ * updated, deleted, and the new name of a moved file.
+ */
+export function patchPaths(patch: string): string[] {
+  const paths: string[] = [];
+  for (const match of patch.matchAll(
+    /^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$/gm,
+  )) {
+    const path = (match[1] ?? "").trim();
+    if (path !== "" && !paths.includes(path)) paths.push(path);
+  }
+  return paths;
+}
+
+/**
+ * The files a tool call edits, as the agent named them: Claude Code's editing
+ * tools name one, absolute; a Codex patch names any number, relative to the
+ * session's working directory.
+ */
+export function editedFiles(toolName: unknown, toolInput: unknown): string[] {
+  const one = editedFile(toolName, toolInput);
+  if (one !== null) return [one];
+  if (toolName !== "apply_patch" || typeof toolInput !== "object" || toolInput === null) return [];
+  const patch = (toolInput as Record<string, unknown>).command;
+  return typeof patch === "string" ? patchPaths(patch) : [];
 }
 
 /** A path relative to the repository at `root`, or null when it lies outside. */
@@ -301,10 +345,15 @@ export function statusText(input: {
   return lines.join("\n");
 }
 
+/** A command without the trim agents like to add to what it prints (`2>&1 | head -30`). */
+export function withoutOutputTrim(command: string): string {
+  return command.trim().replace(/\s*2>&1\s*(\|\s*(head|tail)(\s+-n)?\s+-?\d+)?$/, "");
+}
+
 /** A command that runs Peer's CLI and nothing else, so it may run without asking. */
 export function isPlainCliCall(command: string, cli: string): boolean {
-  // Agents like to trim what a command prints (`2>&1 | head -30`); that much may follow.
-  const trimmed = command.trim().replace(/\s*2>&1\s*(\|\s*(head|tail)(\s+-n)?\s+-?\d+)?$/, "");
+  // Agents like to trim what a command prints; that much may follow.
+  const trimmed = withoutOutputTrim(command);
   if (!trimmed.startsWith(`${cli} `) && trimmed !== cli) return false;
   const rest = trimmed.slice(cli.length);
   // Words, and quoted text without anything a shell would expand or chain.
@@ -317,7 +366,7 @@ export function mentionsCli(command: string, cli: string): boolean {
   return new RegExp(`(^|[;&|(]\\s*|\\s)${escaped}(\\s|$)`).test(command.trim());
 }
 
-/** The scripts Peer writes for agents: the hook Claude Code runs, its wake-up wait, and `peer`. */
+/** The scripts Peer writes for agents: the hook their harness runs, its wake-up wait, and `peer`. */
 export function coordinationScripts(
   socket: string,
   binDir: string,
@@ -328,11 +377,14 @@ export function coordinationScripts(
 } {
   const quote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`;
   const quoted = quote(socket);
-  const headers = `-H "X-Herdr-Pane: \${HERDR_PANE_ID:-}" -H "X-Peer-Session: \${PEER_SESSION:-}"`;
+  // Claude Code sessions learn PEER_SESSION when they start; Codex gives its commands their thread.
+  const headers = `-H "X-Herdr-Pane: \${HERDR_PANE_ID:-}" -H "X-Peer-Session: \${PEER_SESSION:-\${CODEX_THREAD_ID:-}}"`;
   return {
     hook: `#!/bin/sh
-# Peer coordination: hands a Claude Code hook event to Peer and prints its answer.
-# Prints nothing and lets the agent go on when Peer is not running.
+# Peer coordination: hands an agent's hook event to Peer and prints its answer. The argument
+# names the agent (codex); without one it is Claude Code. Prints nothing and lets the agent go
+# on when Peer is not running.
+agent="\${1:-claude}"
 input=$(cat)
 # A session starting (the only time Claude Code gives hooks this file): \`peer\` goes on its
 # PATH, and the session knows its id, so \`peer\` works in any command and says who calls.
@@ -341,12 +393,13 @@ if [ -n "\${CLAUDE_ENV_FILE:-}" ]; then
   printf 'export PATH=%s:"$PATH"\\n' ${quote(quote(binDir))} >> "$CLAUDE_ENV_FILE"
   [ -n "$sid" ] && printf 'export PEER_SESSION=%s\\n' "$sid" >> "$CLAUDE_ENV_FILE"
 fi
-printf '%s' "$input" | curl -sf --max-time 4 --unix-socket ${quoted} ${headers} -H 'Content-Type: application/json' --data-binary @- http://peer/hook 2>/dev/null
+printf '%s' "$input" | curl -sf --max-time 4 --unix-socket ${quoted} ${headers} -H "X-Peer-Agent: $agent" -H 'Content-Type: application/json' --data-binary @- http://peer/hook 2>/dev/null
 exit 0
 `,
     wait: `#!/bin/sh
 # Peer coordination: while the agent is idle, waits for a note from another agent and wakes it.
-out=$(curl -sf --max-time 1800 --unix-socket ${quoted} ${headers} -H 'Content-Type: application/json' --data-binary @- http://peer/hook/wait 2>/dev/null) || exit 0
+agent="\${1:-claude}"
+out=$(curl -sf --max-time 1800 --unix-socket ${quoted} ${headers} -H "X-Peer-Agent: $agent" -H 'Content-Type: application/json' --data-binary @- http://peer/hook/wait 2>/dev/null) || exit 0
 [ -n "$out" ] || exit 0
 printf '%s\\n' "$out" >&2
 exit 2
@@ -402,34 +455,193 @@ export function claudeHookGroups(scripts: {
   };
 }
 
+/**
+ * The hook groups Codex needs for coordination, in its hooks.json: Peer's hook
+ * told it is Codex's. Codex runs each only once its person trusts it.
+ */
+export function codexHookGroups(scripts: {
+  readonly hook: string;
+  readonly wait: string;
+}): Record<string, ReadonlyArray<HookGroup>> {
+  const hook = { type: "command", command: `${scripts.hook} codex`, timeout: 5 };
+  return {
+    // Also after a compaction (source "compact"): its working context goes back then.
+    SessionStart: [{ hooks: [hook] }],
+    UserPromptSubmit: [{ hooks: [hook] }],
+    // Codex runs commands as Bash and edits files with apply_patch.
+    PreToolUse: [{ matcher: "Bash|apply_patch", hooks: [hook] }],
+    PostToolUse: [{ matcher: "Bash|apply_patch", hooks: [hook] }],
+    // Codex asks its person: Peer lets its own work through, and the agent waits for the rest.
+    PermissionRequest: [{ hooks: [hook] }],
+    Stop: [{ hooks: [hook] }],
+    SessionEnd: [{ hooks: [{ ...hook, timeout: 2 }] }],
+  };
+}
+
+/**
+ * Codex's rule (rules/peer.rules in its home) that runs Peer's own command
+ * without asking and outside its sandbox, where it could not reach Peer.
+ */
+export function codexRules(peerScript: string): string {
+  return `# Peer coordination: Peer's own command talks to Peer on this computer. Peer adds and removes this file.\nprefix_rule(pattern=[${JSON.stringify(peerScript)}], decision="allow")\n`;
+}
+
+// Codex runs a hook only once its person trusts it, and keeps that trust per
+// hook in its config.toml: `[hooks.state."<file>:<event>:<group>:<hook>"]` with
+// the hash of what the hook is. Peer reads it to say whether Codex runs Peer's
+// hooks yet; trusting them stays with the person, in Codex.
+const CODEX_EVENTS: Readonly<Record<string, string>> = {
+  PreToolUse: "pre_tool_use",
+  PermissionRequest: "permission_request",
+  PostToolUse: "post_tool_use",
+  PreCompact: "pre_compact",
+  PostCompact: "post_compact",
+  SessionStart: "session_start",
+  SessionEnd: "session_end",
+  UserPromptSubmit: "user_prompt_submit",
+  SubagentStart: "subagent_start",
+  SubagentStop: "subagent_stop",
+  Stop: "stop",
+  Interrupt: "interrupt",
+};
+const CODEX_UNMATCHED = new Set(["UserPromptSubmit", "Stop", "Interrupt"]);
+const CODEX_CONTEXT_LIMIT = new Set([
+  "PreToolUse",
+  "PostToolUse",
+  "SessionStart",
+  "UserPromptSubmit",
+  "SubagentStart",
+]);
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (typeof value === "object" && value !== null) {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .toSorted()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/** The hash Codex trusts a hook by: what the hook is, as Codex normalizes it. */
+export function codexHookHash(event: string, matcher: unknown, handler: HookEntry): string | null {
+  const label = CODEX_EVENTS[event];
+  if (label === undefined || handler.type !== "command" || typeof handler.command !== "string") {
+    return null;
+  }
+  const timeout = typeof handler.timeout === "number" ? handler.timeout : undefined;
+  const normalized: Record<string, unknown> = {
+    type: "command",
+    command: handler.command,
+    timeout:
+      event === "SessionEnd" || event === "Interrupt"
+        ? Math.min(Math.max(timeout ?? 1, 1), 3)
+        : Math.max(timeout ?? 600, 1),
+    async: handler.async === true,
+  };
+  if (typeof handler.statusMessage === "string") normalized.statusMessage = handler.statusMessage;
+  const limit = handler.additionalContextLimit;
+  if (CODEX_CONTEXT_LIMIT.has(event) && typeof limit === "number" && limit !== 2500) {
+    normalized.additionalContextLimit = limit;
+  }
+  const identity: Record<string, unknown> = { event_name: label, hooks: [normalized] };
+  if (!CODEX_UNMATCHED.has(event) && typeof matcher === "string") identity.matcher = matcher;
+  return `sha256:${NodeCrypto.createHash("sha256").update(canonicalJson(identity)).digest("hex")}`;
+}
+
+/** The trust Codex keeps per hook in its config.toml: the hash it trusts, and whether it is off. */
+export function codexHookTrust(
+  config: string,
+): Map<string, { readonly hash: string | undefined; readonly enabled: boolean }> {
+  const trust = new Map<string, { hash: string | undefined; enabled: boolean }>();
+  let current: { hash: string | undefined; enabled: boolean } | null = null;
+  for (const line of config.split("\n")) {
+    const header = /^\s*\[\s*hooks\.state\."((?:[^"\\]|\\.)*)"\s*\]\s*(#.*)?$/.exec(line);
+    if (header !== null) {
+      current = { hash: undefined, enabled: true };
+      trust.set(JSON.parse(`"${header[1] ?? ""}"`) as string, current);
+      continue;
+    }
+    if (/^\s*\[/.test(line)) {
+      current = null;
+      continue;
+    }
+    if (current === null) continue;
+    const hash = /^\s*trusted_hash\s*=\s*"([^"]*)"/.exec(line)?.[1];
+    if (hash !== undefined) current.hash = hash;
+    if (/^\s*enabled\s*=\s*false\b/.test(line)) current.enabled = false;
+  }
+  return trust;
+}
+
+/**
+ * Whether Codex runs Peer's hooks from its hooks.json at `path`: each one is
+ * trusted with the hash of what it is now, and none is turned off.
+ */
+export function codexTrustsPeerHooks(
+  hooks: Settings,
+  path: string,
+  config: string,
+  marker: string,
+): boolean {
+  const trust = codexHookTrust(config);
+  let ours = 0;
+  for (const [event, groups] of Object.entries(hooks.hooks ?? {})) {
+    const label = CODEX_EVENTS[event];
+    if (label === undefined) continue;
+    for (const [g, group] of groups.entries()) {
+      for (const [h, handler] of (group.hooks ?? []).entries()) {
+        if (!isPeerEntry(handler, marker)) continue;
+        ours += 1;
+        const state = trust.get(`${path}:${label}:${g}:${h}`);
+        if (
+          state?.enabled === false ||
+          state?.hash !== codexHookHash(event, group.matcher, handler)
+        ) {
+          return false;
+        }
+      }
+    }
+  }
+  return ours > 0;
+}
+
 const isPeerEntry = (entry: HookEntry, marker: string) =>
   typeof entry.command === "string" && entry.command.includes(marker);
 
 /**
- * Claude Code settings with Peer's coordination hooks added (`install`) or
- * taken out, leaving every other hook as it was. `marker` names Peer's
- * scripts' directory.
+ * An agent's hook settings (Claude Code's settings.json, Codex's hooks.json:
+ * the same shape) with Peer's coordination hooks added (`install`) or taken
+ * out, leaving every other hook as it was. Peer's groups keep their place when
+ * they change: Codex trusts each hook by its position, so a person's hooks
+ * after them keep theirs. `marker` names Peer's scripts' directory.
  */
-export function withClaudeHooks(
+export function withPeerHooks(
   settings: Settings,
   groups: Record<string, ReadonlyArray<HookGroup>>,
   marker: string,
   install: boolean,
 ): Settings {
   const hooks: Record<string, ReadonlyArray<HookGroup>> = {};
-  for (const [event, list] of Object.entries(settings.hooks ?? {})) {
-    const kept = list
-      .map((group) => ({
-        ...group,
-        hooks: (group.hooks ?? []).filter((entry) => !isPeerEntry(entry, marker)),
-      }))
-      .filter((group) => group.hooks.length > 0);
-    if (kept.length > 0) hooks[event] = kept;
-  }
-  if (install) {
-    for (const [event, list] of Object.entries(groups)) {
-      hooks[event] = [...(hooks[event] ?? []), ...list];
+  const events = new Set([...Object.keys(settings.hooks ?? {}), ...Object.keys(groups)]);
+  for (const event of events) {
+    const ours = install ? (groups[event] ?? []) : [];
+    const next: HookGroup[] = [];
+    let placed = false;
+    for (const group of settings.hooks?.[event] ?? []) {
+      const entries = group.hooks ?? [];
+      const kept = entries.filter((entry) => !isPeerEntry(entry, marker));
+      if (kept.length < entries.length && !placed) {
+        next.push(...ours);
+        placed = true;
+      }
+      if (kept.length > 0)
+        next.push(kept.length === entries.length ? group : { ...group, hooks: kept });
     }
+    if (!placed) next.push(...ours);
+    if (next.length > 0) hooks[event] = next;
   }
   const { hooks: _previous, ...rest } = settings;
   return Object.keys(hooks).length === 0 ? rest : { ...rest, hooks };
@@ -440,8 +652,8 @@ export function settingsDiffer(a: Settings, b: Settings): boolean {
   return JSON.stringify(a) !== JSON.stringify(b);
 }
 
-/** Whether Claude Code settings already run Peer's hooks. */
-export function hasClaudeHooks(settings: Settings, marker: string): boolean {
+/** Whether an agent's hook settings already run Peer's hooks. */
+export function hasPeerHooks(settings: Settings, marker: string): boolean {
   return Object.values(settings.hooks ?? {}).some((list) =>
     list.some((group) => (group.hooks ?? []).some((entry) => isPeerEntry(entry, marker))),
   );
@@ -779,9 +991,16 @@ export function startContext(input: {
   readonly nameOf: (email: string) => string;
   /** The project's own guidance on what to mark [project], from its reviewed knowledge. */
   readonly guidance?: string | null;
+  /** Where Peer's command is, for an agent whose shell does not find it by name (Codex). */
+  readonly cliPath?: string;
 }): string {
   const { shared } = input;
   const parts: string[] = input.me === undefined ? [] : [`You are ${input.me} here.`];
+  if (input.cliPath !== undefined) {
+    parts.push(
+      `Peer's command \`peer\` (${input.cliPath}) talks to the other agents on this project: run it as a command of its own, not chained with others.`,
+    );
+  }
   if (shared?.keeps === true) {
     parts.push(keeperSkill(shared.path, shared.subject));
     if (input.guidance) parts.push(projectGuidanceText(input.guidance));
@@ -856,15 +1075,4 @@ export function withContextAccess(settings: Settings, dir: string, install: bool
   const merged = next.length > 0 ? { ...restPermissions, allow: next } : restPermissions;
   const { permissions: _old, ...rest } = settings;
   return Object.keys(merged).length > 0 ? { ...rest, permissions: merged } : rest;
-}
-
-/** Whether Claude Code settings already let agents read and edit their working contexts. */
-export function hasContextAccess(settings: Settings, dir: string): boolean {
-  const absolute = `/${dir.replace(/^\/+/, "")}`;
-  const allow = (settings.permissions as { allow?: unknown } | undefined)?.allow;
-  return (
-    Array.isArray(allow) &&
-    allow.includes(`Read(/${absolute}/**)`) &&
-    allow.includes(`Edit(/${absolute}/**)`)
-  );
 }

@@ -106,10 +106,13 @@ import * as Settings from "../serverSettings.ts";
 import { explainCloneFailure, explainGitHubCloneFailure } from "./cloneFailure.ts";
 import {
   claudeHookGroups,
-  hasClaudeHooks,
+  codexHookGroups,
+  codexRules,
+  codexTrustsPeerHooks,
+  hasPeerHooks,
   settingsDiffer,
   taskNamed,
-  withClaudeHooks,
+  withPeerHooks,
   withContextAccess,
 } from "./coordination.ts";
 import {
@@ -378,7 +381,7 @@ export class PeerHub extends Context.Service<
     /** Starts signing GitHub CLI in to GitHub; the status carries the code to enter. */
     readonly connectGitHub: Effect.Effect<PeerHubStatus, PeerHubError>;
     readonly cancelGitHubSignIn: Effect.Effect<PeerHubStatus>;
-    /** Agent coordination on or off, its policy, and Peer's hooks in Claude Code. */
+    /** Agent coordination on or off, its policy, and Peer's hooks in Claude Code and Codex. */
     readonly setCoordination: (
       input: PeerHubSetCoordinationInput,
     ) => Effect.Effect<PeerHubStatus, PeerHubError>;
@@ -514,6 +517,15 @@ function realpathOrSelf(path: string): string {
 }
 
 /** Directories on PATH plus the usual install locations a Dock-launched app may miss. */
+/** A directory as the file system knows it (macOS keeps /var under /private). */
+function realDirectory(path: string): string {
+  try {
+    return NodeFS.realpathSync(path);
+  } catch {
+    return NodePath.resolve(path);
+  }
+}
+
 function searchPath(): string[] {
   const extra = [
     "/opt/homebrew/bin",
@@ -668,23 +680,65 @@ const make = Effect.gen(function* () {
   );
   /** Agents' working contexts, one file per session (experimental). */
   const coordinationContexts = NodePath.join(coordinationDir, "contexts");
+  /** Codex's home: its hooks.json (Claude Code's shape), its config.toml and its rules. */
+  const codexHome = process.env.CODEX_HOME?.trim() || NodePath.join(NodeOS.homedir(), ".codex");
+  const codexHooksPath = NodePath.join(codexHome, "hooks.json");
+  const codexRulesPath = NodePath.join(codexHome, "rules", "peer.rules");
+  const peerCommand = NodePath.join(coordinationDir, "bin", "peer");
+  /** Peer's rule for its own command in Codex: added with its hooks, taken out with them. */
+  const writeCodexRules = (install: boolean) =>
+    install
+      ? NodeFSP.mkdir(NodePath.dirname(codexRulesPath), { recursive: true }).then(() =>
+          NodeFSP.writeFile(codexRulesPath, codexRules(peerCommand)),
+        )
+      : NodeFSP.rm(codexRulesPath, { force: true });
+  /** Whether Codex runs Peer's hooks yet: its person trusts them in Codex. Read when its files change. */
+  let codexTrust = { stamp: "", trusted: false };
+  const codexTrusts = () => {
+    const read = (path: string) => {
+      try {
+        return NodeFS.readFileSync(path, "utf8");
+      } catch {
+        return "";
+      }
+    };
+    const configPath = NodePath.join(codexHome, "config.toml");
+    const stamp = [codexHooksPath, configPath]
+      .map((path) => {
+        try {
+          return String(NodeFS.statSync(path).mtimeMs);
+        } catch {
+          return "-";
+        }
+      })
+      .join(":");
+    if (stamp !== codexTrust.stamp) {
+      let hooks: Record<string, unknown> = {};
+      try {
+        hooks = JSON.parse(read(codexHooksPath) || "{}") as Record<string, unknown>;
+      } catch {
+        hooks = {};
+      }
+      codexTrust = {
+        stamp,
+        trusted: codexTrustsPeerHooks(hooks, codexHooksPath, read(configPath), coordinationDir),
+      };
+    }
+    return codexTrust.trusted;
+  };
+  const peerScripts = {
+    hook: NodePath.join(coordinationDir, "hook"),
+    wait: NodePath.join(coordinationDir, "wait"),
+  };
   let broker: CoordinationBroker | null = null;
   const claudeSettings = yield* Effect.promise(() => readJsonSettings(claudeSettingsPath));
-  let claudeHooksInstalled = hasClaudeHooks(claudeSettings ?? {}, coordinationDir);
+  let claudeHooksInstalled = hasPeerHooks(claudeSettings ?? {}, coordinationDir);
   // Hooks an older Peer installed get this Peer's: new events, and agents let into their contexts.
   const currentHooks =
     claudeSettings === null || !claudeHooksInstalled
       ? null
       : withContextAccess(
-          withClaudeHooks(
-            claudeSettings,
-            claudeHookGroups({
-              hook: NodePath.join(coordinationDir, "hook"),
-              wait: NodePath.join(coordinationDir, "wait"),
-            }),
-            coordinationDir,
-            true,
-          ),
+          withPeerHooks(claudeSettings, claudeHookGroups(peerScripts), coordinationDir, true),
           coordinationContexts,
           true,
         );
@@ -696,6 +750,25 @@ const make = Effect.gen(function* () {
     yield* Effect.promise(() =>
       writeJsonSettings(claudeSettingsPath, currentHooks).catch(() => undefined),
     );
+  }
+  const codexHooks = yield* Effect.promise(() => readJsonSettings(codexHooksPath));
+  let codexHooksInstalled = hasPeerHooks(codexHooks ?? {}, coordinationDir);
+  // The same for Codex; a hook that changes asks its person to trust it again.
+  const currentCodexHooks =
+    codexHooks === null || !codexHooksInstalled
+      ? null
+      : withPeerHooks(codexHooks, codexHookGroups(peerScripts), coordinationDir, true);
+  if (
+    currentCodexHooks !== null &&
+    codexHooks !== null &&
+    settingsDiffer(currentCodexHooks, codexHooks)
+  ) {
+    yield* Effect.promise(() =>
+      writeJsonSettings(codexHooksPath, currentCodexHooks).catch(() => undefined),
+    );
+  }
+  if (codexHooksInstalled) {
+    yield* Effect.promise(() => writeCodexRules(true).catch(() => undefined));
   }
 
   const persist = (persisted: PersistedState) =>
@@ -868,6 +941,8 @@ const make = Effect.gen(function* () {
       enabled: s.persisted.coordination?.enabled ?? false,
       policy: s.persisted.coordination?.policy ?? "coordinate",
       claudeHooks: claudeHooksInstalled,
+      codexHooks: codexHooksInstalled,
+      ...(codexHooksInstalled ? { codexHooksTrusted: codexTrusts() } : {}),
       logPath: coordinationLog,
       sessions: snapshot.sessions.map((session) => ({
         id: session.id,
@@ -2025,6 +2100,28 @@ const make = Effect.gen(function* () {
           return name === "" || name === "HEAD" ? undefined : name;
         },
         herdrTitle: (pane) => currentState().herdr?.find((agent) => agent.paneId === pane)?.title,
+        herdrPane: (agent, cwd, named) => {
+          const here = realDirectory(cwd);
+          const panes = (currentState().herdr ?? []).filter((candidate) => {
+            if (candidate.agent !== agent || candidate.cwd === undefined) return false;
+            const there = realDirectory(candidate.cwd);
+            return here === there || here.startsWith(`${there}/`) || there.startsWith(`${here}/`);
+          });
+          if (named !== undefined && panes.some((candidate) => candidate.paneId === named)) {
+            return named;
+          }
+          return panes.length === 1 ? panes[0]?.paneId : undefined;
+        },
+        queueCodex: async (session, text) => {
+          // The coordination lab's made-up sessions are no threads of this person's Codex.
+          if (process.env.PEER_CODEX_QUEUE === "off") return false;
+          return run("codex", ["queue", "--thread", session, "--message", text], {
+            timeoutMs: 20_000,
+          }).then(
+            () => true,
+            () => false,
+          );
+        },
         nameOf: nameIn,
         email: () => currentState().persisted.email,
         policy: () => currentState().persisted.coordination?.policy ?? "coordinate",
@@ -2141,7 +2238,10 @@ const make = Effect.gen(function* () {
     };
     // Hooks run Peer's scripts, which coordination writes: installing them turns it on.
     const next = {
-      enabled: input.claudeHooks === true ? true : (input.enabled ?? current.enabled),
+      enabled:
+        input.claudeHooks === true || input.codexHooks === true
+          ? true
+          : (input.enabled ?? current.enabled),
       policy: input.policy ?? current.policy,
     };
     yield* updatePersisted((p) => ({ ...p, coordination: next }));
@@ -2155,14 +2255,10 @@ const make = Effect.gen(function* () {
           if (settings === null) {
             throw new Error(`${claudeSettingsPath} is not valid JSON; fix it first`);
           }
-          const groups = claudeHookGroups({
-            hook: NodePath.join(coordinationDir, "hook"),
-            wait: NodePath.join(coordinationDir, "wait"),
-          });
           await writeJsonSettings(
             claudeSettingsPath,
             withContextAccess(
-              withClaudeHooks(settings, groups, coordinationDir, install),
+              withPeerHooks(settings, claudeHookGroups(peerScripts), coordinationDir, install),
               coordinationContexts,
               install,
             ),
@@ -2172,6 +2268,28 @@ const make = Effect.gen(function* () {
         catch: (failure) =>
           hubError(
             `Claude Code's settings could not change: ${failure instanceof Error ? failure.message : String(failure)}`,
+          ),
+      });
+    }
+    if (input.codexHooks !== undefined) {
+      const install = input.codexHooks;
+      yield* Effect.tryPromise({
+        try: async () => {
+          const hooks = await readJsonSettings(codexHooksPath);
+          if (hooks === null) {
+            throw new Error(`${codexHooksPath} is not valid JSON; fix it first`);
+          }
+          await writeJsonSettings(
+            codexHooksPath,
+            withPeerHooks(hooks, codexHookGroups(peerScripts), coordinationDir, install),
+          );
+          await writeCodexRules(install);
+          codexHooksInstalled = install;
+          codexTrust = { stamp: "", trusted: false };
+        },
+        catch: (failure) =>
+          hubError(
+            `Codex's hooks could not change: ${failure instanceof Error ? failure.message : String(failure)}`,
           ),
       });
     }

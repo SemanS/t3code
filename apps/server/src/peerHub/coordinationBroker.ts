@@ -17,6 +17,8 @@ import * as NodePath from "node:path";
 import type { PeerCoordinationPolicy, PeerWorkStatus } from "@t3tools/contracts";
 
 import {
+  AGENT_NAMES,
+  agentNamed,
   announcementKey,
   changedPaths,
   closeOutText,
@@ -25,7 +27,7 @@ import {
   contextWritten,
   coordinationScripts,
   decideEdit,
-  editedFile,
+  editedFiles,
   emptyMemory,
   compactionNudge,
   projectGuidanceText,
@@ -38,6 +40,8 @@ import {
   projectLines,
   repositoryPath,
   rosterChange,
+  type AgentKind,
+  type EditAnswer,
   scopeOf,
   sharedChange,
   sharedTemplate,
@@ -45,6 +49,7 @@ import {
   startContext,
   statusText,
   teamLines,
+  withoutOutputTrim,
   teamNews,
   touches,
   type ContextHolder,
@@ -84,6 +89,21 @@ export interface BrokerDeps {
   readonly branchOf: (root: string) => Promise<string | undefined>;
   /** What herdr calls the agent in a pane. */
   readonly herdrTitle: (paneId: string) => string | undefined;
+  /**
+   * The herdr pane an agent of this kind runs in, in `cwd`: the one its hook
+   * named when herdr agrees, else the only one there. Codex may run its hooks
+   * in a shared server whose environment names another pane.
+   */
+  readonly herdrPane: (
+    agent: AgentKind,
+    cwd: string,
+    named: string | undefined,
+  ) => string | undefined;
+  /**
+   * Gives an idle Codex session a message, which starts its turn (Codex has no
+   * hook that wakes it). False when Codex could not take it.
+   */
+  readonly queueCodex: (session: string, text: string) => Promise<boolean>;
   readonly nameOf: (workspace: string, email: string) => string;
   readonly email: () => string | null;
   readonly policy: () => PeerCoordinationPolicy;
@@ -171,13 +191,14 @@ export interface BrokerDeps {
 
 interface LocalSession {
   readonly id: string;
-  readonly agent: string;
+  /** The agent's harness, whose hooks report it: its id is `<agent>:<session id>`. */
+  readonly agent: AgentKind;
   readonly workspace: string;
   readonly project: string;
   readonly root: string;
   cwd: string;
   pane: string | undefined;
-  /** The transcript Claude Code keeps for the session. */
+  /** The transcript the agent's harness keeps for the session. */
   transcript: string | undefined;
   label: string;
   labelFromPrompt: boolean;
@@ -294,6 +315,8 @@ export class CoordinationBroker {
   private readonly reported = new Set<string>();
   private readonly announcedToPeople = new Set<string>();
   private readonly waiters = new Set<Waiter>();
+  /** Codex sessions Peer is handing a note to through Codex now. */
+  private readonly queueing = new Set<string>();
   private readonly ignoredCwds = new Map<string, number>();
   /** Shared contexts of the work this computer's agents are on, by `sharedKey`. */
   private readonly shared = new Map<string, SharedMirror>();
@@ -480,12 +503,13 @@ export class CoordinationBroker {
   }
 
   private async sessionFor(
+    agent: AgentKind,
     body: Record<string, unknown>,
     pane: string | undefined,
   ): Promise<LocalSession | null> {
     const sid = typeof body.session_id === "string" ? body.session_id : null;
     if (sid === null) return null;
-    const id = `claude:${sid}`;
+    const id = `${agent}:${sid}`;
     const existing = this.sessions.get(id);
     if (existing !== undefined) return existing;
     const cwd = typeof body.cwd === "string" ? body.cwd : null;
@@ -509,14 +533,14 @@ export class CoordinationBroker {
     );
     const session: LocalSession = {
       id,
-      agent: "claude",
+      agent,
       workspace: place.workspace,
       project: place.project,
       root: place.root,
       cwd,
       pane,
       transcript: typeof body.transcript_path === "string" ? body.transcript_path : undefined,
-      label: title ?? "Claude session",
+      label: title ?? `${AGENT_NAMES[agent]} session`,
       labelFromPrompt: false,
       branch,
       status: "idle",
@@ -546,7 +570,7 @@ export class CoordinationBroker {
       nudgedAt: 0,
       contextKept: false,
       remindedAtStart: false,
-      task: this.deps.taskOf(place.workspace, place.project, `herdr:claude:${sid}`, [
+      task: this.deps.taskOf(place.workspace, place.project, `herdr:${agent}:${sid}`, [
         branch,
         title,
       ]),
@@ -565,6 +589,16 @@ export class CoordinationBroker {
       branch: session.branch,
     });
     return session;
+  }
+
+  /** The herdr pane a hook came from: Claude Code's say so; Codex's only when herdr agrees. */
+  private paneOf(
+    agent: AgentKind,
+    body: Record<string, unknown>,
+    named: string | undefined,
+  ): string | undefined {
+    if (agent === "claude") return named;
+    return typeof body.cwd === "string" ? this.deps.herdrPane(agent, body.cwd, named) : undefined;
   }
 
   private touch(session: LocalSession) {
@@ -590,11 +624,12 @@ export class CoordinationBroker {
   ): Promise<Record<string, unknown> | null> {
     const started = Date.now();
     const event = typeof body.hook_event_name === "string" ? body.hook_event_name : "";
-    const pane = headerOf(headers, "x-herdr-pane");
+    const agent = agentNamed(headerOf(headers, "x-peer-agent"));
+    const pane = this.paneOf(agent, body, headerOf(headers, "x-herdr-pane"));
     // A session Peer never saw that ends has nothing to clear.
-    if (event === "SessionEnd" && !this.sessions.has(`claude:${String(body.session_id)}`))
+    if (event === "SessionEnd" && !this.sessions.has(`${agent}:${String(body.session_id)}`))
       return null;
-    const session = await this.sessionFor(body, pane);
+    const session = await this.sessionFor(agent, body, pane);
     if (session === null) return null;
     if (pane !== undefined) session.pane = pane;
     const out = await this.answerHook(event, session, body);
@@ -602,7 +637,7 @@ export class CoordinationBroker {
       session: session.id,
       hookEvent: event,
       tool: body.tool_name,
-      file: editedFile(body.tool_name, body.tool_input) ?? undefined,
+      files: editedFiles(body.tool_name, body.tool_input),
       answer: out ?? undefined,
       ms: Date.now() - started,
     });
@@ -650,29 +685,37 @@ export class CoordinationBroker {
           await this.readShellChanges(session);
           return context(event, this.news(session));
         }
-        const edited = editedFile(body.tool_name, body.tool_input);
-        if (edited === session.ownContextPath) {
-          await this.readTeamLines(session);
-          return context(event, this.news(session));
-        }
-        if (session.keeps && edited === session.contextPath) {
-          await this.saveShared(session);
-          return context(event, this.news(session));
-        }
-        const file = this.fileOf(session, body);
-        if (file !== null) {
-          session.dirty.add(file);
-          session.files = [...session.files.filter((f) => f !== file), file].slice(-MAX_FILES);
-          const asked = session.asked.get(file);
+        let file: string | null = null;
+        let contextEdited = false;
+        for (const path of this.editedPaths(session, body)) {
+          if (this.samePath(path, session.ownContextPath)) {
+            await this.readTeamLines(session);
+            contextEdited = true;
+            continue;
+          }
+          if (session.keeps && this.samePath(path, session.contextPath)) {
+            await this.saveShared(session);
+            contextEdited = true;
+            continue;
+          }
+          const changed = inRepository(session, path);
+          if (changed === null) continue;
+          file = changed;
+          session.dirty.add(changed);
+          session.files = [...session.files.filter((f) => f !== changed), changed].slice(
+            -MAX_FILES,
+          );
+          const asked = session.asked.get(changed);
           if (asked !== undefined) {
             // The edit ran after its person was asked: they approved.
             for (const key of asked) session.memory.acknowledged.add(key);
-            session.asked.delete(file);
-            this.log("ask.approved", { session: session.id, file, keys: asked });
+            session.asked.delete(changed);
+            this.log("ask.approved", { session: session.id, file: changed, keys: asked });
           }
           this.markDirty();
         }
         const news = this.news(session);
+        if (contextEdited && file === null) return context(event, news);
         const nudge = this.nudge(session, file);
         return context(event, [news, nudge].filter((part) => part !== null).join("\n\n") || null);
       }
@@ -686,9 +729,28 @@ export class CoordinationBroker {
         }
         return null;
       }
+      case "PermissionRequest": {
+        // Codex asks its person. Peer's own command and the agent's own contexts are Peer's to let
+        // through; for anything else the agent waits for its person, so it does not work meanwhile.
+        if (this.isPeerWork(session, body)) {
+          this.log("permission.allowed", { session: session.id, tool: body.tool_name });
+          return {
+            hookSpecificOutput: {
+              hookEventName: "PermissionRequest",
+              decision: { behavior: "allow" },
+            },
+          };
+        }
+        session.status = "blocked";
+        this.markDirty();
+        this.log("session.blocked", { session: session.id, tool: body.tool_name });
+        return null;
+      }
       case "Stop":
         session.status = "idle";
         session.lastActivity = Date.now();
+        // What it changed in ways Peer's hooks did not see (a patch through the shell) is its too.
+        await this.readShellChanges(session);
         this.markDirty();
         return null;
       case "SessionEnd":
@@ -723,86 +785,142 @@ export class CoordinationBroker {
     this.log("files.shell", { session: session.id, files: changed });
   }
 
-  private fileOf(session: LocalSession, body: Record<string, unknown>): string | null {
-    const file = editedFile(body.tool_name, body.tool_input);
-    return file === null ? null : inRepository(session, file);
+  /** The files a tool call edits, absolute: a Codex patch names them from the session's directory. */
+  private editedPaths(session: LocalSession, body: Record<string, unknown>): string[] {
+    return editedFiles(body.tool_name, body.tool_input).map((path) =>
+      NodePath.resolve(session.cwd, path),
+    );
+  }
+
+  /** Whether two paths are one file, however the agent wrote it (macOS has /var under /private). */
+  private samePath(a: string, b: string): boolean {
+    return NodePath.resolve(a) === NodePath.resolve(b) || realPath(a) === realPath(b);
+  }
+
+  /** The agent's own working context, or the shared context it keeps. */
+  private keptBy(session: LocalSession, path: string): boolean {
+    return (
+      this.samePath(path, session.ownContextPath) ||
+      (session.keeps && this.samePath(path, session.contextPath))
+    );
+  }
+
+  /** A permission Codex asks for that is Peer's own business: its command, or the agent's contexts. */
+  private isPeerWork(session: LocalSession, body: Record<string, unknown>): boolean {
+    if (body.tool_name === "Bash") {
+      const input = body.tool_input as Record<string, unknown> | null;
+      const command = typeof input?.command === "string" ? input.command : "";
+      return isPlainCliCall(command, this.scripts.peer) || isPlainCliCall(command, this.cli);
+    }
+    const paths = this.editedPaths(session, body);
+    return paths.length > 0 && paths.every((path) => this.keptBy(session, path));
   }
 
   private async beforeTool(
     session: LocalSession,
     body: Record<string, unknown>,
   ): Promise<Record<string, unknown> | null> {
-    // The agent running Peer's own CLI: let it, and remember who is about to call.
-    if (body.tool_name === "Bash") {
-      const input = body.tool_input as Record<string, unknown> | null;
-      const command = typeof input?.command === "string" ? input.command.trim() : "";
-      const script = this.scripts.peer;
-      if (!mentionsCli(command, this.cli) && !command.includes(script)) return null;
-      // Whoever runs `peer` next is this session, whatever else the command does.
-      this.lastCli = { session: session.id, at: Date.now() };
-      // `peer …` is Peer's own coordination command: run its script, without asking.
-      const viaName = isPlainCliCall(command, this.cli);
-      if (viaName || isPlainCliCall(command, script)) {
+    if (body.tool_name === "Bash") return this.beforeShell(session, body);
+    const files: string[] = [];
+    for (const path of this.editedPaths(session, body)) {
+      if (this.keptBy(session, path)) continue;
+      const mirror = [...this.shared.values()].find((candidate) =>
+        this.samePath(candidate.path, path),
+      );
+      if (mirror !== undefined) {
+        const keeper =
+          mirror.keeper === undefined
+            ? "another agent"
+            : `${this.deps.nameOf(mirror.workspace, mirror.keeper.email)}'s agent`;
+        this.log("shared.denied", { session: session.id, scope: mirror.scope });
         return {
           hookSpecificOutput: {
             hookEventName: "PreToolUse",
-            permissionDecision: "allow",
-            permissionDecisionReason: "Peer coordination",
-            ...(viaName
-              ? {
-                  updatedInput: { ...input, command: `${script}${command.slice(this.cli.length)}` },
-                }
-              : {}),
+            permissionDecision: "deny",
+            permissionDecisionReason: `Peer: ${keeper} keeps the shared context of ${this.subjectOf(mirror.workspace, mirror.project, mirror.scope)}; the other agents on it only read it. Put what the work should know under "## For the team" in your working context (${session.ownContextPath}); Peer passes it to the keeper.`,
           },
         };
       }
-      // On the session's PATH it still runs; it only is not let through without asking.
-      this.log("cli.unplain", { session: session.id, command });
-      return null;
+      const file = inRepository(session, path);
+      if (file !== null) files.push(file);
     }
-    const edited = editedFile(body.tool_name, body.tool_input);
-    if (edited !== null && (edited === session.contextPath || edited === session.ownContextPath)) {
-      return {
-        hookSpecificOutput: {
-          hookEventName: "PreToolUse",
-          permissionDecision: "allow",
-          permissionDecisionReason: "The agent's own working context",
-        },
-      };
+    if (files.length === 0) {
+      // Its own contexts only: Claude Code edits them unasked. Codex takes no "allow" without a
+      // rewrite, and asks for them through PermissionRequest instead.
+      return session.agent === "claude" && this.editedPaths(session, body).length > 0
+        ? {
+            hookSpecificOutput: {
+              hookEventName: "PreToolUse",
+              permissionDecision: "allow",
+              permissionDecisionReason: "The agent's own working context",
+            },
+          }
+        : this.newsContext("PreToolUse", session);
     }
-    const mirror = [...this.shared.values()].find((candidate) => candidate.path === edited);
-    if (mirror !== undefined) {
-      const keeper =
-        mirror.keeper === undefined
-          ? "another agent"
-          : `${this.deps.nameOf(mirror.workspace, mirror.keeper.email)}'s agent`;
-      this.log("shared.denied", { session: session.id, scope: mirror.scope });
-      return {
-        hookSpecificOutput: {
-          hookEventName: "PreToolUse",
-          permissionDecision: "deny",
-          permissionDecisionReason: `Peer: ${keeper} keeps the shared context of ${this.subjectOf(mirror.workspace, mirror.project, mirror.scope)}; the other agents on it only read it. Put what the work should know under "## For the team" in your working context (${session.ownContextPath}); Peer passes it to the keeper.`,
-        },
-      };
-    }
-    const file = this.fileOf(session, body);
-    if (file === null) return this.newsContext("PreToolUse", session);
     // Decide on what the other agents changed just now, not a view from a while ago.
     if (Date.now() - (this.viewAt.get(session.workspace) ?? 0) > FRESH_MS) {
       await this.syncNow(session.workspace, 1500);
     }
     const policy = this.deps.policy();
-    let answer = this.decide(session, file, policy);
-    if (answer.decision === "deny") {
-      // Make the contest an overlap the hub knows, so the agent's note has somewhere to go.
-      session.claims = [...session.claims.filter((c) => c !== file), file];
+    let answers = files.map((file) => ({ file, answer: this.decide(session, file, policy) }));
+    if (answers.some(({ answer }) => answer.decision === "deny")) {
+      // Make each contest an overlap the hub knows, so the agent's note has somewhere to go.
+      for (const { file, answer } of answers) {
+        if (answer.decision === "deny") {
+          session.claims = [...session.claims.filter((c) => c !== file), file];
+        }
+      }
       this.markDirty();
       await this.syncNow(session.workspace, 1500);
-      answer = this.decide(session, file, policy);
+      answers = files.map((file) => ({ file, answer: this.decide(session, file, policy) }));
     }
-    if (answer.decision === undefined && answer.context === undefined) {
-      return this.newsContext("PreToolUse", session);
+    const said = answers.filter(
+      ({ answer }) => answer.decision !== undefined || answer.context !== undefined,
+    );
+    if (said.length === 0) return this.newsContext("PreToolUse", session);
+    for (const { file, answer } of said) this.settle(session, file, answer, policy);
+    const deny = said.find(({ answer }) => answer.decision === "deny")?.answer;
+    const ask = said.find(({ answer }) => answer.decision === "ask")?.answer;
+    if (deny !== undefined || (ask !== undefined && session.agent === "codex")) {
+      const reason =
+        deny?.reason ??
+        `${ask?.reason ?? ""} Ask your person in your reply before you change it, and change it once they agree.`;
+      if (deny === undefined && ask !== undefined) {
+        // Codex cannot ask its person before a tool runs: its agent asks, and tries again after.
+        for (const key of ask.keys) session.memory.acknowledged.add(key);
+      }
+      return {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: reason.trim(),
+        },
+      };
     }
+    if (ask !== undefined) {
+      return {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "ask",
+          permissionDecisionReason: ask.reason,
+        },
+      };
+    }
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        additionalContext: said.map(({ answer }) => answer.context).join("\n\n"),
+      },
+    };
+  }
+
+  /** What one contested file's answer leaves behind: who heard, what was asked, the log. */
+  private settle(
+    session: LocalSession,
+    file: string,
+    answer: EditAnswer,
+    policy: PeerCoordinationPolicy,
+  ) {
     this.announce(session, answer.overlaps);
     if (answer.decision === "ask") {
       session.asked.set(file, answer.keys);
@@ -818,17 +936,41 @@ export class CoordinationBroker {
       keys: answer.keys,
       text: answer.reason ?? answer.context,
     });
-    if (answer.decision !== undefined) {
-      return {
-        hookSpecificOutput: {
-          hookEventName: "PreToolUse",
-          permissionDecision: answer.decision,
-          permissionDecisionReason: answer.reason,
-        },
-      };
+  }
+
+  /** The agent running Peer's own CLI: let it, and remember who is about to call. */
+  private beforeShell(
+    session: LocalSession,
+    body: Record<string, unknown>,
+  ): Record<string, unknown> | null {
+    const input = body.tool_input as Record<string, unknown> | null;
+    const command = typeof input?.command === "string" ? input.command.trim() : "";
+    const script = this.scripts.peer;
+    if (!mentionsCli(command, this.cli) && !command.includes(script)) return null;
+    // Whoever runs `peer` next is this session, whatever else the command does.
+    this.lastCli = { session: session.id, at: Date.now() };
+    // `peer …` is Peer's own coordination command: run its script, without asking.
+    const viaName = isPlainCliCall(command, this.cli);
+    if (!viaName && !isPlainCliCall(command, script)) {
+      // On the session's PATH it still runs; it only is not let through without asking.
+      this.log("cli.unplain", { session: session.id, command });
+      return null;
     }
+    // Codex takes "allow" only with a rewrite, and runs Peer's script past its sandbox only as
+    // its rule names it: the script, without what the agent added to trim its output.
+    const rewritten =
+      session.agent === "codex"
+        ? `${script}${withoutOutputTrim(command).slice(viaName ? this.cli.length : script.length)}`
+        : viaName
+          ? `${script}${command.slice(this.cli.length)}`
+          : undefined;
     return {
-      hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: answer.context },
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "allow",
+        permissionDecisionReason: "Peer coordination",
+        ...(rewritten === undefined ? {} : { updatedInput: { ...input, command: rewritten } }),
+      },
     };
   }
 
@@ -1081,6 +1223,7 @@ export class CoordinationBroker {
     const guidance = await this.deps.projectGuidance(session.root).catch(() => null);
     const text = startContext({
       me: this.me(session),
+      ...(session.agent === "codex" ? { cliPath: this.scripts.peer } : {}),
       guidance,
       own: {
         path: session.ownContextPath,
@@ -1629,7 +1772,12 @@ export class CoordinationBroker {
     body: Record<string, unknown>,
     headers: NodeHttp.IncomingHttpHeaders,
   ): Promise<string> {
-    const session = await this.sessionFor(body, headerOf(headers, "x-herdr-pane"));
+    const agent = agentNamed(headerOf(headers, "x-peer-agent"));
+    const session = await this.sessionFor(
+      agent,
+      body,
+      this.paneOf(agent, body, headerOf(headers, "x-herdr-pane")),
+    );
     if (session === null) return "";
     // Findings wait for the agent's next step; only a note on an overlap wakes it.
     const ready = this.news(session, { team: false });
@@ -1657,6 +1805,7 @@ export class CoordinationBroker {
 
   /** Wakes idle agents that have something new to hear. */
   private wakeWaiters() {
+    this.wakeCodex();
     for (const waiter of this.waiters) {
       const session = this.sessions.get(waiter.session);
       if (session === undefined) {
@@ -1679,9 +1828,9 @@ export class CoordinationBroker {
   private async callerOf(headers: NodeHttp.IncomingHttpHeaders): Promise<LocalSession | null> {
     const explicit = headerOf(headers, "x-peer-session");
     if (explicit !== undefined) {
-      const session = this.sessions.get(
-        explicit.startsWith("claude:") ? explicit : `claude:${explicit}`,
-      );
+      const session =
+        this.sessions.get(explicit) ??
+        [...this.sessions.values()].find((s) => s.id === `${s.agent}:${explicit}`);
       if (session !== undefined) return session;
     }
     const pane = headerOf(headers, "x-herdr-pane");
@@ -1707,7 +1856,7 @@ export class CoordinationBroker {
     if (command === "help") return this.help();
     const session = await this.callerOf(headers);
     if (session === null) {
-      return "peer: no agent session of yours is known here. Peer coordinates Claude Code sessions in workspace projects.";
+      return "peer: no agent session of yours is known here. Peer coordinates Claude Code and Codex sessions in workspace projects.";
     }
     this.touch(session);
     const flag = (name: string) => {
@@ -1998,7 +2147,31 @@ export class CoordinationBroker {
       }));
   }
 
-  /** The Claude Code session most recently active in a herdr pane, as its hooks reported it. */
+  /**
+   * Idle Codex agents hear a note on an overlap through Codex, which starts
+   * their turn: Codex has no hook that waits and wakes them. Should Codex not
+   * take it, the note waits for the agent's next step.
+   */
+  private wakeCodex() {
+    for (const session of this.sessions.values()) {
+      if (session.agent !== "codex" || session.status !== "idle") continue;
+      if (this.queueing.has(session.id)) continue;
+      const text = this.news(session, { team: false });
+      if (text === null) continue;
+      this.queueing.add(session.id);
+      this.log("wake", { session: session.id, text, via: "codex queue" });
+      void this.deps
+        .queueCodex(session.id.slice(`${session.agent}:`.length), text)
+        .then((taken) => {
+          this.queueing.delete(session.id);
+          if (taken) return;
+          session.pending.push(text);
+          this.log("wake.failed", { session: session.id });
+        });
+    }
+  }
+
+  /** The agent session most recently active in a herdr pane, as its hooks reported it. */
   sessionInPane(
     pane: string,
   ): { readonly id: string; readonly path: string | undefined } | undefined {
@@ -2009,7 +2182,7 @@ export class CoordinationBroker {
     }
     return latest === undefined
       ? undefined
-      : { id: latest.id.replace(/^claude:/, ""), path: latest.transcript };
+      : { id: latest.id.slice(latest.agent.length + 1), path: latest.transcript };
   }
 
   /** The hub says a workspace's coordination changed: read it within a moment. */

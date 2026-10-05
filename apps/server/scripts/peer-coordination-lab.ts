@@ -51,7 +51,12 @@ import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
 
 import { ORCHESTRATION_PROTOCOL_VERSION, WS_METHODS, WsRpcGroup } from "@t3tools/contracts";
 
-import { claudeHookGroups, withContextAccess } from "../src/peerHub/coordination.ts";
+import {
+  claudeHookGroups,
+  codexHookGroups,
+  codexHookHash,
+  withContextAccess,
+} from "../src/peerHub/coordination.ts";
 
 const repoRoot = NodePath.resolve(import.meta.dirname, "../../..");
 const peerhubBin = process.env.PEERHUB_BIN ?? "peerhub";
@@ -258,8 +263,14 @@ const startComputer = (name: string, email: string, herdrSocket?: string) =>
             // kontext's llm adapter runs on the person's own Claude Code, as it would in Peer.
             PEER_KONTEXT_CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR ?? "",
           }
-        : // Kept knowledge is written without a model: nothing here spends a subscription.
-          { PEER_KNOWLEDGE_LLM: "off" }),
+        : {
+            // Kept knowledge is written without a model: nothing here spends a subscription.
+            PEER_KNOWLEDGE_LLM: "off",
+            // Peer adds its hooks to this computer's own Codex, never this machine's, and hands
+            // nothing to Codex threads: the lab's Codex sessions are made up.
+            CODEX_HOME: NodePath.join(home, "codex"),
+            PEER_CODEX_QUEUE: "off",
+          }),
     };
     const server = spawnLogged(
       process.execPath,
@@ -353,6 +364,8 @@ type HookOut = {
     readonly permissionDecision?: string;
     readonly permissionDecisionReason?: string;
     readonly updatedInput?: { readonly command?: string };
+    /** Codex's answer to a PermissionRequest. */
+    readonly decision?: { readonly behavior?: string };
   };
 } | null;
 
@@ -428,6 +441,73 @@ function agent(computer: Computer, sessionId: string, pane: string) {
         child.on("exit", (code) => resolve(code === 2 ? stderr.trim() : null));
         child.stdin.end(JSON.stringify({ ...base, hook_event_name: "Stop" }));
       });
+    },
+  };
+}
+
+/**
+ * An agent as Codex runs Peer's hooks: the hook told it is Codex's, Codex's
+ * payloads, its shell as Bash and its edits as apply_patch with paths relative
+ * to its directory, and its commands given their thread as CODEX_THREAD_ID.
+ */
+function codexAgent(computer: Computer, sessionId: string, pane: string) {
+  const env = { ...process.env, HERDR_PANE_ID: pane };
+  const base = {
+    session_id: sessionId,
+    cwd: computer.checkout,
+    transcript_path: null,
+    model: "gpt-5",
+    permission_mode: "default",
+    turn_id: "turn-1",
+  };
+  const patch = (paths: ReadonlyArray<string>) =>
+    [
+      "*** Begin Patch",
+      ...paths.flatMap((path) => [`*** Update File: ${path}`, "@@", "-a", "+b"]),
+      "*** End Patch",
+    ].join("\n");
+  return {
+    name: `${computer.name}'s agent (Codex)`,
+    hook(event: string, extra: Record<string, unknown> = {}): HookOut {
+      const out = NodeChildProcess.execFileSync("sh", [computer.scripts.hook, "codex"], {
+        env,
+        input: JSON.stringify({ ...base, hook_event_name: event, ...extra }),
+        encoding: "utf8",
+      }).trim();
+      return out === "" ? null : (JSON.parse(out) as HookOut);
+    },
+    patch(event: "PreToolUse" | "PostToolUse", paths: ReadonlyArray<string>) {
+      return this.hook(event, {
+        tool_name: "apply_patch",
+        tool_use_id: "call-patch",
+        tool_input: { command: patch(paths) },
+        ...(event === "PostToolUse"
+          ? { tool_response: "Success. Updated the following files" }
+          : {}),
+      });
+    },
+    /** `peer …` as Codex's Bash runs it: the hook rewrites it, Codex runs what it was given. */
+    peer(...args: string[]): { readonly ran: string; readonly out: string } {
+      const command = `peer ${args.map((a) => `"${a}"`).join(" ")} 2>&1 | head -20`;
+      const gate = this.hook("PreToolUse", {
+        tool_name: "Bash",
+        tool_use_id: "call-peer",
+        tool_input: { command },
+      });
+      const ran = gate?.hookSpecificOutput?.updatedInput?.command;
+      if (gate?.hookSpecificOutput?.permissionDecision !== "allow" || ran === undefined) {
+        throw new Error(`Peer's own command was not let through: ${JSON.stringify(gate)}`);
+      }
+      const out = NodeChildProcess.execFileSync("sh", ["-c", ran], {
+        env: { ...env, CODEX_THREAD_ID: sessionId },
+        cwd: computer.checkout,
+        encoding: "utf8",
+      }).trim();
+      return { ran, out };
+    },
+    /** Codex asking its person for a tool call. */
+    permission(toolName: string, toolInput: Record<string, unknown>) {
+      return this.hook("PermissionRequest", { tool_name: toolName, tool_input: toolInput });
     },
   };
 }
@@ -844,6 +924,158 @@ const program = Effect.gen(function* () {
     );
   }
 
+  // 11. Codex agents take part as Claude Code's do. Peer adds its hooks to Codex beside its
+  //     person's own, and a Codex session on Ana's computer meets Bob's Claude Code session.
+  const codexHome = NodePath.join(ana.home, "codex");
+  const codexHooksFile = NodePath.join(codexHome, "hooks.json");
+  NodeFS.mkdirSync(codexHome, { recursive: true });
+  const theirs = { type: "command", command: "/usr/bin/true" };
+  NodeFS.writeFileSync(codexHooksFile, JSON.stringify({ hooks: { Stop: [{ hooks: [theirs] }] } }));
+  const withCodex = yield* ana.client[WS_METHODS.peerHubSetCoordination]({ codexHooks: true });
+  type CodexHooks = {
+    hooks: Record<string, Array<{ matcher?: string; hooks: Array<Record<string, unknown>> }>>;
+  };
+  const codexHooks = JSON.parse(NodeFS.readFileSync(codexHooksFile, "utf8")) as CodexHooks;
+  check(
+    codexHooks.hooks.Stop?.[0]?.hooks[0]?.command === "/usr/bin/true" &&
+      String(codexHooks.hooks.Stop?.[1]?.hooks[0]?.command).endsWith("/hook codex") &&
+      codexHooks.hooks.PreToolUse?.[0]?.matcher === "Bash|apply_patch",
+    "Peer adds its hooks to Codex after its person's own, which keep their place",
+  );
+  check(
+    NodeFS.readFileSync(NodePath.join(codexHome, "rules", "peer.rules"), "utf8").includes(
+      JSON.stringify(ana.scripts.peer),
+    ),
+    "and lets only its own command past Codex's sandbox",
+  );
+  check(
+    withCodex.coordination.codexHooks === true &&
+      withCodex.coordination.codexHooksTrusted === false,
+    "Peer says Codex runs them only once its person trusts them",
+  );
+  // Its person trusts them in Codex, which keeps the hash of each hook it trusts in config.toml.
+  const trust = Object.entries(codexHooks.hooks).flatMap(([event, groups]) =>
+    groups.flatMap((group, g) =>
+      group.hooks.flatMap((handler, h) =>
+        String(handler.command).endsWith("/hook codex")
+          ? [
+              `[hooks.state."${codexHooksFile}:${event.replace(/([a-z])([A-Z])/g, "$1_$2").toLowerCase()}:${g}:${h}"]`,
+              `trusted_hash = "${codexHookHash(event, group.matcher, handler) ?? ""}"`,
+              "",
+            ]
+          : [],
+      ),
+    ),
+  );
+  NodeFS.writeFileSync(
+    NodePath.join(codexHome, "config.toml"),
+    ['model = "gpt-5"', "", ...trust].join("\n"),
+  );
+  const trustedNow = yield* ana.client[WS_METHODS.peerHubSetCoordination]({});
+  check(
+    trustedNow.coordination.codexHooksTrusted === true,
+    "and that Codex runs them once its person trusted them",
+  );
+
+  const codexs = codexAgent(ana, "lab-ana-codex", "w1:p4");
+  const codexStart = context(codexs.hook("SessionStart", { source: "startup" }));
+  told(codexs.name, codexStart);
+  check(
+    codexStart?.includes("You are Ana's agent here.") === true &&
+      codexStart.includes(ana.scripts.peer) &&
+      codexStart.includes("working context"),
+    "a Codex session starts with who it is, its working context and where Peer's command is",
+  );
+  codexs.hook("UserPromptSubmit", { prompt: "Show the VAT of each cart line in src/cart.ts" });
+  const codexStopped = codexs.patch("PreToolUse", ["src/lines.ts", "src/cart.ts"]);
+  told(`${codexs.name} (a patch on two files)`, reason(codexStopped));
+  check(
+    decision(codexStopped) === "deny" &&
+      reason(codexStopped)?.includes("Bob's agent") === true &&
+      reason(codexStopped)?.includes("note") === true,
+    "a Codex patch stops at a file Bob's agent changed, whichever file of the patch it is",
+  );
+  const codexNote = codexs.peer(
+    "note",
+    "I add a VAT column to the cart lines in src/cart.ts; totalPrice() stays as it is.",
+  );
+  told(`${codexs.name} (peer note, run as ${codexNote.ran})`, codexNote.out);
+  check(
+    codexNote.ran.startsWith(ana.scripts.peer) &&
+      !codexNote.ran.includes("head") &&
+      codexNote.out.startsWith("Noted on overlap"),
+    "Codex runs Peer's command as Peer's rule names it, and the note reaches the overlap",
+  );
+  check(
+    decision(codexs.patch("PreToolUse", ["src/lines.ts", "src/cart.ts"])) === undefined,
+    "after its note, it may patch",
+  );
+  codexs.patch("PostToolUse", ["src/lines.ts", "src/cart.ts"]);
+  yield* Effect.promise(() => sleep(3500));
+  const codexView = yield* Effect.promise(() =>
+    hubCall("/v1/workspaces/acme/coord", { session: hubSession }),
+  );
+  const codexSession = (
+    codexView.sessions as ReadonlyArray<{ id: string; files?: ReadonlyArray<string> }>
+  ).find((session) => session.id === "codex:lab-ana-codex");
+  check(
+    codexSession?.files?.includes("src/cart.ts") === true &&
+      codexSession.files.includes("src/lines.ts"),
+    "the team sees every file its patch changed",
+  );
+  const ownContext = NodePath.join(
+    ana.home,
+    "userdata",
+    "coord",
+    "contexts",
+    "acme",
+    "lab",
+    "lab-ana-codex.md",
+  );
+  const ownPatch = codexs.permission("apply_patch", {
+    command: `*** Begin Patch\n*** Update File: ${ownContext}\n@@\n-a\n+b\n*** End Patch`,
+  });
+  check(
+    ownPatch?.hookSpecificOutput?.decision?.behavior === "allow",
+    "Peer lets Codex write the agent's own working context without asking its person",
+  );
+  const asks = codexs.permission("Bash", { command: "rm -rf build" });
+  check(
+    asks === null &&
+      events(ana).some(
+        (entry) => entry.event === "session.blocked" && entry.session === "codex:lab-ana-codex",
+      ),
+    "anything else waits for its person, and the agent counts as waiting, not working",
+  );
+  codexs.hook("Stop", { stop_hook_active: false, last_assistant_message: "Done." });
+  bobs.peer("note", "Fine by me: keep the VAT column out of totalPrice().");
+  let codexWake: Record<string, unknown> | undefined;
+  for (let attempt = 0; attempt < 30 && codexWake === undefined; attempt += 1) {
+    yield* Effect.promise(() => sleep(500));
+    codexWake = events(ana).find(
+      (entry) => entry.event === "wake" && entry.session === "codex:lab-ana-codex",
+    );
+  }
+  check(
+    codexWake?.via === "codex queue" && String(codexWake.text).includes("VAT column"),
+    "an idle Codex agent is woken with the note through Codex itself",
+  );
+  const codexHeard = context(codexs.hook("UserPromptSubmit", { prompt: "go on" }));
+  told(`${codexs.name} (next step)`, codexHeard);
+  check(
+    codexHeard?.includes("keep the VAT column out of totalPrice()") === true,
+    "and when Codex does not take it, the agent hears the note at its next step",
+  );
+  codexs.hook("SessionEnd", { reason: "other" });
+  yield* ana.client[WS_METHODS.peerHubSetCoordination]({ codexHooks: false });
+  check(
+    JSON.stringify(
+      (JSON.parse(NodeFS.readFileSync(codexHooksFile, "utf8")) as CodexHooks).hooks,
+    ) === JSON.stringify({ Stop: [{ hooks: [theirs] }] }) &&
+      !NodeFS.existsSync(NodePath.join(codexHome, "rules", "peer.rules")),
+    "taking Peer's hooks out of Codex leaves its person's own",
+  );
+
   for (const computer of [ana, bob]) {
     const lines = NodeFS.readFileSync(computer.log, "utf8").trim().split("\n");
     const events = lines.map((line) => (JSON.parse(line) as { event: string }).event);
@@ -1003,6 +1235,136 @@ async function startClaude(h: HerdrServer, computer: Computer, name: string) {
   throw new Error(`${name}'s Claude Code did not start`);
 }
 
+/** A value as TOML writes it inline, for Codex's `-c key=value`. */
+function tomlInline(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(tomlInline).join(", ")}]`;
+  if (typeof value === "object" && value !== null) {
+    return `{${Object.entries(value)
+      .map(([key, item]) => `${JSON.stringify(key)} = ${tomlInline(item)}`)
+      .join(", ")}}`;
+  }
+  return typeof value === "string" ? JSON.stringify(value) : String(value);
+}
+
+/**
+ * How the lab runs this person's own Codex (their sign-in, their CODEX_HOME,
+ * left as they are) as one of its computers' agents: with that computer's
+ * Peer hooks, and without the person's own hooks, plugins and MCP servers.
+ * Every setting is a `-c` for this run; nothing is written to their Codex.
+ */
+function codexLabArgs(computer: Computer): string[] {
+  const codexHome = process.env.CODEX_HOME ?? NodePath.join(NodeOS.homedir(), ".codex");
+  const read = (file: string) => {
+    try {
+      return NodeFS.readFileSync(NodePath.join(codexHome, file), "utf8");
+    } catch {
+      return "";
+    }
+  };
+  // Their hooks.json hooks, each turned off by the key Codex keeps its trust under.
+  const theirs: Record<string, { enabled: boolean }> = {};
+  const hooksFile = NodePath.join(codexHome, "hooks.json");
+  try {
+    const declared = (JSON.parse(read("hooks.json") || "{}") as CodexHooksFile).hooks ?? {};
+    for (const [event, groups] of Object.entries(declared)) {
+      const label = event.replace(/([a-z])([A-Z])/g, "$1_$2").toLowerCase();
+      for (const [g, group] of groups.entries()) {
+        for (const h of (group.hooks ?? []).keys()) {
+          theirs[`${hooksFile}:${label}:${g}:${h}`] = { enabled: false };
+        }
+      }
+    }
+  } catch {
+    // No hooks of theirs to turn off.
+  }
+  const servers = [
+    ...read("config.toml").matchAll(/^\[mcp_servers\.(?:"([^"]+)"|([A-Za-z0-9_-]+))\]\s*$/gm),
+  ].map((match) => match[1] ?? match[2] ?? "");
+  const checkout = computer.checkout;
+  return [
+    "-c",
+    `hooks=${tomlInline({ state: theirs, ...codexHookGroups(computer.scripts) })}`,
+    // The lab vets its own hooks; Codex would otherwise wait for its person to trust them.
+    "--dangerously-bypass-hook-trust",
+    "-c",
+    "features.plugins=false",
+    ...(servers.length === 0
+      ? []
+      : [
+          "-c",
+          `mcp_servers=${tomlInline(Object.fromEntries(servers.map((name) => [name, { enabled: false }])))}`,
+        ]),
+    "-c",
+    `projects=${tomlInline({
+      [checkout]: { trust_level: "trusted" },
+      [NodeFS.realpathSync(checkout)]: { trust_level: "trusted" },
+    })}`,
+    "-c",
+    "check_for_update_on_startup=false",
+    "-c",
+    "notify=[]",
+    "-c",
+    'approval_policy="never"',
+    "-c",
+    'sandbox_mode="danger-full-access"',
+    // Their model, at an effort that keeps a lab step short.
+    "-c",
+    'model_reasoning_effort="medium"',
+  ];
+}
+type CodexHooksFile = {
+  readonly hooks?: Record<string, ReadonlyArray<{ readonly hooks?: ReadonlyArray<unknown> }>>;
+};
+
+/** This person's own Codex as a computer's agent, in a herdr pane of that computer. */
+async function startCodex(h: HerdrServer, computer: Computer, name: string) {
+  const created = herdrJson(
+    h,
+    "workspace",
+    "create",
+    "--cwd",
+    computer.checkout,
+    "--label",
+    name,
+    "--no-focus",
+  );
+  const pane = created.result?.root_pane?.pane_id as string;
+  // Its settings would be too long a line for the pane's shell to take: a launcher holds them.
+  const quote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`;
+  const launcher = NodePath.join(computer.home, "codex-lab.sh");
+  NodeFS.writeFileSync(
+    launcher,
+    `#!/bin/sh\nexec codex ${codexLabArgs(computer).map(quote).join(" ")} "$@"\n`,
+    { mode: 0o755 },
+  );
+  for (let launch = 0; launch < 3; launch += 1) {
+    herdrText(h, "pane", "run", pane, launcher);
+    for (let step = 0; step < 40; step += 1) {
+      const agentState = herdrJson(h, "agent", "get", pane).result?.agent;
+      const screen = herdrText(h, "pane", "read", pane, "--source", "visible");
+      const asking = /trust the (files|contents)|Hooks need review|Update available|Sign in/i.test(
+        screen,
+      );
+      if (
+        agentState?.agent === "codex" &&
+        (agentState.agent_status === "idle" || agentState.agent_status === "done") &&
+        screen.includes("Ask Codex") &&
+        !asking
+      ) {
+        herdrText(h, "agent", "rename", pane, name);
+        say(`${name} started`, `${computer.name}'s Codex in herdr pane ${pane}`);
+        return pane;
+      }
+      if (asking && step > 10) {
+        console.log(screen);
+        throw new Error(`${name}'s Codex waits on a question the lab does not answer`);
+      }
+      await sleep(1500);
+    }
+  }
+  throw new Error(`${name}'s Codex did not start`);
+}
+
 const statusOf = (h: HerdrServer, pane: string) =>
   (herdrJson(h, "agent", "get", pane).result?.agent?.agent_status as string | undefined) ?? "?";
 
@@ -1043,8 +1405,12 @@ const realProgram = Effect.gen(function* () {
     git(computer.checkout, "checkout", "--quiet", "-b", "krk-1-pricing");
   }
   yield* Effect.promise(() => sleep(3000));
-  const anaPane = yield* Effect.promise(() => startClaude(anaHerdr, ana, "ana"));
-  const bobPane = yield* Effect.promise(() => startClaude(bobHerdr, bob, "bob"));
+  // Ana's and Bob's agents: Claude Code and Codex unless REAL_KINDS says otherwise ("claude,claude").
+  const [anaKind, bobKind] = (process.env.REAL_KINDS ?? "claude,codex").split(",");
+  const start = (kind: string | undefined, h: HerdrServer, computer: Computer, name: string) =>
+    kind === "codex" ? startCodex(h, computer, name) : startClaude(h, computer, name);
+  const anaPane = yield* Effect.promise(() => start(anaKind, anaHerdr, ana, "ana"));
+  const bobPane = yield* Effect.promise(() => start(bobKind, bobHerdr, bob, "bob"));
   const agents = [
     { computer: ana, h: anaHerdr, pane: anaPane },
     { computer: bob, h: bobHerdr, pane: bobPane },

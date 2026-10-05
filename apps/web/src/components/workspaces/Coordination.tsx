@@ -35,7 +35,7 @@ const POLICIES: ReadonlyArray<{
   {
     value: "ask",
     label: "Ask me",
-    hint: "Claude Code asks you before it changes a file another agent changed.",
+    hint: "Your agent asks you before it changes a file another agent changed.",
   },
 ];
 
@@ -57,6 +57,19 @@ export function personName(status: PeerHubStatus, workspace: string, email: stri
   return local === "" ? email : `${local[0]?.toUpperCase() ?? ""}${local.slice(1)}`;
 }
 
+/** The agents Peer adds its hooks to, so they take part wherever they run (herdr, Peer, a terminal). */
+const AGENTS = [
+  { hooks: "claudeHooks", name: "Claude Code" },
+  { hooks: "codexHooks", name: "Codex" },
+] as const;
+
+/** Codex runs a hook only once its person trusts it, in Codex: Peer says whether they did. */
+function codexTrustHint(trusted: boolean | undefined): string {
+  return trusted === true
+    ? "Codex trusts them."
+    : "Codex runs them once you trust them: start codex and choose Trust all when it asks to review hooks (or trust them in /hooks).";
+}
+
 /** Settings → Workspaces: agents coordinating with the team's (experimental). */
 export function CoordinationControls({
   environmentId,
@@ -72,6 +85,7 @@ export function CoordinationControls({
     readonly enabled?: boolean;
     readonly policy?: PeerCoordinationPolicy;
     readonly claudeHooks?: boolean;
+    readonly codexHooks?: boolean;
   }) => {
     setBusy(true);
     try {
@@ -112,21 +126,34 @@ export function CoordinationControls({
           <p className="text-xs text-muted-foreground">
             {POLICIES.find((p) => p.value === coordination.policy)?.hint}
           </p>
-          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-            <span className="min-w-0 flex-1">
-              {coordination.claudeHooks
-                ? "Claude Code runs Peer's hooks: its agents hear each other only when they share a file."
-                : "Add Peer's hooks to Claude Code so its agents (in herdr or anywhere) take part."}
-            </span>
-            <Button
-              size="xs"
-              variant="outline"
-              disabled={busy}
-              onClick={() => void run({ claudeHooks: !coordination.claudeHooks })}
-            >
-              {coordination.claudeHooks ? "Remove from Claude Code" : "Add to Claude Code"}
-            </Button>
-          </div>
+          {AGENTS.map((agent) => {
+            const added = coordination[agent.hooks] === true;
+            // A Peer that cannot add hooks to this agent does not say whether it runs them.
+            if (coordination[agent.hooks] === undefined) return null;
+            return (
+              <div
+                key={agent.hooks}
+                className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"
+              >
+                <span className="min-w-0 flex-1">
+                  {added
+                    ? `${agent.name} runs Peer's hooks: its agents take part, in herdr, in Peer or anywhere.`
+                    : `Add Peer's hooks to ${agent.name} so its agents take part, wherever they run.`}
+                  {added && agent.hooks === "codexHooks"
+                    ? ` ${codexTrustHint(coordination.codexHooksTrusted)}`
+                    : null}
+                </span>
+                <Button
+                  size="xs"
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => void run({ [agent.hooks]: !added })}
+                >
+                  {added ? `Remove from ${agent.name}` : `Add to ${agent.name}`}
+                </Button>
+              </div>
+            );
+          })}
           <p className="text-xs text-muted-foreground">
             Every coordination event is logged to{" "}
             <code className="rounded bg-muted px-1 py-px text-2xs select-all">
@@ -156,9 +183,9 @@ function ExperimentSteps() {
       <ol className="list-decimal space-y-1 pl-4">
         <li>
           On both computers: the same workspace project cloned, coordination on, Coordinate, and
-          Peer's hooks added to Claude Code.
+          Peer's hooks added to the agent you use there (Claude Code or Codex).
         </li>
-        <li>On both, start Claude Code in herdr in that checkout, each on a branch of its own.</li>
+        <li>On both, start that agent in herdr in that checkout, each on a branch of its own.</li>
         <li>
           Computer A: “In apps/server/src/webhooks.rs every delivery should also send user-agent:
           vocabulift-webhooks/&lt;version&gt; and webhook-attempt: &lt;n&gt; (1-based); pass the

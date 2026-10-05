@@ -552,6 +552,10 @@ export const PeerCoordinationState = Schema.Struct({
   policy: PeerCoordinationPolicy,
   /** Claude Code runs Peer's coordination hooks. */
   claudeHooks: Schema.Boolean,
+  /** Codex runs Peer's coordination hooks; absent from a Peer that cannot add them. */
+  codexHooks: Schema.optional(Schema.Boolean),
+  /** Codex trusts Peer's hooks (its person approved them in Codex); only while they are added. */
+  codexHooksTrusted: Schema.optional(Schema.Boolean),
   /** Every coordination event, one JSON object per line. */
   logPath: Schema.String,
   sessions: Schema.Array(PeerCoordSession),
@@ -717,6 +721,8 @@ export const PeerHubSetCoordinationInput = Schema.Struct({
   policy: Schema.optional(PeerCoordinationPolicy),
   /** Add Peer's hooks to Claude Code's user settings, or take them out. */
   claudeHooks: Schema.optional(Schema.Boolean),
+  /** Add Peer's hooks to Codex's user config (config.toml), or take them out. */
+  codexHooks: Schema.optional(Schema.Boolean),
 });
 export type PeerHubSetCoordinationInput = typeof PeerHubSetCoordinationInput.Type;
 

@@ -1,8 +1,14 @@
 import { assert, describe, it } from "@effect/vitest";
 
 import {
+  agentNamed,
   changedPaths,
   claudeHookGroups,
+  codexHookGroups,
+  codexHookHash,
+  codexHookTrust,
+  codexRules,
+  codexTrustsPeerHooks,
   closeOutText,
   compactionNudge,
   contextSkill,
@@ -14,11 +20,13 @@ import {
   contextWritten,
   decideEdit,
   editedFile,
+  editedFiles,
   emptyMemory,
-  hasClaudeHooks,
+  hasPeerHooks,
   isPlainCliCall,
   mentionsCli,
   newsFor,
+  patchPaths,
   projectLines,
   repositoryPath,
   rosterChange,
@@ -27,8 +35,9 @@ import {
   taskNamed,
   teamLines,
   teamNews,
-  withClaudeHooks,
+  withPeerHooks,
   withContextAccess,
+  withoutOutputTrim,
   type CoordinationView,
 } from "./coordination.ts";
 import type { HubCoordSession, HubFinding, HubOverlap } from "./hubApi.ts";
@@ -283,18 +292,37 @@ describe("Claude Code settings", () => {
   };
 
   it("adds Peer's hooks beside others' and takes only its own out again", () => {
-    const installed = withClaudeHooks(theirs, groups, "/peer/coord", true);
-    assert.isTrue(hasClaudeHooks(installed, "/peer/coord"));
+    const installed = withPeerHooks(theirs, groups, "/peer/coord", true);
+    assert.isTrue(hasPeerHooks(installed, "/peer/coord"));
     assert.strictEqual(installed.model, "opus");
     assert.strictEqual(installed.hooks?.PreToolUse?.length, 2);
-    const twice = withClaudeHooks(installed, groups, "/peer/coord", true);
+    const twice = withPeerHooks(installed, groups, "/peer/coord", true);
     assert.strictEqual(twice.hooks?.PreToolUse?.length, 2, "installing again does not duplicate");
-    const removed = withClaudeHooks(twice, groups, "/peer/coord", false);
+    const removed = withPeerHooks(twice, groups, "/peer/coord", false);
     assert.deepStrictEqual(removed, theirs);
   });
 
+  it("changes Peer's hooks where they are, so hooks after them keep their place", () => {
+    // Codex trusts each hook by its position: a hook another tool added after Peer's stays trusted.
+    const theirsAfter = { hooks: [{ type: "command", command: "/other/notify.sh" }] };
+    const settings = {
+      hooks: {
+        Stop: [
+          { hooks: [{ type: "command", command: "/first/notify.sh" }] },
+          { hooks: [{ type: "command", command: "/peer/coord/hook" }] },
+          theirsAfter,
+        ],
+      },
+    };
+    const upgraded = withPeerHooks(settings, groups, "/peer/coord", true);
+    assert.strictEqual(upgraded.hooks?.Stop?.[0]?.hooks?.[0]?.command, "/first/notify.sh");
+    assert.deepStrictEqual(upgraded.hooks?.Stop?.[1], groups.Stop?.[0]);
+    assert.strictEqual(upgraded.hooks?.Stop?.[2], theirsAfter);
+    assert.strictEqual(upgraded.hooks?.Stop?.length, 3);
+  });
+
   it("upgrades hooks an older Peer installed once, then leaves the settings alone", () => {
-    const older = withClaudeHooks(
+    const older = withPeerHooks(
       theirs,
       {
         PostToolUse: [
@@ -304,14 +332,146 @@ describe("Claude Code settings", () => {
       "/peer/coord",
       true,
     );
-    const upgraded = withClaudeHooks(older, groups, "/peer/coord", true);
+    const upgraded = withPeerHooks(older, groups, "/peer/coord", true);
     assert.isTrue(settingsDiffer(upgraded, older));
     assert.strictEqual(upgraded.hooks?.PostToolUse?.[0]?.matcher, groups.PostToolUse?.[0]?.matcher);
     assert.isDefined(upgraded.hooks?.Notification);
     assert.strictEqual(upgraded.model, "opus");
-    assert.isFalse(
-      settingsDiffer(withClaudeHooks(upgraded, groups, "/peer/coord", true), upgraded),
+    assert.isFalse(settingsDiffer(withPeerHooks(upgraded, groups, "/peer/coord", true), upgraded));
+  });
+});
+
+describe("Codex", () => {
+  const groups = codexHookGroups({ hook: "/peer/coord/hook", wait: "/peer/coord/wait" });
+
+  it("hooks Codex's shell and patches, and tells Peer the hook is Codex's", () => {
+    assert.strictEqual(groups.PreToolUse?.[0]?.matcher, "Bash|apply_patch");
+    assert.strictEqual(groups.PostToolUse?.[0]?.matcher, "Bash|apply_patch");
+    assert.strictEqual(groups.Stop?.[0]?.hooks?.[0]?.command, "/peer/coord/hook codex");
+    // Codex has no Notification: PermissionRequest says an agent waits for its person.
+    assert.isDefined(groups.PermissionRequest);
+    assert.isUndefined(groups.Notification);
+  });
+
+  it("hashes a hook as Codex does to trust it", () => {
+    const hook = { type: "command", command: "/peer/coord/hook codex", timeout: 5 };
+    assert.strictEqual(
+      codexHookHash("PostToolUse", "Bash|apply_patch", hook),
+      "sha256:9abcefe6c7d8028cceba041603ab9138deeb747ffc42e81add18b61689212704",
     );
+    // Stop has no matcher; SessionEnd's timeout is one to three seconds.
+    assert.strictEqual(
+      codexHookHash("Stop", undefined, hook),
+      "sha256:8551bd6b73da83754c962155e84fd26d74c9f4e8075d5a1be971aab0e4070905",
+    );
+    assert.strictEqual(
+      codexHookHash("SessionEnd", undefined, { ...hook, timeout: 2 }),
+      "sha256:b82c3d1b270a058482e21fc2d7d37ed2d0bee37f1d59bbb3695020b41140f07e",
+    );
+    assert.isNull(codexHookHash("Notification", undefined, hook));
+  });
+
+  it("reads which hooks Codex trusts, and says whether it runs Peer's", () => {
+    const path = "/u/.codex/hooks.json";
+    const hooks = withPeerHooks(
+      { hooks: { Stop: [{ hooks: [{ type: "command", command: "/other/notify.sh" }] }] } },
+      { Stop: groups.Stop ?? [] },
+      "/peer/coord",
+      true,
+    );
+    const hash =
+      codexHookHash("Stop", undefined, {
+        type: "command",
+        command: "/peer/coord/hook codex",
+        timeout: 5,
+      }) ?? "";
+    const config = [
+      'model = "gpt-5"',
+      "[hooks.state]",
+      "",
+      `[hooks.state."${path}:stop:0:0"]`,
+      'trusted_hash = "sha256:theirs"',
+      "",
+      `[hooks.state."${path}:stop:1:0"]`,
+      `trusted_hash = "${hash}"`,
+      "",
+      "[features]",
+      "hooks = true",
+    ].join("\n");
+    assert.deepStrictEqual(codexHookTrust(config).get(`${path}:stop:1:0`), { hash, enabled: true });
+    assert.isTrue(codexTrustsPeerHooks(hooks, path, config, "/peer/coord"));
+    assert.isFalse(codexTrustsPeerHooks(hooks, path, 'model = "gpt-5"\n', "/peer/coord"));
+    const off = config.replace(
+      `trusted_hash = "${hash}"`,
+      `trusted_hash = "${hash}"\nenabled = false`,
+    );
+    assert.isFalse(codexTrustsPeerHooks(hooks, path, off, "/peer/coord"));
+    // A changed hook is not the one its person trusted.
+    const changed = withPeerHooks(
+      hooks,
+      { Stop: [{ hooks: [{ type: "command", command: "/peer/coord/hook codex", timeout: 9 }] }] },
+      "/peer/coord",
+      true,
+    );
+    assert.isFalse(codexTrustsPeerHooks(changed, path, config, "/peer/coord"));
+  });
+
+  it("lets only Peer's own command past Codex's sandbox", () => {
+    assert.strictEqual(
+      codexRules("/peer/coord/bin/peer"),
+      '# Peer coordination: Peer\'s own command talks to Peer on this computer. Peer adds and removes this file.\nprefix_rule(pattern=["/peer/coord/bin/peer"], decision="allow")\n',
+    );
+  });
+
+  it("reads the files a Codex patch edits, and Claude Code's one", () => {
+    assert.deepStrictEqual(
+      editedFiles("apply_patch", {
+        command:
+          "*** Begin Patch\n*** Update File: src/a.ts\n@@\n-x\n+y\n*** Add File: src/b.ts\n+z\n*** End Patch",
+      }),
+      ["src/a.ts", "src/b.ts"],
+    );
+    assert.deepStrictEqual(editedFiles("Edit", { file_path: "/w/app/src/a.ts" }), [
+      "/w/app/src/a.ts",
+    ]);
+    assert.deepStrictEqual(editedFiles("Bash", { command: "ls" }), []);
+  });
+
+  it("drops the trim agents add to what Peer's command prints", () => {
+    assert.strictEqual(withoutOutputTrim('peer note "x" 2>&1 | head -30'), 'peer note "x"');
+    assert.strictEqual(withoutOutputTrim("peer status"), "peer status");
+  });
+});
+
+describe("agents", () => {
+  it("names the agent a hook came from, Claude Code by default", () => {
+    assert.strictEqual(agentNamed("codex"), "codex");
+    assert.strictEqual(agentNamed(undefined), "claude");
+    assert.strictEqual(agentNamed("claude"), "claude");
+  });
+
+  it("reads the files a Codex patch changes", () => {
+    const patch = [
+      "*** Begin Patch",
+      "*** Update File: src/pricing.ts",
+      "@@",
+      "-export function price(items: number[]) {",
+      "+export function totalPrice(items: number[]) {",
+      "*** Add File: src/vat.ts",
+      "+export const VAT = 0.2;",
+      "*** Update File: src/cart.ts",
+      "*** Move to: src/basket.ts",
+      "*** Delete File: src/old.ts",
+      "*** End Patch",
+    ].join("\n");
+    assert.deepStrictEqual(patchPaths(patch), [
+      "src/pricing.ts",
+      "src/vat.ts",
+      "src/cart.ts",
+      "src/basket.ts",
+      "src/old.ts",
+    ]);
+    assert.deepStrictEqual(patchPaths("echo hi"), []);
   });
 });
 
