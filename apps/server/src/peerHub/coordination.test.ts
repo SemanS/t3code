@@ -7,6 +7,11 @@ import {
   boardText,
   changedPaths,
   claimedTask,
+  closerOf,
+  settleAskedAt,
+  settleNudge,
+  settleRequest,
+  SETTLE_REQUEST,
   commandsText,
   coordinationScripts,
   describe as describeSession,
@@ -424,6 +429,84 @@ describe("the project's other work", () => {
       scripts.wait,
       `[ "\${PEER_COORDINATION:-}" = off ] && { cat >/dev/null; exit 0; }`,
     );
+  });
+});
+
+describe("settling an overlap", () => {
+  it("names one agent to close it, the same on every computer", () => {
+    const files = overlap({ sessions: ["claude:vir", "claude:me"] });
+    assert.strictEqual(closerOf(files, [vir, me]), "claude:me");
+    assert.strictEqual(closerOf(files, [vir]), "claude:vir", "the one still at work");
+    assert.isUndefined(closerOf(files, []));
+    // A question about a task is closed by the agent that asked it.
+    const question = overlap({ sessions: ["claude:me", "claude:vir"], files: ["task:krk-812"] });
+    const onTask = { ...vir, task: "krk-812" };
+    assert.strictEqual(closerOf(question, [{ ...me, task: "krk-900" }, onTask]), "claude:me");
+    assert.strictEqual(
+      closerOf({ ...question, sessions: ["claude:a", "claude:z"] }, [
+        { id: "claude:a", task: "krk-812" },
+        { id: "claude:z", task: undefined },
+      ]),
+      "claude:z",
+    );
+  });
+
+  it("asks both agents to agree and names who closes it, with what the person adds", () => {
+    const text = settleRequest({
+      closer: "Vir's agent on KRK-812 · Split payments",
+      message: "Payments first, please.",
+      cli: "peer",
+    });
+    assert.isTrue(text.startsWith(SETTLE_REQUEST));
+    assert.include(
+      text,
+      `then Vir's agent on KRK-812 · Split payments closes it: peer resolve "<agreement>"`,
+    );
+    assert.include(text, "If the other agent does not answer, close it with what you will do.");
+    assert.isTrue(text.endsWith(" Payments first, please."));
+  });
+
+  it("knows a person asked until an agent writes again", () => {
+    const asked = {
+      text: `${SETTLE_REQUEST} agree…`,
+      at: "2026-10-05T10:00:00Z",
+    };
+    assert.strictEqual(settleAskedAt([asked]), "2026-10-05T10:00:00Z");
+    assert.isUndefined(settleAskedAt([asked, { session: "claude:vir", text: "ok", at: "t" }]));
+    assert.isUndefined(settleAskedAt([{ text: "Bob first", at: "t" }]));
+  });
+
+  it("does not wake an agent only to say an overlap was closed", () => {
+    const closed = overlap({
+      state: "resolved",
+      notes: [
+        {
+          id: "r1",
+          session: "claude:vir",
+          email: "vir@acme.test",
+          text: "Resolved: Vir first",
+          at: "t",
+        },
+      ],
+    });
+    const memory = emptyMemory();
+    const waking = newsFor({ me, view: view([closed]), memory, nameOf, waking: true, cli: CLI });
+    assert.isNull(waking);
+    const next = newsFor({ me, view: view([closed]), memory, nameOf, cli: CLI });
+    assert.include(next?.text, `Vir's agent: "Resolved: Vir first"`);
+  });
+
+  it("tells the closing agent to close a quiet overlap or say what is left", () => {
+    const text = settleNudge({
+      overlap: overlap(),
+      other: "Vir's agent",
+      minutes: 3,
+      taskName: (task) => task,
+      cli: "peer",
+    });
+    assert.include(text, "overlap abc123 with Vir's agent on src/pay.ts has been quiet for 3 min");
+    assert.include(text, `close it now: peer resolve "<agreement>"`);
+    assert.include(text, `peer note "<text>"`);
   });
 });
 

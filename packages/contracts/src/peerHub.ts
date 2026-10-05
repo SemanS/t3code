@@ -375,6 +375,10 @@ export const PeerOverlap = Schema.Struct({
     }),
   ),
   updatedAt: Schema.String,
+  /** The agent session that closes it once its agents agree. */
+  closer: Schema.optional(Schema.String),
+  /** When a person asked its agents to settle it, unless an agent wrote since. */
+  askedAt: Schema.optional(Schema.String),
 });
 export type PeerOverlap = typeof PeerOverlap.Type;
 
@@ -733,6 +737,16 @@ export const PeerHubOverlapNoteInput = Schema.Struct({
   text: TrimmedNonEmptyString,
 });
 export type PeerHubOverlapNoteInput = typeof PeerHubOverlapNoteInput.Type;
+
+/** A person asks the agents on an overlap to settle it between them and close it. */
+export const PeerHubSettleOverlapInput = Schema.Struct({
+  workspace: TrimmedNonEmptyString,
+  project: TrimmedNonEmptyString,
+  overlap: TrimmedNonEmptyString,
+  /** What the person adds for both agents. */
+  message: Schema.optional(Schema.String),
+});
+export type PeerHubSettleOverlapInput = typeof PeerHubSettleOverlapInput.Type;
 
 export const PeerHubResolveOverlapInput = Schema.Struct({
   workspace: TrimmedNonEmptyString,

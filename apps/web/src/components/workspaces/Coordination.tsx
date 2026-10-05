@@ -5,9 +5,11 @@ import type {
   PeerOverlap,
 } from "@t3tools/contracts";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
-import { CircleAlertIcon } from "lucide-react";
+import { CheckIcon, CircleAlertIcon } from "lucide-react";
 import { useState } from "react";
 
+import { useNowMinute } from "../../hooks/useNowMinute";
+import { cn } from "../../lib/utils";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Button } from "../ui/button";
@@ -31,7 +33,7 @@ const POLICIES: ReadonlyArray<{
   {
     value: "coordinate",
     label: "Coordinate",
-    hint: "It writes the other agent a note first; they settle it between them, and you see every note here.",
+    hint: "It writes the other agent a note first; they agree and close it between them, and you see every note here.",
   },
   {
     value: "ask",
@@ -237,9 +239,17 @@ function ExperimentSteps() {
   );
 }
 
+/** Notes this recent mean the agents are still talking it through. */
+const TALKING_MS = 2 * 60 * 1000;
+/** Asked this long ago and still open: the person may ask again, or close it themselves. */
+const ASKED_LONG_MS = 3 * 60 * 1000;
+/** An overlap its agents settled stays in view this long, with what they agreed. */
+const SETTLED_SHOWN_MS = 10 * 60 * 1000;
+
 /**
- * The Work view's open overlaps: two agents changing the same files, with the
- * notes they wrote each other. People add a note both agents hear, or settle it.
+ * The Work view's overlaps: two agents changing the same files, or one asking
+ * another task's agents, with the notes they wrote each other. A person asks
+ * the agents to settle one (Resolve), and sees for a while what they agreed.
  */
 export function OverlapList({
   environmentId,
@@ -248,8 +258,13 @@ export function OverlapList({
   readonly environmentId: EnvironmentId;
   readonly status: PeerHubStatus;
 }) {
+  const now = Date.parse(`${useNowMinute()}:00Z`);
   const open = status.coordination.overlaps.filter((overlap) => overlap.state === "open");
-  if (!status.coordination.enabled || open.length === 0) return null;
+  const settled = status.coordination.overlaps.filter(
+    (overlap) =>
+      overlap.state === "resolved" && now - Date.parse(overlap.updatedAt) < SETTLED_SHOWN_MS,
+  );
+  if (!status.coordination.enabled || open.length + settled.length === 0) return null;
   return (
     <section aria-label="Overlaps" className="flex flex-col gap-1.5">
       <p className="px-2 pb-1 text-xs font-medium tracking-wide text-muted-foreground uppercase">
@@ -261,7 +276,20 @@ export function OverlapList({
           environmentId={environmentId}
           status={status}
           overlap={overlap}
+          now={now}
         />
+      ))}
+      {settled.map((overlap) => (
+        <p
+          key={`${overlap.workspace}/${overlap.id}`}
+          className="mx-1 flex items-start gap-1.5 px-2 text-xs text-muted-foreground"
+        >
+          <CheckIcon aria-hidden className="mt-0.5 size-3.5 shrink-0 text-success" />
+          <span className="min-w-0">
+            <span className="text-sidebar-foreground">{overlapTopic(status, overlap)}</span>
+            {overlap.resolution === undefined ? " settled" : ` · agreed: ${overlap.resolution}`}
+          </span>
+        </p>
       ))}
     </section>
   );
@@ -271,45 +299,77 @@ function OverlapCard({
   environmentId,
   status,
   overlap,
+  now,
 }: {
   readonly environmentId: EnvironmentId;
   readonly status: PeerHubStatus;
   readonly overlap: PeerOverlap;
+  readonly now: number;
 }) {
-  const note = useAtomCommand(serverEnvironment.peerHubNoteOverlap, { reportFailure: false });
+  const settle = useAtomCommand(serverEnvironment.peerHubSettleOverlap, { reportFailure: false });
   const resolve = useAtomCommand(serverEnvironment.peerHubResolveOverlap, {
     reportFailure: false,
   });
-  const [text, setText] = useState("");
+  const [writing, setWriting] = useState(false);
+  const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const scope = { workspace: overlap.workspace, project: overlap.project, overlap: overlap.id };
   const nameOf = (email: string) => personName(status, overlap.workspace, email);
   const tasks = projectTasks(status, overlap);
-  const sides = overlap.sessions.map((id) => {
+  const agentOf = (id: string) => {
     const session = status.coordination.sessions.find((s) => s.id === id);
-    if (session === undefined) return "an agent no longer at work";
+    if (session === undefined) return undefined;
     const task = tasks.find((candidate) => candidate.id === session.task);
-    const on = task === undefined ? "" : ` on ${taskLabel(task)}`;
-    return `${session.local ? "your" : `${nameOf(session.email)}'s`} agent${on} (“${session.label}”)`;
+    return {
+      name: session.local ? "your agent" : `${nameOf(session.email)}'s agent`,
+      on: task === undefined ? `“${session.label}”` : taskLabel(task),
+    };
+  };
+  const sides = overlap.sessions.map((id) => {
+    const agent = agentOf(id);
+    return agent === undefined ? "an agent no longer at work" : `${agent.name} (${agent.on})`;
   });
+  const closer = overlap.closer === undefined ? undefined : agentOf(overlap.closer);
+  const lastAgentNote = overlap.notes.findLast((entry) => entry.session !== undefined);
+  const askedAt = overlap.askedAt === undefined ? undefined : Date.parse(overlap.askedAt);
+  const askedLong = askedAt !== undefined && now - askedAt >= ASKED_LONG_MS;
+  const talking =
+    askedAt === undefined &&
+    lastAgentNote !== undefined &&
+    now - Date.parse(lastAgentNote.at) < TALKING_MS;
+  // Nobody is settling it: the agents went quiet, or never wrote.
+  const waiting = askedAt === undefined && !talking;
   const act = async (title: string, action: () => Promise<AtomCommandResult<unknown, unknown>>) => {
     setBusy(true);
     try {
       const result = await action();
       report(title, result);
-      if (result._tag === "Success") setText("");
+      if (result._tag === "Success") {
+        setMessage("");
+        setWriting(false);
+      }
     } finally {
       setBusy(false);
     }
   };
+  const ask = () =>
+    act("Could not ask the agents", () =>
+      settle({
+        environmentId,
+        input: { ...scope, ...(message.trim() === "" ? {} : { message: message.trim() }) },
+      }),
+    );
   return (
     <div className="mx-1 flex flex-col gap-1.5 rounded-md border border-sidebar-border p-2 text-xs">
       <p className="flex items-center gap-1.5 font-medium text-sidebar-foreground">
-        <CircleAlertIcon className="size-3.5 shrink-0 text-warning" />
+        <CircleAlertIcon
+          aria-hidden
+          className={cn("size-3.5 shrink-0", waiting ? "text-warning" : "text-muted-foreground")}
+        />
         <span className="min-w-0 truncate">{overlapTopic(status, overlap)}</span>
       </p>
       <p className="text-muted-foreground">{sides.join(" and ")}</p>
-      {overlap.notes.slice(-4).map((entry) => (
+      {overlap.notes.slice(-3).map((entry) => (
         <p key={entry.id} className="text-muted-foreground">
           <span className="text-sidebar-foreground">
             {entry.session === undefined ? nameOf(entry.email) : `${nameOf(entry.email)}'s agent`}
@@ -317,49 +377,73 @@ function OverlapCard({
           : {entry.text}
         </p>
       ))}
-      <form
-        className="flex gap-1"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (busy || text.trim() === "") return;
-          void act("Could not add the note", () =>
-            note({ environmentId, input: { ...scope, text: text.trim() } }),
-          );
-        }}
-      >
+      <p className="text-muted-foreground">
+        {askedAt !== undefined
+          ? `Asked: they agree, then ${closer?.name ?? "one of them"} closes it.`
+          : talking
+            ? "The agents are talking it through."
+            : `Resolve: the agents agree between them${closer === undefined ? "" : ` and ${closer.name} closes it`}.`}
+      </p>
+      {writing ? (
         <Input
-          className="min-w-0 flex-1"
+          className="min-w-0"
           size="sm"
           nativeInput
-          placeholder="A note both agents hear"
-          aria-label="Note on the overlap"
-          value={text}
+          autoFocus
+          placeholder="Message for both agents (optional)"
+          aria-label="Message for both agents"
+          value={message}
           readOnly={busy}
-          onChange={(event) => setText(event.currentTarget.value)}
+          onChange={(event) => setMessage(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !busy) void ask();
+          }}
         />
-        <Button type="submit" size="xs" disabled={busy || text.trim() === ""}>
-          Send
-        </Button>
+      ) : null}
+      <div className="flex flex-wrap items-center gap-1">
+        <span className="relative inline-flex">
+          {waiting ? (
+            // A few stepped pulses when it starts waiting for a decision, then it holds still.
+            <span
+              key={overlap.updatedAt}
+              aria-hidden
+              className="pointer-events-none absolute inset-0 animate-attention-ping rounded-md bg-warning/50 motion-reduce:animate-none"
+            />
+          ) : null}
+          <Button
+            size="xs"
+            disabled={busy || (askedAt !== undefined && !askedLong)}
+            onClick={() => void ask()}
+          >
+            {askedAt === undefined ? "Resolve" : askedLong ? "Ask again" : "Resolving…"}
+          </Button>
+        </span>
         <Button
-          type="button"
           size="xs"
           variant="ghost"
           disabled={busy}
-          onClick={() =>
-            void act("Could not resolve the overlap", () =>
-              resolve({
-                environmentId,
-                input: {
-                  ...scope,
-                  resolution: text.trim() === "" ? "Settled by a person" : text.trim(),
-                },
-              }),
-            )
-          }
+          onClick={() => setWriting((open) => !open)}
         >
-          Resolve
+          {writing ? "No message" : "Add a message"}
         </Button>
-      </form>
+        {askedLong ? (
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={busy}
+            onClick={() =>
+              void act("Could not close the overlap", () =>
+                resolve({
+                  environmentId,
+                  input: { ...scope, resolution: "Closed by a person in Peer" },
+                }),
+              )
+            }
+          >
+            Close it yourself
+          </Button>
+        ) : null}
+      </div>
     </div>
   );
 }

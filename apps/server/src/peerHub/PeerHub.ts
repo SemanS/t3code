@@ -63,6 +63,7 @@ import {
   type PeerHubOverlapNoteInput,
   type PeerHubProjectInput,
   type PeerHubResolveOverlapInput,
+  type PeerHubSettleOverlapInput,
   type PeerHubSetCoordinationInput,
   type PeerHubProjectUsage,
   type PeerHubPromptAgentInput,
@@ -391,6 +392,10 @@ export class PeerHub extends Context.Service<
     ) => Effect.Effect<PeerHubStatus, PeerHubError>;
     readonly resolveOverlap: (
       input: PeerHubResolveOverlapInput,
+    ) => Effect.Effect<PeerHubStatus, PeerHubError>;
+    /** A person asks the agents on an overlap to settle it between them and close it. */
+    readonly settleOverlap: (
+      input: PeerHubSettleOverlapInput,
     ) => Effect.Effect<PeerHubStatus, PeerHubError>;
     readonly setSharedCapacity: (
       input: PeerHubSharedCapacityInput,
@@ -1003,6 +1008,8 @@ const make = Effect.gen(function* () {
           at: note.at,
         })),
         updatedAt: overlap.updatedAt,
+        ...(overlap.closer === undefined ? {} : { closer: overlap.closer }),
+        ...(overlap.askedAt === undefined ? {} : { askedAt: overlap.askedAt }),
       })),
     };
   };
@@ -2374,6 +2381,21 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const settleOverlap: PeerHub["Service"]["settleOverlap"] = Effect.fn("PeerHub.settleOverlap")(
+    function* (input) {
+      const running = broker;
+      if (running === null) {
+        return yield* hubError("Turn agent coordination on to have the agents settle it.");
+      }
+      yield* Effect.tryPromise({
+        try: () =>
+          running.personSettle(input.workspace, input.project, input.overlap, input.message),
+        catch: (failure) => hubError(failure instanceof Error ? failure.message : String(failure)),
+      });
+      return yield* publish;
+    },
+  );
+
   const enableSharedCapacity = (workspace: PersistedWorkspace, project: PeerProject) =>
     Effect.gen(function* () {
       const { hubUrl, session } = yield* requireSession;
@@ -3399,6 +3421,7 @@ const make = Effect.gen(function* () {
     setCoordination,
     noteOverlap,
     resolveOverlap,
+    settleOverlap,
     setSharedCapacity,
     projectUsage,
     createTask,

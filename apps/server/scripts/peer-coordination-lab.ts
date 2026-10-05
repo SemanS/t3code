@@ -21,6 +21,8 @@
 //  11. Codex agents take part as Claude Code's do.
 //  12. Two related tasks: an agent hears of the other task's work and context, reads it as a file
 //      or with `peer context`, and asks its agents with `peer ask` before any file is shared.
+//  13. Resolve in Peer asks the agents to settle an overlap, and the agent named to close it does;
+//      an overlap both agents wrote on that went quiet is closed the same way, unasked.
 //
 // It prints what each agent was told and leaves both computers' coordination logs.
 //
@@ -69,6 +71,8 @@ const lab = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "peer-lab-"));
 const REAL = process.env.REAL_AGENTS === "1";
 /** REAL_SCENARIO=tasks: two related tasks on two computers instead of one task (A–D). */
 const TASKS = REAL && process.env.REAL_SCENARIO === "tasks";
+/** REAL_SCENARIO=settle: an overlap left open under `notify`, settled by pressing Resolve. */
+const SETTLE = REAL && process.env.REAL_SCENARIO === "settle";
 /** With real agents, a keeper idle this long gives way (production waits ten minutes). */
 const REAL_IDLE_SECS = 45;
 const bin = NodePath.join(repoRoot, "apps/server/dist/bin.mjs");
@@ -272,12 +276,15 @@ const startComputer = (name: string, email: string, herdrSocket?: string) =>
       ...(REAL
         ? {
             PEER_KEEPER_IDLE_MS: String(REAL_IDLE_SECS * 1000),
+            PEER_SETTLE_QUIET_MS: "60000",
             // kontext's llm adapter runs on the person's own Claude Code, as it would in Peer.
             PEER_KONTEXT_CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR ?? "",
           }
         : {
             // Kept knowledge is written without a model: nothing here spends a subscription.
             PEER_KNOWLEDGE_LLM: "off",
+            // An overlap both agents wrote on is the closing agent's to close after 4 s, not 2 min.
+            PEER_SETTLE_QUIET_MS: "4000",
             // Peer adds its hooks to this computer's own Codex, never this machine's, and hands
             // nothing to Codex threads: the lab's Codex sessions are made up.
             CODEX_HOME: NodePath.join(home, "codex"),
@@ -1278,6 +1285,103 @@ const program = Effect.gen(function* () {
   namer.hook("SessionEnd", { reason: "exit" });
   exporter.hook("SessionEnd", { reason: "exit" });
 
+  // 13. People do not write agreements: Resolve in Peer asks the agents to settle it, both hear
+  //     it, and the agent named to close it closes it. An overlap both agents wrote on that went
+  //     quiet is closed the same way, without anyone asking.
+  yield* bob.client[WS_METHODS.peerHubSetCoordination]({ policy: "coordinate" });
+  const settlerA = agent(ana, "lab-ana-settle", "w3:p1");
+  const settlerB = agent(bob, "lab-bob-settle", "w3:p2");
+  settlerA.start();
+  settlerB.start();
+  settlerA.edit("PreToolUse", "src/receipt.ts");
+  settlerA.edit("PostToolUse", "src/receipt.ts");
+  yield* Effect.promise(() => sleep(2000));
+  check(
+    decision(settlerB.edit("PreToolUse", "src/receipt.ts")) === "deny",
+    "a second agent on the same file is stopped",
+  );
+  told(
+    `${settlerB.name} (peer note)`,
+    settlerB.peer("note", "I add the discount line to receiptLine(); formatPrice stays as it is."),
+  );
+  // Ana's agent reads Bob's note at its next step, then idles.
+  yield* Effect.promise(() => sleep(2000));
+  settlerA.hook("UserPromptSubmit", { prompt: "go on" });
+  const settleWake = settlerA.idle();
+  yield* Effect.promise(() => sleep(1500));
+  const pairView = yield* Effect.promise(() =>
+    hubCall("/v1/workspaces/acme/coord", { session: hubSession }),
+  );
+  const pair = (
+    pairView.overlaps as ReadonlyArray<{ id: string; sessions: ReadonlyArray<string> }>
+  ).find(
+    (o) =>
+      o.sessions.includes("claude:lab-ana-settle") && o.sessions.includes("claude:lab-bob-settle"),
+  );
+  check(pair !== undefined, "the hub opened their overlap");
+  const settleAsked = yield* ana.client[WS_METHODS.peerHubSettleOverlap]({
+    workspace: "acme",
+    project: "lab",
+    overlap: pair.id,
+    message: "Bob's line goes in first.",
+  });
+  const shown = settleAsked.coordination.overlaps.find((o) => o.id === pair.id);
+  check(
+    shown?.askedAt !== undefined && shown.closer === "claude:lab-ana-settle",
+    "Peer shows it asked the agents, and which agent closes it",
+  );
+  const request = yield* Effect.promise(() =>
+    Promise.race([settleWake, sleep(15_000).then(() => "(timed out)")]),
+  );
+  told(`${settlerA.name} (woken by Resolve)`, request);
+  check(
+    request?.includes("Settle this between you now") === true &&
+      request.includes("Ana's agent on KRK-7 · Speaker names closes it") &&
+      request.includes("Bob's line goes in first."),
+    "Resolve wakes the agent that closes it, with what its person added",
+  );
+  told(
+    `${settlerA.name} (peer resolve)`,
+    settlerA.peer("resolve", "Bob adds the discount line first; formatPrice stays."),
+  );
+  yield* Effect.promise(() => sleep(3500));
+  const afterResolve = context(settlerB.hook("UserPromptSubmit", { prompt: "go on" }));
+  told(`${settlerB.name} (next step)`, afterResolve);
+  check(
+    afterResolve?.includes("Resolved: Bob adds the discount line first") === true,
+    "the other agent hears what was agreed",
+  );
+  // Another shared file opens it again; both write, then go quiet: the closing agent is told.
+  settlerA.edit("PreToolUse", "src/format.ts");
+  settlerA.edit("PostToolUse", "src/format.ts");
+  yield* Effect.promise(() => sleep(2000));
+  settlerB.edit("PreToolUse", "src/format.ts");
+  settlerB.peer("note", "I only add a formatSaved() helper to src/format.ts.");
+  yield* Effect.promise(() => sleep(1500));
+  settlerA.hook("UserPromptSubmit", { prompt: "go on" });
+  told(
+    `${settlerA.name} (peer note)`,
+    settlerA.peer("note", "Fine, I do not touch format.ts again."),
+  );
+  const quietWake = settlerA.idle();
+  const nudged = yield* Effect.promise(() =>
+    Promise.race([quietWake, sleep(20_000).then(() => "(timed out)")]),
+  );
+  told(`${settlerA.name} (woken once it went quiet)`, nudged);
+  check(
+    nudged?.includes("has been quiet for") === true && nudged.includes("close it now"),
+    "an overlap both agents wrote on that went quiet wakes the agent that closes it",
+  );
+  settlerA.peer("resolve", "Bob adds formatSaved(); Ana leaves format.ts alone.");
+  yield* Effect.promise(() => sleep(3500));
+  const closed = yield* bob.client[WS_METHODS.peerHubSync]({});
+  check(
+    closed.coordination.overlaps.find((o) => o.id === pair.id)?.state === "resolved",
+    "and it is closed for everyone, with nobody writing the agreement but the agents",
+  );
+  settlerA.hook("SessionEnd", { reason: "exit" });
+  settlerB.hook("SessionEnd", { reason: "exit" });
+
   for (const computer of [ana, bob]) {
     const lines = NodeFS.readFileSync(computer.log, "utf8").trim().split("\n");
     const events = lines.map((line) => (JSON.parse(line) as { event: string }).event);
@@ -1728,6 +1832,41 @@ const realProgram = Effect.gen(function* () {
       "a finding reached another agent",
     );
 
+    // A2. What the agents left open: closed by the agents themselves once they went quiet, or,
+    // once Ana presses Resolve in Peer, by the agent Peer names to close it.
+    const openNow = async () =>
+      (
+        (await hubCall("/v1/workspaces/acme/coord", { session: hubSession }))
+          .overlaps as ReadonlyArray<{
+          id: string;
+          state: string;
+          notes: ReadonlyArray<{ text: string }>;
+        }>
+      ).filter((o) => o.state === "open");
+    const leftOpen = yield* Effect.promise(openNow);
+    say("overlaps", `${leftOpen.length} still open after A`);
+    observe(
+      [...events(ana), ...events(bob)].some((e) => e.event === "settle.nudged"),
+      "an agent was told to close a quiet overlap on its own",
+    );
+    for (const overlap of leftOpen) {
+      yield* ana.client[WS_METHODS.peerHubSettleOverlap]({
+        workspace: "acme",
+        project: "lab",
+        overlap: overlap.id,
+      });
+      say("Resolve pressed", `overlap ${overlap.id.slice(0, 6)}`);
+    }
+    if (leftOpen.length > 0) {
+      let still = leftOpen.length;
+      for (let waited = 0; waited < 4 * 60_000 && still > 0; waited += 5000) {
+        yield* Effect.promise(() => sleep(5000));
+        approve();
+        still = (yield* Effect.promise(openNow)).length;
+      }
+      check(still === 0, "after Resolve, the agents closed what was open");
+    }
+
     // B. The keeper idles, the other agent works: it takes the context over. The other agent is
     // prompted once the hub has seen the keeper idle past the threshold: its turn may be short.
     for (let waited = 0; waited < 3 * 60_000; waited += 3000) {
@@ -2027,9 +2166,146 @@ const realTasksProgram = Effect.gen(function* () {
   }
 }).pipe(Effect.scoped);
 
+/**
+ * REAL_SCENARIO=settle: two agents on KRK-1 under the notify policy, which tells them of the
+ * overlap but does not make them talk. Ana's agent leaves as soon as it opens, so nobody answers
+ * Bob's. Ana then presses Resolve in Peer: the agent still at work is asked to settle it and
+ * closes it with what it will do. Nobody writes the agreement but the agent.
+ */
+const realSettleProgram = Effect.gen(function* () {
+  yield* Effect.promise(() =>
+    waitFor("the hub", async () => (await fetch(`${hubUrl}/health`)).ok, hub.output),
+  );
+  yield* Effect.promise(setUpWorkspace);
+  const anaHerdr = startHerdr("Ana");
+  const bobHerdr = startHerdr("Bob");
+  const ana = yield* startComputer("Ana", "ana@acme.test", anaHerdr.socket);
+  const bob = yield* startComputer("Bob", "bob@acme.test", bobHerdr.socket);
+  for (const computer of [ana, bob]) {
+    git(computer.checkout, "checkout", "--quiet", "-b", "krk-1-pricing");
+    yield* computer.client[WS_METHODS.peerHubSetCoordination]({ policy: "notify" });
+  }
+  const [anaKind, bobKind] = (process.env.REAL_KINDS ?? "claude,claude").split(",");
+  const start = (kind: string | undefined, h: HerdrServer, computer: Computer, name: string) =>
+    kind === "codex" ? startCodex(h, computer, name) : startClaude(h, computer, name);
+  const anaPane = yield* Effect.promise(() => start(anaKind, anaHerdr, ana, "ana"));
+  const bobPane = yield* Effect.promise(() => start(bobKind, bobHerdr, bob, "bob"));
+  const agents = [
+    { computer: ana, h: anaHerdr, pane: anaPane },
+    { computer: bob, h: bobHerdr, pane: bobPane },
+  ];
+  const approve = () => {
+    for (const { computer, h, pane } of agents) {
+      if (statusOf(h, pane) !== "blocked") continue;
+      const screen = herdrText(h, "pane", "read", pane, "--source", "visible");
+      if (/Do you want to proceed\?|❯\s*1\. Yes/.test(screen)) {
+        herdrText(h, "pane", "send-keys", pane, "enter");
+        say("approved", `${computer.name}'s agent's permission prompt`);
+      }
+    }
+  };
+  const untilQuiet = async (limitMs: number) => {
+    let quiet = 0;
+    for (let elapsed = 0; elapsed < limitMs && quiet < 30_000; elapsed += 5000) {
+      await sleep(5000);
+      approve();
+      const statuses = agents.map(({ h, pane }) => statusOf(h, pane));
+      quiet = statuses.every((s) => s === "idle" || s === "done") ? quiet + 5000 : 0;
+      say("agents", `Ana's ${statuses[0]}, Bob's ${statuses[1]}`);
+    }
+  };
+  const overlapsNow = async () =>
+    (await hubCall("/v1/workspaces/acme/coord", { session: hubSession }))
+      .overlaps as ReadonlyArray<{
+      id: string;
+      state: string;
+      files: ReadonlyArray<string>;
+      notes: ReadonlyArray<{ session?: string; email: string; text: string }>;
+      resolution?: string;
+    }>;
+  try {
+    const anaTask =
+      "In src/pricing.ts give price() a VAT rate: price(items, vatRate = 0.2) returns the total with VAT added. Keep the change small; do not run tests or builds.";
+    herdrJson(anaHerdr, "agent", "prompt", anaPane, anaTask);
+    say("Ana's agent prompted", anaTask);
+    for (let waited = 0; waited < 120_000; waited += 2000) {
+      yield* Effect.promise(() => sleep(2000));
+      approve();
+      if (events(ana).some((e) => e.event === "hook" && e.hookEvent === "PostToolUse")) break;
+    }
+    const bobTask =
+      "In src/pricing.ts round the result of price() to whole cents with Math.round. Keep the change small; do not run tests or builds.";
+    herdrJson(bobHerdr, "agent", "prompt", bobPane, bobTask);
+    say("Bob's agent prompted", bobTask);
+    // Ana's agent leaves as soon as the overlap opens: nobody is there to answer Bob's agent,
+    // which is when a person's Resolve matters.
+    for (let waited = 0; waited < 4 * 60_000; waited += 1000) {
+      yield* Effect.promise(() => sleep(1000));
+      approve();
+      if ((yield* Effect.promise(overlapsNow)).length > 0) break;
+    }
+    herdrJson(anaHerdr, "agent", "prompt", anaPane, "/exit");
+    say("Ana's agent exits", "the overlap is open");
+    yield* Effect.promise(() => untilQuiet(8 * 60_000));
+    const open = (yield* Effect.promise(overlapsNow)).filter((o) => o.state === "open");
+    say("overlaps", `${open.length} open once the agents went quiet`);
+    if (open.length === 0) {
+      observe(false, "an overlap was left open for Resolve (the agents closed it themselves)");
+    }
+    for (const overlap of open) {
+      const asked = yield* ana.client[WS_METHODS.peerHubSettleOverlap]({
+        workspace: "acme",
+        project: "lab",
+        overlap: overlap.id,
+      });
+      const shown = asked.coordination.overlaps.find((o) => o.id === overlap.id);
+      say("Resolve pressed", `overlap ${overlap.id.slice(0, 6)}, closer ${shown?.closer ?? "?"}`);
+    }
+    if (open.length > 0) {
+      let still = open.length;
+      for (let waited = 0; waited < 5 * 60_000 && still > 0; waited += 5000) {
+        yield* Effect.promise(() => sleep(5000));
+        approve();
+        still = (yield* Effect.promise(overlapsNow)).filter((o) => o.state === "open").length;
+      }
+      const after = yield* Effect.promise(overlapsNow);
+      for (const overlap of after) {
+        told(
+          `overlap ${overlap.id.slice(0, 6)} on ${overlap.files.join(", ")} (${overlap.state})`,
+          overlap.notes.map((n) => `${n.session ?? "person"}: ${n.text}`).join("\n"),
+        );
+      }
+      check(still === 0, "after Resolve, the agents settled it and closed it themselves");
+    }
+  } finally {
+    for (const { computer, h, pane } of agents) {
+      console.log(`\n===== ${computer.name}'s agent, last screen =====`);
+      console.log(
+        herdrText(h, "pane", "read", pane, "--source", "recent-unwrapped", "--lines", "120"),
+      );
+      console.log(`===== ${computer.name}'s coordination log =====`);
+      for (const entry of events(computer)) {
+        if (
+          /^(settle|note|resolve)\.|^(decision|news|wake|overlap\.opened|cli)$/.test(entry.event)
+        ) {
+          console.log(JSON.stringify(entry).slice(0, 900));
+        }
+      }
+    }
+    herdrText(anaHerdr, "server", "stop");
+    herdrText(bobHerdr, "server", "stop");
+  }
+}).pipe(Effect.scoped);
+
 try {
   await Effect.runPromise(
-    TASKS ? realTasksProgram : process.env.REAL_AGENTS === "1" ? realProgram : program,
+    TASKS
+      ? realTasksProgram
+      : SETTLE
+        ? realSettleProgram
+        : process.env.REAL_AGENTS === "1"
+          ? realProgram
+          : program,
   );
   say("PASS");
   process.exitCode = 0;

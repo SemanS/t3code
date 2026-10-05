@@ -293,6 +293,13 @@ export function newsFor(input: {
   readonly memory: SessionMemory;
   readonly nameOf: NameOf;
   readonly taskName?: TaskNamer;
+  /** The agent session that closes an overlap once its agents agree (`closerOf`). */
+  readonly closer?: (overlap: HubOverlap) => string | undefined;
+  /**
+   * What would wake an idle agent: an overlap closed since it last heard is
+   * not, it hears the agreement at its next step.
+   */
+  readonly waking?: boolean;
   readonly cli: string;
 }): { readonly text: string; readonly announced: string[]; readonly seen: string[] } | null {
   const { me, view, memory, nameOf } = input;
@@ -301,6 +308,8 @@ export function newsFor(input: {
   const announced: string[] = [];
   const seen: string[] = [];
   let askedMe = false;
+  // Whether this agent closes every overlap it hears of now, or another agent closes one.
+  let closesAll = true;
   for (const overlap of view.overlaps) {
     if (!overlap.sessions.includes(me.id)) continue;
     const otherId = overlap.sessions.find((id) => id !== me.id);
@@ -310,8 +319,17 @@ export function newsFor(input: {
       (note) => note.session !== me.id && !memory.seenNotes.has(note.id),
     );
     if (!fresh && notes.length === 0) continue;
+    if (
+      input.waking === true &&
+      overlap.state === "resolved" &&
+      notes.every((note) => note.text.startsWith("Resolved:"))
+    ) {
+      continue;
+    }
     if (fresh) announced.push(announcementKey(overlap));
     seen.push(...notes.map((note) => note.id));
+    const closer = input.closer?.(overlap);
+    if (closer !== undefined && closer !== me.id) closesAll = false;
     const who =
       other === undefined
         ? "another agent"
@@ -357,7 +375,11 @@ export function newsFor(input: {
   if (blocks.length === 0) return null;
   // Once notes go back and forth, say how the conversation ends.
   const settle =
-    seen.length > 0 ? ` Once you agree, close it: ${input.cli} resolve "<agreement>".` : "";
+    seen.length === 0
+      ? ""
+      : closesAll
+        ? ` Once you agree, close it: ${input.cli} resolve "<agreement>".`
+        : " Once you agree, the other agent closes it.";
   const reply = askedMe
     ? `Answer them: ${input.cli} note "<your answer>"`
     : `Reply if it concerns your work: ${input.cli} note "<text>"`;
@@ -366,6 +388,81 @@ export function newsFor(input: {
     announced,
     seen,
   };
+}
+
+// ---- settling an overlap: the agents agree and close it themselves ----
+
+/** How a person's request to settle an overlap starts, so every Peer and agent recognizes it. */
+export const SETTLE_REQUEST = "Settle this between you now:";
+
+/**
+ * The agent that closes an overlap once its agents agree, the same on every
+ * computer: for a question about a task, the agent that asked (it knows when
+ * it has its answer); otherwise the first of them still at work.
+ */
+export function closerOf(
+  overlap: Pick<HubOverlap, "sessions" | "files">,
+  atWork: ReadonlyArray<Pick<HubCoordSession, "id" | "task">>,
+): string | undefined {
+  const present = overlap.sessions.filter((id) => atWork.some((s) => s.id === id)).toSorted();
+  const asked = overlap.files.flatMap((path) => {
+    const task = claimedTask(path);
+    return task === undefined ? [] : [task];
+  });
+  if (asked.length > 0 && asked.length === overlap.files.length) {
+    const asker = present.find((id) => {
+      const task = atWork.find((s) => s.id === id)?.task;
+      return task === undefined || !asked.includes(task);
+    });
+    if (asker !== undefined) return asker;
+  }
+  return present[0];
+}
+
+/** A person's request, as a note both agents hear: settle it between you, and who closes it. */
+export function settleRequest(input: {
+  /** The agent that closes it, as people name it ("Ana's agent"). */
+  readonly closer: string | undefined;
+  readonly message?: string | undefined;
+  readonly cli: string;
+}): string {
+  const close =
+    input.closer === undefined
+      ? `then close it: ${input.cli} resolve "<agreement>"`
+      : `then ${input.closer} closes it: ${input.cli} resolve "<agreement>"`;
+  const message = input.message?.trim() ?? "";
+  return `${SETTLE_REQUEST} agree who changes what in a note each, ${close}. If the other agent does not answer, close it with what you will do.${message === "" ? "" : ` ${message}`}`;
+}
+
+/** When a person last asked the agents to settle an overlap, unless an agent wrote since. */
+export function settleAskedAt(
+  notes: ReadonlyArray<{
+    readonly session?: string | undefined;
+    readonly text: string;
+    readonly at: string;
+  }>,
+): string | undefined {
+  const asked = notes.findLastIndex(
+    (note) => note.session === undefined && note.text.startsWith(SETTLE_REQUEST),
+  );
+  if (asked < 0) return undefined;
+  return notes.slice(asked + 1).some((note) => note.session !== undefined)
+    ? undefined
+    : notes[asked]?.at;
+}
+
+/**
+ * What the agent that closes an overlap hears once both agents wrote and the
+ * notes went quiet: close it if you agree, or say what is left.
+ */
+export function settleNudge(input: {
+  readonly overlap: HubOverlap;
+  readonly other: string;
+  readonly minutes: number;
+  readonly taskName: TaskNamer;
+  readonly cli: string;
+}): string {
+  return `Peer: overlap ${shortId(input.overlap.id)} with ${input.other} on ${overlapSubject(input.overlap.files, input.taskName)} has been quiet for ${input.minutes} min since you both wrote. If you agree, close it now: ${input.cli} resolve "<agreement>". If not, write what is still open: ${input.cli} note "<text>".`;
 }
 
 /**

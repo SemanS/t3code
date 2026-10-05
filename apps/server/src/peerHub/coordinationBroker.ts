@@ -24,6 +24,7 @@ import {
   boardText,
   changedPaths,
   claimedTask,
+  closerOf,
   closeOutText,
   contestKey,
   contextTemplate,
@@ -49,6 +50,9 @@ import {
   scopeOf,
   sharedChange,
   sharedTemplate,
+  settleAskedAt,
+  settleNudge,
+  settleRequest,
   shortId,
   startContext,
   statusText,
@@ -277,6 +281,9 @@ interface LocalSession {
   readonly asks: Map<string, number>;
   /** The other works whose shared context it has been told of, as they were written then. */
   readonly boardHeard: Set<string>;
+  /** Overlaps it closes that it was asked to settle once they went quiet: how often, and at which note. */
+  readonly settleNudges: Map<string, number>;
+  readonly settleHeard: Set<string>;
   /** Findings of other agents it has heard. */
   readonly heard: Set<string>;
 }
@@ -343,6 +350,13 @@ const BOARD_START_WAIT_MS = 1200;
 /** A question about a task goes once settled, after this long when no conversation opened, or after `ASK_MAX_MS`. */
 const ASK_SETTLE_MS = 60_000;
 const ASK_MAX_MS = 2 * 60 * 60 * 1000;
+/**
+ * An open overlap both agents wrote on and that went quiet this long is the
+ * closing agent's to close: two minutes, or `PEER_SETTLE_QUIET_MS` (the lab
+ * shortens it). It hears so at most `SETTLE_NUDGES` times per overlap.
+ */
+const SETTLE_QUIET_MS = Number(process.env.PEER_SETTLE_QUIET_MS) || 2 * 60 * 1000;
+const SETTLE_NUDGES = 2;
 
 const clip = (text: string, max: number) => text.replace(/\s+/g, " ").trim().slice(0, max);
 
@@ -462,7 +476,15 @@ export class CoordinationBroker {
     readonly sessions: ReadonlyArray<
       HubCoordSession & { readonly workspace: string; readonly local: boolean }
     >;
-    readonly overlaps: ReadonlyArray<HubOverlap & { readonly workspace: string }>;
+    readonly overlaps: ReadonlyArray<
+      HubOverlap & {
+        readonly workspace: string;
+        /** The agent session that closes it once its agents agree. */
+        readonly closer: string | undefined;
+        /** When a person asked its agents to settle it, unless an agent wrote since. */
+        readonly askedAt: string | undefined;
+      }
+    >;
     readonly findings: ReadonlyArray<HubFinding & { readonly workspace: string }>;
     readonly contexts: ReadonlyArray<HubContext & { readonly workspace: string }>;
     readonly candidates: ReadonlyArray<{
@@ -477,10 +499,18 @@ export class CoordinationBroker {
     const contexts = [];
     const candidates = [];
     for (const [workspace, view] of this.views) {
-      for (const session of this.merged(workspace, view).sessions) {
+      const merged = this.merged(workspace, view);
+      for (const session of merged.sessions) {
         sessions.push({ ...session, workspace, local: this.sessions.has(session.id) });
       }
-      for (const overlap of view.overlaps) overlaps.push({ ...overlap, workspace });
+      for (const overlap of view.overlaps) {
+        overlaps.push({
+          ...overlap,
+          workspace,
+          closer: closerOf(overlap, merged.sessions),
+          askedAt: settleAskedAt(overlap.notes),
+        });
+      }
       for (const finding of view.findings ?? []) findings.push({ ...finding, workspace });
       for (const context of view.contexts ?? []) contexts.push({ ...context, workspace });
       for (const waiting of view.candidates ?? []) candidates.push({ ...waiting, workspace });
@@ -499,6 +529,40 @@ export class CoordinationBroker {
     const updated = await this.deps.resolve(workspace, project, overlap, resolution, undefined);
     this.log("resolve.person", { workspace, project, overlap, resolution });
     this.applyOverlap(workspace, updated);
+  }
+
+  /**
+   * A person asks the agents on an overlap to settle it between them: both
+   * hear it as a note (an idle one wakes up), with the one that closes it named
+   * and what the person adds.
+   */
+  async personSettle(
+    workspace: string,
+    project: string,
+    overlapId: string,
+    message: string | undefined,
+  ) {
+    await this.syncNow(workspace, 3000);
+    const view = this.merged(workspace, this.views.get(workspace));
+    const overlap = view.overlaps.find((o) => o.id === overlapId);
+    const closerId = overlap === undefined ? undefined : closerOf(overlap, view.sessions);
+    const closer = view.sessions.find((s) => s.id === closerId);
+    const text = settleRequest({
+      closer: closer === undefined ? undefined : this.agentName(workspace, closer),
+      message: message === undefined ? undefined : clip(message, 300),
+      cli: this.cli,
+    });
+    const updated = await this.deps.note(workspace, project, overlapId, text, undefined);
+    this.log("settle.person", { workspace, project, overlap: overlapId, closer: closerId, text });
+    this.applyOverlap(workspace, updated);
+  }
+
+  /** An agent as people tell it apart: whose, and on which task. */
+  private agentName(workspace: string, session: HubCoordSession): string {
+    const name = `${this.deps.nameOf(workspace, session.email)}'s agent`;
+    return session.task === undefined
+      ? name
+      : `${name} on ${this.deps.taskName(workspace, session.project, session.task)}`;
   }
 
   // ---- log ----
@@ -639,6 +703,8 @@ export class CoordinationBroker {
       asks: new Map(),
       // What the project already had is no news to it; its start tells it, or Peer restarted.
       boardHeard: new Set(this.writtenScopes(place.workspace, place.project)),
+      settleNudges: new Map(),
+      settleHeard: new Set(),
       heard: new Set(),
     };
     // A session Peer meets again (Peer restarted, or the session outlived its TTL) keeps what
@@ -1074,13 +1140,19 @@ export class CoordinationBroker {
    * `team` is false) what Peer has to tell it, what changed in its work's
    * shared context and what other agents found that concerns it.
    */
-  private news(session: LocalSession, options: { readonly team?: boolean } = {}): string | null {
+  private news(
+    session: LocalSession,
+    options: { readonly team?: boolean; readonly waking?: boolean } = {},
+  ): string | null {
+    const view = this.merged(session.workspace, this.views.get(session.workspace));
     const news = newsFor({
       me: this.asHub(session),
-      view: this.merged(session.workspace, this.views.get(session.workspace)),
+      view,
       memory: session.memory,
       nameOf: this.nameOf(session.workspace),
       taskName: this.taskNamer(session.workspace, session.project),
+      closer: (overlap) => closerOf(overlap, view.sessions),
+      ...(options.waking === true ? { waking: true } : {}),
       cli: this.cli,
     });
     if (news !== null) {
@@ -1093,7 +1165,8 @@ export class CoordinationBroker {
         seen: news.seen,
       });
     }
-    const parts = [news?.text ?? null];
+    // An overlap gone quiet that this agent closes is overlap news too: it may wake the agent.
+    const parts = [news?.text ?? null, this.settleNews(session)];
     // Findings and shared contexts wait for the agent's next step; they never wake it.
     if (options.team !== false) {
       parts.push(
@@ -1107,6 +1180,55 @@ export class CoordinationBroker {
     }
     const said = parts.filter((part) => part !== null);
     return said.length === 0 ? null : said.join("\n\n");
+  }
+
+  /**
+   * The open overlaps this session closes that went quiet after both agents
+   * wrote: it hears, at most twice per overlap, to close it or say what is left.
+   */
+  private settleNews(session: LocalSession): string | null {
+    const view = this.merged(session.workspace, this.views.get(session.workspace));
+    const now = Date.now();
+    const said: string[] = [];
+    for (const overlap of view.overlaps) {
+      if (overlap.state !== "open" || !overlap.sessions.includes(session.id)) continue;
+      if (closerOf(overlap, view.sessions) !== session.id) continue;
+      const wrote = overlap.notes.some((note) => note.session === session.id);
+      const answered = overlap.notes.some(
+        (note) => note.session !== undefined && note.session !== session.id,
+      );
+      const last = overlap.notes.at(-1);
+      if (!wrote || !answered || last === undefined) continue;
+      const quiet = now - Date.parse(last.at);
+      if (!(quiet >= SETTLE_QUIET_MS)) continue;
+      const key = `${overlap.id}:${overlap.notes.length}`;
+      const times = session.settleNudges.get(overlap.id) ?? 0;
+      if (session.settleHeard.has(key) || times >= SETTLE_NUDGES) continue;
+      session.settleHeard.add(key);
+      session.settleNudges.set(overlap.id, times + 1);
+      const otherId = overlap.sessions.find((id) => id !== session.id);
+      const other = view.sessions.find((s) => s.id === otherId);
+      said.push(
+        settleNudge({
+          overlap,
+          other:
+            other === undefined
+              ? "an agent no longer at work"
+              : describe(
+                  other,
+                  this.nameOf(session.workspace),
+                  this.taskNamer(session.workspace, session.project),
+                ),
+          minutes: Math.max(1, Math.round(quiet / 60_000)),
+          taskName: this.taskNamer(session.workspace, session.project),
+          cli: this.cli,
+        }),
+      );
+    }
+    if (said.length === 0) return null;
+    const text = said.join("\n\n");
+    this.log("settle.nudged", { session: session.id, text });
+    return text;
   }
 
   /** What other agents found: for a keeper, what its work found; for anyone, what names its files. */
@@ -2175,7 +2297,7 @@ export class CoordinationBroker {
     );
     if (session === null) return "";
     // Findings wait for the agent's next step; only a note on an overlap wakes it.
-    const ready = this.news(session, { team: false });
+    const ready = this.news(session, { team: false, waking: true });
     if (ready !== null) {
       this.log("wake", { session: session.id, text: ready, immediate: true });
       return ready;
@@ -2209,7 +2331,7 @@ export class CoordinationBroker {
         continue;
       }
       // Findings wait for the agent's next step; only a note on an overlap wakes it.
-      const text = this.news(session, { team: false });
+      const text = this.news(session, { team: false, waking: true });
       if (text !== null) {
         this.waiters.delete(waiter);
         this.log("wake", { session: session.id, text });
@@ -2306,7 +2428,8 @@ export class CoordinationBroker {
           this.acknowledge(session, overlap);
         }
         this.log("note.agent", { session: session.id, overlaps: targets.map((o) => o.id), text });
-        return `Noted on overlap ${targets.map((o) => shortId(o.id)).join(", ")}; the other agent hears it at its next step, or wakes up if idle.`;
+        const closes = targets.every((o) => closerOf(o, view().sessions) === session.id);
+        return `Noted on overlap ${targets.map((o) => shortId(o.id)).join(", ")}; the other agent hears it at its next step, or wakes up if idle. ${closes ? `Once you agree, close it: ${this.cli} resolve "<agreement>".` : "Once you agree, the other agent closes it."}`;
       }
       case "resolve": {
         if (text === "")
@@ -2595,7 +2718,7 @@ export class CoordinationBroker {
     for (const session of this.sessions.values()) {
       if (session.agent !== "codex" || session.status !== "idle") continue;
       if (this.queueing.has(session.id)) continue;
-      const text = this.news(session, { team: false });
+      const text = this.news(session, { team: false, waking: true });
       if (text === null) continue;
       this.queueing.add(session.id);
       this.log("wake", { session: session.id, text, via: "codex queue" });

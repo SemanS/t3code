@@ -2148,6 +2148,10 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.peerHubResolveOverlap, peerHub.resolveOverlap(input), {
             "rpc.aggregate": "peerHub",
           }),
+        [WS_METHODS.peerHubSettleOverlap]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubSettleOverlap, peerHub.settleOverlap(input), {
+            "rpc.aggregate": "peerHub",
+          }),
         [WS_METHODS.peerHubSetSharedCapacity]: (input) =>
           observeRpcEffect(WS_METHODS.peerHubSetSharedCapacity, peerHub.setSharedCapacity(input), {
             "rpc.aggregate": "peerHub",

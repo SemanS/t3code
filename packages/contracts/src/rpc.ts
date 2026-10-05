@@ -324,6 +324,7 @@ import {
   PeerHubFocusAgentInput,
   PeerHubOverlapNoteInput,
   PeerHubResolveOverlapInput,
+  PeerHubSettleOverlapInput,
   PeerHubSetCoordinationInput,
   PeerHubShareProjectInput,
   PeerHubTaskInput,
@@ -546,6 +547,7 @@ export const WS_METHODS = {
   peerHubSetCoordination: "peerHub.setCoordination",
   peerHubNoteOverlap: "peerHub.noteOverlap",
   peerHubResolveOverlap: "peerHub.resolveOverlap",
+  peerHubSettleOverlap: "peerHub.settleOverlap",
   peerHubSetSharedCapacity: "peerHub.setSharedCapacity",
   peerHubProjectUsage: "peerHub.projectUsage",
 
@@ -1811,6 +1813,12 @@ const WsPeerHubResolveOverlapRpc = Rpc.make(WS_METHODS.peerHubResolveOverlap, {
   error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
 });
 
+const WsPeerHubSettleOverlapRpc = Rpc.make(WS_METHODS.peerHubSettleOverlap, {
+  payload: PeerHubSettleOverlapInput,
+  success: PeerHubStatus,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
 const WsPeerHubSetSharedCapacityRpc = Rpc.make(WS_METHODS.peerHubSetSharedCapacity, {
   payload: PeerHubSharedCapacityInput,
   success: PeerHubStatus,
@@ -2106,6 +2114,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsPeerHubSetCoordinationRpc,
   WsPeerHubNoteOverlapRpc,
   WsPeerHubResolveOverlapRpc,
+  WsPeerHubSettleOverlapRpc,
   WsPeerHubSetSharedCapacityRpc,
   WsPeerHubProjectUsageRpc,
   WsScheduledTasksListRpc,

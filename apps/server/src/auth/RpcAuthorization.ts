@@ -121,6 +121,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.peerHubSetCoordination]: AuthAccessWriteScope,
   [WS_METHODS.peerHubNoteOverlap]: AuthOrchestrationOperateScope,
   [WS_METHODS.peerHubResolveOverlap]: AuthOrchestrationOperateScope,
+  [WS_METHODS.peerHubSettleOverlap]: AuthOrchestrationOperateScope,
   [WS_METHODS.peerHubStartSignIn]: AuthAccessWriteScope,
   [WS_METHODS.peerHubFinishSignIn]: AuthAccessWriteScope,
   [WS_METHODS.peerHubSignOut]: AuthAccessWriteScope,

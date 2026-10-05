@@ -1239,6 +1239,10 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:peer-hub:resolve-overlap",
       tag: WS_METHODS.peerHubResolveOverlap,
     }),
+    peerHubSettleOverlap: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:settle-overlap",
+      tag: WS_METHODS.peerHubSettleOverlap,
+    }),
     peerHubSetSharedCapacity: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:peer-hub:shared-capacity",
       tag: WS_METHODS.peerHubSetSharedCapacity,
