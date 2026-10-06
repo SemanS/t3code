@@ -2,6 +2,7 @@ import { assert, describe, it } from "@effect/vitest";
 
 import {
   agentNamed,
+  answerForVerdict,
   asReference,
   boardLine,
   boardNews,
@@ -30,6 +31,7 @@ import {
   compactionNudge,
   contextSkill,
   findingsOnWork,
+  findingsForKeeper,
   generatedFile,
   keeperSkill,
   sharedChange,
@@ -37,6 +39,7 @@ import {
   contextTemplate,
   contextWritten,
   decideEdit,
+  editHookAnswer,
   editedFile,
   editedFiles,
   emptyMemory,
@@ -45,6 +48,7 @@ import {
   mentionsCli,
   newsFor,
   patchPaths,
+  policyWithoutHub,
   projectLines,
   repositoryPath,
   rosterChange,
@@ -53,12 +57,14 @@ import {
   taskNamed,
   teamLines,
   teamNews,
+  unverifiedAnswer,
   withPeerHooks,
   withContextAccess,
   withoutOutputTrim,
   type CoordinationView,
+  type EditAnswer,
 } from "./coordination.ts";
-import type { HubCoordSession, HubFinding, HubOverlap } from "./hubApi.ts";
+import type { HubCoordSession, HubFinding, HubIntentVerdict, HubOverlap } from "./hubApi.ts";
 
 const CLI = "/Users/ana/.peer/userdata/coord/peer";
 const nameOf = (email: string) => (email.startsWith("vir") ? "Vir" : "Slavo");
@@ -257,8 +263,244 @@ describe("decideEdit", () => {
       cli: CLI,
     });
     assert.strictEqual(answer.decision, "deny");
+    assert.include(answer.reason, "is also about to change src/payments/split.ts");
     assert.include(answer.reason, "They said they are: splitting payments.");
     assert.deepStrictEqual(answer.keys, ["with:claude:vir#src/payments/split.ts"]);
+  });
+});
+
+describe("the hub's verdict on an edit", () => {
+  const verdict = (
+    kind: HubIntentVerdict["verdict"],
+    extra: Partial<HubIntentVerdict> = {},
+  ): HubIntentVerdict => ({
+    path: "src/pay.ts",
+    verdict: kind,
+    with: ["claude:vir"],
+    overlaps: ["abc123def456"],
+    ...extra,
+  });
+  const answerFor = (
+    given: HubIntentVerdict,
+    extra: Partial<Parameters<typeof answerForVerdict>[0]> = {},
+  ) =>
+    answerForVerdict({
+      me,
+      sessions: [me, vir],
+      // The hub's records come with its answer: the view here has not heard of them.
+      overlaps: [overlap()],
+      memory: emptyMemory(),
+      nameOf,
+      cli: CLI,
+      verdict: given,
+      ...extra,
+    });
+
+  it("says nothing about a file the hub cleared", () => {
+    const answer = answerFor(verdict("clear", { with: [], overlaps: [] }));
+    assert.isUndefined(answer.decision);
+    assert.isUndefined(answer.context);
+    assert.deepStrictEqual(answer.keys, []);
+  });
+
+  it("words a denial from the sessions and overlaps the hub named, as decideEdit does from the view", () => {
+    const answer = answerFor(verdict("deny"));
+    const local = decideEdit({
+      policy: "coordinate",
+      me,
+      file: "src/pay.ts",
+      view: view([overlap()]),
+      memory: emptyMemory(),
+      nameOf,
+      cli: CLI,
+    });
+    assert.strictEqual(answer.decision, "deny");
+    assert.strictEqual(answer.reason, local.reason);
+    assert.deepStrictEqual(answer.keys, ["abc123def456#src/pay.ts"]);
+    assert.deepStrictEqual(answer.overlaps, ["abc123def456"]);
+    assert.deepStrictEqual(answer.with, ["claude:vir"]);
+  });
+
+  it("says a session that only holds the file is about to change it, not that it did", () => {
+    const holder = session("claude:vir", "vir@acme.test", []);
+    const answer = answerFor(verdict("deny"), { sessions: [me, holder] });
+    assert.include(answer.reason, "working on this computer, is also about to change src/pay.ts");
+    assert.notInclude(answer.reason, "also changed");
+  });
+
+  it("describes a session this computer has not heard of yet only as another agent", () => {
+    const answer = answerFor(verdict("deny"), { sessions: [me] });
+    assert.strictEqual(answer.decision, "deny");
+    assert.include(answer.reason, "Another agent on this project is also working on src/pay.ts.");
+    assert.include(answer.reason, "[overlap abc123]");
+    assert.include(answer.reason, `${CLI} note`);
+    assert.deepStrictEqual(answer.with, ["claude:vir"]);
+  });
+
+  it("still stops an edit when the hub says nothing of whom it is contested with", () => {
+    const answer = answerFor(verdict("deny", { with: [], overlaps: [] }), { overlaps: [] });
+    assert.strictEqual(answer.decision, "deny");
+    assert.include(answer.reason, "Another agent on this project is also working on src/pay.ts.");
+    assert.deepStrictEqual(answer.with, []);
+  });
+
+  it("gives a heads-up for notify and a question for ask, each once", () => {
+    const heads = answerFor(verdict("notify"));
+    assert.isUndefined(heads.decision);
+    assert.include(heads.context, "also changed src/pay.ts");
+    assert.include(heads.context, `${CLI} note`);
+    assert.strictEqual(answerFor(verdict("ask")).decision, "ask");
+    // What it told the agent (or its person approved) before is not said again.
+    const told = emptyMemory();
+    for (const key of heads.keys) told.acknowledged.add(key);
+    assert.isUndefined(answerFor(verdict("notify"), { memory: told }).context);
+    assert.isUndefined(answerFor(verdict("ask"), { memory: told }).decision);
+  });
+
+  it("does not let what this computer remembers of having told the agent lift a denial", () => {
+    const told = emptyMemory();
+    told.acknowledged.add("abc123def456#src/pay.ts");
+    told.acknowledged.add("with:claude:vir#src/pay.ts");
+    assert.strictEqual(answerFor(verdict("deny"), { memory: told }).decision, "deny");
+    assert.strictEqual(answerFor(verdict("held"), { memory: told }).decision, "deny");
+  });
+
+  it("denies an edit of a file another session holds, saying who and what to do", () => {
+    const answer = answerFor(verdict("held", { holder: "claude:vir" }));
+    assert.strictEqual(answer.decision, "deny");
+    assert.include(
+      answer.reason,
+      `Vir's agent (Claude Code, "Frontend implementation", branch krk-812-ui) holds src/pay.ts in this project`,
+    );
+    assert.include(answer.reason, "Wait");
+    assert.include(answer.reason, `${CLI} note "<why you need src/pay.ts>"`);
+    assert.deepStrictEqual(answer.overlaps, ["abc123def456"]);
+    // Without the holder in view, it is still said that somebody holds it.
+    assert.include(
+      answerFor(verdict("held", { holder: "claude:vir" }), { sessions: [me] }).reason,
+      "Another agent on this project holds src/pay.ts in this project",
+    );
+  });
+});
+
+describe("an edit the hub gave no verdict on", () => {
+  const unverified = (
+    policy: Parameters<typeof unverifiedAnswer>[0]["policy"],
+    memory = emptyMemory(),
+  ) => unverifiedAnswer({ policy, files: ["src/pay.ts"], memory });
+
+  it("stops under coordinate and exclusive, to try again in a moment", () => {
+    for (const policy of ["coordinate", "exclusive"] as const) {
+      const answer = unverified(policy);
+      assert.strictEqual(answer.decision, "deny");
+      assert.include(answer.reason, "could not confirm this edit with your team's hub");
+      assert.include(answer.reason, "Try again in a moment");
+      assert.include(answer.reason, "your person can switch this project to notify");
+    }
+  });
+
+  it("leaves it to the person under ask, once for each file", () => {
+    const memory = emptyMemory();
+    const asked = unverified("ask", memory);
+    assert.strictEqual(asked.decision, "ask");
+    assert.include(asked.reason, "src/pay.ts");
+    // Once its person was asked about the file (approved, or its agent asked and tries again), not again.
+    for (const key of asked.keys) memory.acknowledged.add(key);
+    assert.isUndefined(unverified("ask", memory).decision);
+    assert.strictEqual(
+      unverifiedAnswer({ policy: "ask", files: ["src/other.ts"], memory }).decision,
+      "ask",
+    );
+  });
+
+  it("asks the person once for all the files of a patch", () => {
+    const memory = emptyMemory();
+    const asked = unverifiedAnswer({
+      policy: "ask",
+      files: ["src/pay.ts", "src/api.ts", "src/cart.ts"],
+      memory,
+    });
+    assert.strictEqual(asked.decision, "ask");
+    assert.include(asked.reason, "changing src/pay.ts (and 2 more) too");
+    assert.deepStrictEqual(asked.keys, [
+      "unconfirmed#src/pay.ts",
+      "unconfirmed#src/api.ts",
+      "unconfirmed#src/cart.ts",
+    ]);
+    for (const key of asked.keys) memory.acknowledged.add(key);
+    assert.isUndefined(
+      unverifiedAnswer({ policy: "ask", files: ["src/pay.ts", "src/api.ts"], memory }).decision,
+    );
+  });
+
+  it("lets it through under notify", () => {
+    const answer = unverified("notify");
+    assert.isUndefined(answer.decision);
+    assert.isUndefined(answer.context);
+  });
+
+  it("holds by the project's own policy when this computer heard it, else the person's", () => {
+    assert.strictEqual(policyWithoutHub({ app: "exclusive" }, "app", "notify"), "exclusive");
+    assert.strictEqual(policyWithoutHub({ site: "ask" }, "app", "notify"), "notify");
+    assert.strictEqual(policyWithoutHub(undefined, "app", "coordinate"), "coordinate");
+    // A newer hub's policy this Peer does not know is none.
+    assert.strictEqual(policyWithoutHub({ app: "lockstep" }, "app", "ask"), "ask");
+  });
+});
+
+describe("the hook's answer for an edit", () => {
+  const denial: EditAnswer = {
+    decision: "deny",
+    reason: " Peer: stop. ",
+    keys: ["o#a.ts"],
+    overlaps: ["o"],
+    with: [],
+  };
+  const question: EditAnswer = {
+    decision: "ask",
+    reason: "Peer: allow?",
+    keys: ["o#b.ts"],
+    overlaps: ["o"],
+    with: [],
+  };
+  const headsUp = (context: string): EditAnswer => ({ context, keys: [], overlaps: [], with: [] });
+  const decided = (answer: ReturnType<typeof editHookAnswer>) =>
+    (answer?.output.hookSpecificOutput as Record<string, unknown> | undefined) ?? {};
+
+  it("says nothing when nothing was said", () => {
+    assert.isNull(editHookAnswer("claude", []));
+    assert.isNull(editHookAnswer("codex", [{ keys: [], overlaps: [], with: [] }]));
+  });
+
+  it("has Claude Code stop on a denial, and ask its person on a question", () => {
+    const stopped = editHookAnswer("claude", [question, denial]);
+    assert.strictEqual(decided(stopped).permissionDecision, "deny");
+    assert.strictEqual(decided(stopped).permissionDecisionReason, "Peer: stop.");
+    assert.deepStrictEqual(stopped?.acknowledge, []);
+    const asked = editHookAnswer("claude", [question]);
+    assert.strictEqual(decided(asked).permissionDecision, "ask");
+    assert.strictEqual(decided(asked).permissionDecisionReason, "Peer: allow?");
+    assert.deepStrictEqual(asked?.acknowledge, []);
+  });
+
+  it("has a Codex agent ask its person itself, and lets its next try pass", () => {
+    const asked = editHookAnswer("codex", [question]);
+    assert.strictEqual(decided(asked).permissionDecision, "deny");
+    assert.include(
+      decided(asked).permissionDecisionReason,
+      "Peer: allow? Ask your person in your reply",
+    );
+    assert.deepStrictEqual(asked?.acknowledge, ["o#b.ts"]);
+    // A denial is not something to ask about: nothing is let pass.
+    const stopped = editHookAnswer("codex", [question, denial]);
+    assert.strictEqual(decided(stopped).permissionDecisionReason, "Peer: stop.");
+    assert.deepStrictEqual(stopped?.acknowledge, []);
+  });
+
+  it("puts heads-ups next to the tool's result", () => {
+    const told = editHookAnswer("claude", [headsUp("Peer: one."), headsUp("Peer: two.")]);
+    assert.strictEqual(decided(told).additionalContext, "Peer: one.\n\nPeer: two.");
+    assert.isUndefined(decided(told).permissionDecision);
   });
 });
 
@@ -842,7 +1084,9 @@ describe("working context", () => {
       taskName,
     });
     assert.deepStrictEqual(kept?.ids, ["f2"], "its task's findings go to the keeper");
-    assert.include(kept?.text, "- Vir's agent (krk-900): net.rs: resolve() swallows NXDOMAIN");
+    assert.include(kept?.text, "- Vir's agent (krk-900): finding available.");
+    assert.include(kept?.text, "Read: peer context krk-900");
+    assert.notInclude(kept?.text, "resolve() swallows NXDOMAIN");
     const unkept = teamNews({
       me,
       findings,
@@ -863,6 +1107,39 @@ describe("working context", () => {
         taskName,
       }),
     );
+  });
+
+  it("announces large findings in bounded notices and leaves remaining findings for later", () => {
+    const findings = Array.from({ length: 8 }, (_, index) =>
+      finding(`f${index}`, `net.rs: ${"large finding body ".repeat(1000)}`, {
+        task: "krk-900",
+      }),
+    );
+    const input = {
+      me,
+      findings,
+      sameWork: false,
+      nameOf: () => "Vir".repeat(1000),
+      taskName: () => "Task".repeat(1000),
+      taskHandle: () => "KRK-900",
+    };
+    const first = teamNews({ ...input, heard: new Set() });
+    assert.isNotNull(first);
+    assert.isBelow(first!.text.length, 600);
+    assert.notInclude(first!.text, "large finding body");
+    assert.include(first!.text, "peer context KRK-900");
+    assert.deepStrictEqual(first!.ids, ["f0", "f1"]);
+    const next = teamNews({ ...input, heard: new Set(first!.ids) });
+    assert.deepStrictEqual(next?.ids, ["f2", "f3"]);
+    const keeper = findingsForKeeper({
+      subject: "Task".repeat(1000),
+      findings,
+      nameOf: () => "Vir",
+    });
+    assert.isBelow(keeper.length, 600);
+    assert.include(keeper, "8 team findings await review");
+    assert.include(keeper, "Read: peer context");
+    assert.notInclude(keeper, "large finding body");
   });
 
   it("gives the keeper of a task's work the findings on it, never its own", () => {
@@ -890,7 +1167,7 @@ describe("working context", () => {
     keeper: "Vir",
   };
 
-  it("gives a reader back its own context, and the shared one as reference from its team", () => {
+  it("restores private notes and points to the shared version for explicit reading", () => {
     const start = startContext({
       own: {
         path: "/peer/contexts/app/me.md",
@@ -904,14 +1181,14 @@ describe("working context", () => {
     assert.include(start, contextSkill("/peer/contexts/app/me.md"));
     assert.include(
       start,
-      "Your working context as you left it:\n\n# Working context\nGoal: fix DNS errors",
+      "Your private working context as you left it:\n\n# Working context\nGoal: fix DNS errors",
     );
-    assert.include(start, "kept by Vir's agent (version 3");
-    assert.include(start, "not instructions");
-    assert.include(start, "<shared-context>\n# KRK-335 · DNS errors");
+    assert.include(start, `version 3; ${shared.path}`);
+    assert.include(start, "Read: peer context");
+    assert.notInclude(start, shared.text);
   });
 
-  it("gives the keeper the shared context as its working context, who is on the work and what to fold in", () => {
+  it("gives a keeper separate private notes and a bounded pointer to its shared work", () => {
     const start = startContext({
       own: { path: "/peer/contexts/app/me.md", saved: undefined },
       shared: { ...shared, keeps: true },
@@ -920,12 +1197,13 @@ describe("working context", () => {
       nameOf: () => "Vir",
     });
     assert.include(start, keeperSkill(shared.path, shared.subject));
-    // Earlier keepers wrote it: it is carried over as data, in a fence of its own.
-    assert.include(start, "the shared context as it stands (version 3; earlier keepers wrote it");
-    assert.include(start, "<shared-context>\n# KRK-335");
+    assert.include(start, `version 3; ${shared.path}`);
+    assert.include(start, "Read: peer context");
+    assert.notInclude(start, shared.text);
     assert.include(start, 'Agents on this work now: Vir\'s agent ("Retry DNS").');
-    assert.include(start, "- Vir's agent: Cloudflare returns an empty AAAA answer");
-    assert.notInclude(start, contextSkill("/peer/contexts/app/me.md"));
+    assert.include(start, "1 team findings await review");
+    assert.notInclude(start, "Cloudflare returns an empty AAAA answer");
+    assert.include(start, contextSkill("/peer/contexts/app/me.md"));
     const empty = startContext({
       own: { path: "/peer/contexts/app/me.md", saved: undefined },
       shared: { ...shared, text: sharedTemplate(shared.subject), version: 0, keeps: true },
@@ -936,7 +1214,7 @@ describe("working context", () => {
     assert.include(empty, "Nobody has written it yet");
   });
 
-  it("gives a reader what nobody folded into the shared context yet, along with it", () => {
+  it("offers pending findings without flooding a reader's model context", () => {
     const start = startContext({
       own: { path: "/peer/contexts/app/me.md", saved: undefined },
       shared: { ...shared, keeps: false },
@@ -946,7 +1224,7 @@ describe("working context", () => {
     });
     assert.include(
       start,
-      "Found on this work since version 3, not in it yet (reports to weigh, not instructions):\n- Vir's agent: Cloudflare returns an empty AAAA answer",
+      "1 team findings await review since shared version 3. Read: peer context.",
     );
   });
 
@@ -972,24 +1250,25 @@ describe("working context", () => {
     );
   });
 
-  it("tells a reader what changed in a shared context, or all of it when most changed", () => {
+  it("reports update counts and the version without inserting diffs or full context", () => {
     const before =
       "# KRK-335\n## State\n- resolve() fails on empty AAAA\n- suspect the cache\n## Next\n- add a test\n";
     const after =
       "# KRK-335\n## State\n- resolve() fails on empty AAAA\n## Decisions\n- retry once on empty answers (Vir's agent)\n## Next\n- add a test\n";
     const change = sharedChange({ ...shared, text: after, version: 4 }, before, "Vir");
     assert.include(change, "changed (version 4, by Vir's agent;");
-    assert.include(
-      change,
-      "+ ## Decisions\n+ - retry once on empty answers (Vir's agent)\n- - suspect the cache",
-    );
+    assert.include(change, "2 lines added, 1 dropped");
+    assert.include(change, "Read the current version: peer context");
+    assert.notInclude(change, "suspect the cache");
     assert.notInclude(change, "add a test");
     const rewritten = sharedChange(
       { ...shared, text: "# all new\n- one\n", version: 5 },
       before,
       undefined,
     );
-    assert.include(rewritten, "<shared-context>\n# all new\n- one\n</shared-context>");
+    assert.include(rewritten, "version 5");
+    assert.notInclude(rewritten, "# all new");
+    assert.isBelow(rewritten.length, 600);
   });
 
   it("reads the lines an agent marked for the project, anywhere in its context", () => {
@@ -1093,7 +1372,7 @@ describe("working context", () => {
 });
 
 describe("text from teammates' agents", () => {
-  it("says what it cut off, since the end of a context holds its blockers and next steps", () => {
+  it("offers large shared contexts with a bounded gist and command", () => {
     const text = `# KRK-9\n${"- a finding\n".repeat(2_000)}## Next\n- the last thing\n`;
     const read = sharedForReader({
       subject: "KRK-9",
@@ -1102,7 +1381,9 @@ describe("text from teammates' agents", () => {
       version: 4,
       keeper: "Vir",
     });
-    assert.include(read, "more characters: peer context <task> prints all of it)");
+    assert.include(read, "Read: peer context");
+    assert.isBelow(read.length, 600);
+    assert.include(read, "version 4");
     assert.notInclude(read, "the last thing");
     const short = sharedForReader({
       subject: "KRK-9",
@@ -1111,7 +1392,7 @@ describe("text from teammates' agents", () => {
       version: 1,
       keeper: undefined,
     });
-    assert.notInclude(short, "more characters");
+    assert.include(short, "Read: peer context");
   });
 
   it("cannot close the fence it is in", () => {

@@ -68,6 +68,12 @@ import {
   type PeerHubSetCoordinationInput,
   type PeerHubProjectUsage,
   type PeerHubPromptAgentInput,
+  type PeerHubStartAgentInput,
+  type PeerHubStartAgentResult,
+  type PeerHubCoordEventsInput,
+  type PeerHubStaleReadsInput,
+  type PeerCoordEvent,
+  type PeerStaleReads,
   type PeerHubShareProjectInput,
   type PeerHubSharedCapacityInput,
   type PeerHubStartSignInInput,
@@ -137,6 +143,8 @@ import {
 } from "./github.ts";
 import * as AgentTranscript from "./agentTranscript.ts";
 import * as Herdr from "./herdr.ts";
+import * as ClaudeMod from "./claudeMod/install.ts";
+import * as ClaudeModRuntime from "./claudeMod/runtime.ts";
 import {
   boundedWorkReport,
   mergePullRequestEvidence,
@@ -276,6 +284,8 @@ interface ProjectWork {
 
 interface HerdrAgentState extends Herdr.HerdrAgent {
   readonly branch: string | undefined;
+  readonly postHocPaths?: ReadonlyArray<string>;
+  readonly postHocPathsTruncated?: number;
   readonly place?: {
     readonly workspace: string;
     readonly projectId: string;
@@ -516,13 +526,16 @@ export class PeerHub extends Context.Service<
     readonly promptAgent: (
       input: PeerHubPromptAgentInput,
     ) => Effect.Effect<PeerHubStatus, PeerHubError>;
-    /**
-     * Starts a Claude Code or Codex agent in herdr, in a pane of Peer's own workspace there,
-     * and gives it its prompt once it is ready. Not a contract yet: no client calls it.
-     */
+    /** Starts a task agent in its own checkout and assigns its durable work identity. */
     readonly startAgent: (
-      input: Herdr.StartHerdrAgentInput,
-    ) => Effect.Effect<Herdr.StartedHerdrAgent, PeerHubError>;
+      input: PeerHubStartAgentInput,
+    ) => Effect.Effect<PeerHubStartAgentResult, PeerHubError>;
+    readonly getCoordEvents: (
+      input: PeerHubCoordEventsInput,
+    ) => Effect.Effect<ReadonlyArray<PeerCoordEvent>, PeerHubError>;
+    readonly getStaleReads: (
+      input: PeerHubStaleReadsInput,
+    ) => Effect.Effect<PeerStaleReads, PeerHubError>;
     /** Lets the team watch one of this computer's threads live, or stops it. */
     readonly shareThread: (
       input: PeerHubShareThreadInput,
@@ -760,6 +773,7 @@ const make = Effect.gen(function* () {
     github: { cli: null, account: null, signIn: null, error: null },
   });
   const statusRef = yield* Ref.make<PeerHubStatus | null>(null);
+  const herdrReportsSkipped = new Map<string, number>();
   const changes = yield* Effect.acquireRelease(PubSub.unbounded<PeerHubStatus>(), PubSub.shutdown);
   // Mutations of hub state run one at a time; background clones only touch their own checkout.
   const lock = yield* Semaphore.make(1);
@@ -836,12 +850,44 @@ const make = Effect.gen(function* () {
   let broker: CoordinationBroker | null = null;
   const claudeSettings = yield* Effect.promise(() => readJsonSettings(claudeSettingsPath));
   let claudeHooksInstalled = hasPeerHooks(claudeSettings ?? {}, coordinationDir);
+  const claudeModDir = ClaudeMod.peerClaudeModPath(coordinationDir);
+  const claudeEnv = claudeSettings?.env;
+  const pluginDirs =
+    typeof claudeEnv === "object" && claudeEnv !== null
+      ? (claudeEnv as Record<string, unknown>).CLAUDE_CODE_PLUGIN_DIRS
+      : undefined;
+  let claudeModInstalled =
+    typeof pluginDirs === "string" && pluginDirs.split(NodePath.delimiter).includes(claudeModDir);
+  if (claudeModInstalled) {
+    yield* Effect.tryPromise(() =>
+      ClaudeMod.writeClaudeMod({
+        directory: claudeModDir,
+        socketPath: coordinationSocket,
+        peerScript: peerCommand,
+      }),
+    ).pipe(
+      Effect.catch(() =>
+        Effect.sync(() => {
+          claudeModInstalled = false;
+        }),
+      ),
+    );
+  }
+  ClaudeModRuntime.setClaudeModDirectory(claudeModInstalled ? claudeModDir : undefined);
+  yield* Effect.addFinalizer(() =>
+    Effect.sync(() => ClaudeModRuntime.setClaudeModDirectory(undefined)),
+  );
   // Hooks an older Peer installed get this Peer's: new events, and agents let into their contexts.
   const currentHooks =
-    claudeSettings === null || !claudeHooksInstalled
+    claudeSettings === null || (!claudeHooksInstalled && !claudeModInstalled)
       ? null
       : withContextAccess(
-          withPeerHooks(claudeSettings, claudeHookGroups(peerScripts), coordinationDir, true),
+          withPeerHooks(
+            claudeSettings,
+            claudeHookGroups(peerScripts),
+            coordinationDir,
+            !claudeModInstalled,
+          ),
           coordinationContexts,
           true,
         );
@@ -854,6 +900,7 @@ const make = Effect.gen(function* () {
       writeJsonSettings(claudeSettingsPath, currentHooks).catch(() => undefined),
     );
   }
+  if (claudeModInstalled) claudeHooksInstalled = false;
   const codexHooks = yield* Effect.promise(() => readJsonSettings(codexHooksPath));
   let codexHooksInstalled = hasPeerHooks(codexHooks ?? {}, coordinationDir);
   // The same for Codex; a hook that changes asks its person to trust it again.
@@ -1359,6 +1406,11 @@ const make = Effect.gen(function* () {
       status: agent.status,
       ...(agent.cwd === undefined ? {} : { cwd: agent.cwd }),
       ...(agent.branch === undefined ? {} : { branch: agent.branch }),
+      coordinationLevel: broker?.coordinationLevel(agentKey(agent).replace(/^herdr:/, "")) ?? "C",
+      ...(agent.postHocPaths === undefined ? {} : { postHocPaths: agent.postHocPaths }),
+      ...(agent.postHocPathsTruncated === undefined
+        ? {}
+        : { postHocPathsTruncated: agent.postHocPathsTruncated }),
       ...(place === undefined ? {} : place),
     };
   };
@@ -1378,6 +1430,7 @@ const make = Effect.gen(function* () {
       enabled: s.persisted.coordination?.enabled ?? false,
       policy: s.persisted.coordination?.policy ?? "coordinate",
       claudeHooks: claudeHooksInstalled,
+      claudeMod: claudeModInstalled,
       codexHooks: codexHooksInstalled,
       ...(codexHooksInstalled ? { codexHooksTrusted: codexTrusts() } : {}),
       logPath: coordinationLog,
@@ -1389,6 +1442,7 @@ const make = Effect.gen(function* () {
         workspace: session.workspace,
         project: session.project,
         email: session.email,
+        environment: session.environment,
         label: session.label,
         ...(session.agent === undefined ? {} : { agent: session.agent }),
         ...(session.task === undefined ? {} : { task: session.task }),
@@ -1540,6 +1594,10 @@ const make = Effect.gen(function* () {
       agents: {
         herdr: s.herdr === null ? "not-running" : "running",
         list: (s.herdr ?? []).map((agent) => localAgentView(s, agent)),
+        postHocSkipped: s.persisted.workspaces.reduce(
+          (count, workspace) => count + (herdrReportsSkipped.get(workspace.slug) ?? 0),
+          0,
+        ),
       },
       github: {
         cli: s.github.cli !== null,
@@ -2042,6 +2100,8 @@ const make = Effect.gen(function* () {
     retryMs: HERDR_RESYNC_MS,
   });
   const herdrPlaces = new Map<string, { at: number; place: HerdrAgentState["place"] }>();
+  const herdrCompletions = new Herdr.HerdrCompletionTracker();
+  const herdrObservedPaths = new Map<string, { paths: ReadonlyArray<string>; truncated: number }>();
   /** What herdr runs on this computer, with each agent's git branch and worktree's repository. */
   const refreshHerdr = Effect.gen(function* () {
     const agents = yield* Effect.promise(() => herdrFollower.read());
@@ -2052,6 +2112,24 @@ const make = Effect.gen(function* () {
         : yield* Effect.forEach(agents, (agent) =>
             Effect.gen(function* () {
               const branch = yield* branchOf(agent.cwd, nowMillis);
+              const observationKey = [
+                agent.terminalId,
+                agent.agent,
+                agent.session?.id,
+                agent.session?.path,
+                agent.cwd,
+              ].join("\0");
+              if (herdrCompletions.completed(agent) && agent.cwd !== undefined) {
+                const paths = yield* Effect.promise(() => Herdr.readHerdrChangedPaths(agent.cwd!));
+                if (paths !== null)
+                  herdrObservedPaths.set(observationKey, {
+                    paths: paths.slice(0, 200),
+                    truncated: Math.max(0, paths.length - 200),
+                  });
+                if (herdrObservedPaths.size > 500)
+                  herdrObservedPaths.delete(herdrObservedPaths.keys().next().value!);
+              }
+              const observation = herdrObservedPaths.get(observationKey);
               let place = projectOfPath(yield* Ref.get(stateRef), agent.cwd);
               if (place === undefined && agent.cwd !== undefined) {
                 const cached = herdrPlaces.get(agent.cwd);
@@ -2070,7 +2148,17 @@ const make = Effect.gen(function* () {
                   if (herdrPlaces.size > 500) herdrPlaces.delete(herdrPlaces.keys().next().value!);
                 }
               }
-              return { ...agent, branch, ...(place === undefined ? {} : { place }) };
+              return {
+                ...agent,
+                branch,
+                ...(observation === undefined
+                  ? {}
+                  : {
+                      postHocPaths: observation.paths,
+                      postHocPathsTruncated: observation.truncated,
+                    }),
+                ...(place === undefined ? {} : { place }),
+              };
             }),
           );
     yield* updateRuntime((s) => ({ ...s, herdr: withBranches }));
@@ -2703,6 +2791,51 @@ const make = Effect.gen(function* () {
       requireSession.pipe(Effect.flatMap(({ hubUrl, session }) => call(hubUrl, session))),
     );
 
+  const herdrCoordinationReport = (
+    workspace: string,
+    reported: ReadonlyArray<HubApi.ReportedSession>,
+  ) => {
+    const s = currentState();
+    return (s.herdr ?? []).flatMap((agent): HubApi.ReportedSession[] => {
+      if (agent.place?.workspace !== workspace) return [];
+      const id = agentKey(agent).replace(/^herdr:/, "");
+      if (reported.some((session) => session.id === id)) return [];
+      return [
+        {
+          id,
+          project: agent.place.projectId,
+          label: agent.title,
+          ...(agent.agent === undefined ? {} : { agent: agent.agent }),
+          status: agent.status,
+          ...(agent.branch === undefined ? {} : { branch: agent.branch }),
+          files: agent.postHocPaths ?? [],
+          claims: [],
+          ...(assignedTask(s.persisted, agentKey(agent), workspace, agent.place.projectId) ===
+          undefined
+            ? {}
+            : {
+                task: assignedTask(s.persisted, agentKey(agent), workspace, agent.place.projectId)!,
+              }),
+        },
+      ];
+    });
+  };
+
+  const coordinationReport = (
+    workspace: string,
+    sessions: ReadonlyArray<HubApi.ReportedSession>,
+  ) => {
+    const primary = [
+      ...new Map(
+        [...appMemoryReport(workspace), ...sessions].map((session) => [session.id, session]),
+      ).values(),
+    ];
+    const observations = herdrCoordinationReport(workspace, primary);
+    const report = Herdr.boundHerdrObservations(primary, observations);
+    herdrReportsSkipped.set(workspace, report.skipped);
+    return report.sessions;
+  };
+
   const startBroker = Effect.tryPromise({
     try: async () => {
       if (broker !== null) return;
@@ -2765,6 +2898,13 @@ const make = Effect.gen(function* () {
             () => false,
           );
         },
+        wakeRuntime: async (nativeId, _pane, text) => {
+          const agent = currentState().herdr?.find(
+            (candidate) => agentKey(candidate) === `herdr:${nativeId}`,
+          );
+          if (agent === undefined) return { status: "unavailable" as const };
+          return Herdr.wakeHerdrAgent({ ...agent, session: sessionOf(agent) }, text);
+        },
         nameOf: nameIn,
         email: () => currentState().persisted.email,
         policy: () => currentState().persisted.coordination?.policy ?? "coordinate",
@@ -2772,23 +2912,37 @@ const make = Effect.gen(function* () {
           withHub((hubUrl, session) =>
             hubApi.reportCoordination(hubUrl, session, workspace, {
               environment: environmentId,
-              sessions: [...sessions, ...appMemoryReport(workspace)],
+              sessions: coordinationReport(workspace, sessions),
             }),
           ),
         view: (workspace) =>
           withHub((hubUrl, session) => hubApi.coordination(hubUrl, session, workspace)),
-        note: (workspace, project, overlap, text, author) =>
+        note: (workspace, project, overlap, text, author, op) =>
           withHub((hubUrl, session) =>
             hubApi.noteOverlap(hubUrl, session, workspace, project, overlap, {
               ...(author === undefined ? {} : { session: author }),
               text,
+              ...(op === undefined ? {} : { op }),
             }),
           ),
-        resolve: (workspace, project, overlap, resolution, author) =>
+        resolve: (workspace, project, overlap, resolution, author, op) =>
           withHub((hubUrl, session) =>
             hubApi.resolveOverlap(hubUrl, session, workspace, project, overlap, {
               ...(author === undefined ? {} : { session: author }),
               resolution,
+              ...(op === undefined ? {} : { op }),
+            }),
+          ),
+        intent: (workspace, project, request, timeoutMs) =>
+          withHub((hubUrl, session) =>
+            hubApi.intent(hubUrl, session, workspace, project, request, { timeoutMs }),
+          ),
+        ack: (workspace, project, overlap, agentSession, op, filesAt) =>
+          withHub((hubUrl, session) =>
+            hubApi.ack(hubUrl, session, workspace, project, overlap, {
+              session: agentSession,
+              op,
+              ...(filesAt === undefined ? {} : { filesAt }),
             }),
           ),
         workspaces: () => {
@@ -2815,6 +2969,17 @@ const make = Effect.gen(function* () {
         threadOf: (nativeId) => Effect.runPromise(threadOfSession(nativeId)),
         tasks: (workspace, project) =>
           currentState().work.get(sharedKey(workspace, project))?.tasks ?? [],
+        finishTask: (workspace, project, task, agentSession, status, op) =>
+          withHub((hubUrl, session) =>
+            hubApi.updateTask(hubUrl, session, workspace, project, task, {
+              status,
+              session: agentSession,
+              environment: environmentId,
+              op,
+            }),
+          ).then(() => {
+            void Effect.runFork(refreshWork.pipe(Effect.ignore));
+          }),
         taskName: (workspace, project, task) => {
           const found = currentState()
             .work.get(sharedKey(workspace, project))
@@ -2825,6 +2990,26 @@ const make = Effect.gen(function* () {
         readContext: (workspace, project, scope) =>
           withHub((hubUrl, session) =>
             hubApi.readContext(hubUrl, session, workspace, project, scope),
+          ),
+        contextRead: (workspace, project, scope, agentSession, version, op) =>
+          withHub((hubUrl, session) =>
+            hubApi.contextRead(hubUrl, session, workspace, project, scope, {
+              environment: environmentId,
+              session: agentSession,
+              version,
+              op,
+            }),
+          ),
+        staleReads: (workspace, project, agentSession) =>
+          withHub((hubUrl, session) =>
+            hubApi.staleReads(hubUrl, session, workspace, project, {
+              environment: environmentId,
+              session: agentSession,
+            }),
+          ),
+        coordEvents: (workspace, project, filter) =>
+          withHub((hubUrl, session) =>
+            hubApi.coordEvents(hubUrl, session, workspace, project, filter),
           ),
         projectGuidance: async (root) => (await Knowledge.projectGuidance(root))?.text ?? null,
         gitStatus: (root) =>
@@ -2843,21 +3028,25 @@ const make = Effect.gen(function* () {
           withHub((hubUrl, session) =>
             hubApi.contextVersion(hubUrl, session, workspace, project, scope, version),
           ),
-        keepContext: (workspace, project, scope, agentSession, release) =>
+        keepContext: (workspace, project, scope, agentSession, release, epoch, op) =>
           withHub((hubUrl, session) =>
             hubApi.keepContext(hubUrl, session, workspace, project, scope, {
               environment: environmentId,
               session: agentSession,
               ...(release ? { release: true } : {}),
+              ...(epoch === undefined ? {} : { epoch }),
+              ...(op === undefined ? {} : { op }),
             }),
           ),
-        writeContext: (workspace, project, scope, agentSession, baseVersion, text) =>
+        writeContext: (workspace, project, scope, agentSession, baseVersion, text, epoch, op) =>
           withHub((hubUrl, session) =>
             hubApi.writeContext(hubUrl, session, workspace, project, scope, {
               environment: environmentId,
               session: agentSession,
               baseVersion,
               text,
+              ...(epoch === undefined ? {} : { epoch }),
+              ...(op === undefined ? {} : { op }),
             }),
           ),
       });
@@ -2880,6 +3069,24 @@ const make = Effect.gen(function* () {
   const setCoordination: PeerHub["Service"]["setCoordination"] = Effect.fn(
     "PeerHub.setCoordination",
   )(function* (input) {
+    if (input.claudeMod === true) {
+      const cli = commandPath("claude");
+      if (cli === null)
+        return yield* hubError(
+          "Install Claude Code 2.1.291 or newer on this environment before enabling the Peer Mod.",
+        );
+      const version = yield* Effect.tryPromise(() =>
+        run(cli, ["--version"], { timeoutMs: 3000 }),
+      ).pipe(
+        Effect.mapError(() =>
+          hubError("Could not read Claude Code's version. Check the CLI on this environment."),
+        ),
+      );
+      if (!ClaudeMod.supportsClaudeMod(version))
+        return yield* hubError(
+          "Update Claude Code to 2.1.291 or newer before enabling the Peer Mod.",
+        );
+    }
     const current = (yield* Ref.get(stateRef)).persisted.coordination ?? {
       enabled: false,
       policy: "coordinate" as const,
@@ -2887,7 +3094,7 @@ const make = Effect.gen(function* () {
     // Hooks run Peer's scripts, which coordination writes: installing them turns it on.
     const next = {
       enabled:
-        input.claudeHooks === true || input.codexHooks === true
+        input.claudeHooks === true || input.codexHooks === true || input.claudeMod === true
           ? true
           : (input.enabled ?? current.enabled),
       policy: input.policy ?? current.policy,
@@ -2906,16 +3113,65 @@ const make = Effect.gen(function* () {
           await writeJsonSettings(
             claudeSettingsPath,
             withContextAccess(
-              withPeerHooks(settings, claudeHookGroups(peerScripts), coordinationDir, install),
+              withPeerHooks(
+                install ? ClaudeMod.withClaudeMod(settings, claudeModDir, false) : settings,
+                claudeHookGroups(peerScripts),
+                coordinationDir,
+                install,
+              ),
               coordinationContexts,
               install,
             ),
           );
           claudeHooksInstalled = install;
+          if (install) {
+            claudeModInstalled = false;
+            ClaudeModRuntime.setClaudeModDirectory(undefined);
+          }
         },
         catch: (failure) =>
           hubError(
             `Claude Code's settings could not change: ${failure instanceof Error ? failure.message : String(failure)}`,
+          ),
+      });
+    }
+    const modChange =
+      input.claudeMod ?? (input.enabled === false && claudeModInstalled ? false : undefined);
+    if (modChange !== undefined) {
+      const install = modChange;
+      yield* Effect.tryPromise({
+        try: async () => {
+          const settings = await readJsonSettings(claudeSettingsPath);
+          if (settings === null)
+            throw new Error(`${claudeSettingsPath} is not valid JSON; fix it first`);
+          if (install)
+            await ClaudeMod.writeClaudeMod({
+              directory: claudeModDir,
+              socketPath: coordinationSocket,
+              peerScript: peerCommand,
+            });
+          await writeJsonSettings(
+            claudeSettingsPath,
+            withContextAccess(
+              ClaudeMod.withClaudeMod(
+                install
+                  ? withPeerHooks(settings, claudeHookGroups(peerScripts), coordinationDir, false)
+                  : settings,
+                claudeModDir,
+                install,
+              ),
+              coordinationContexts,
+              install || claudeHooksInstalled,
+            ),
+          );
+          claudeModInstalled = install;
+          if (install) claudeHooksInstalled = false;
+          ClaudeModRuntime.setClaudeModDirectory(install ? claudeModDir : undefined);
+          if (!install) await ClaudeMod.removeClaudeMod(claudeModDir);
+        },
+        catch: (failure) =>
+          hubError(
+            `Claude Code's Peer Mod could not change: ${failure instanceof Error ? failure.message : String(failure)}`,
           ),
       });
     }
@@ -3365,6 +3621,26 @@ const make = Effect.gen(function* () {
       ),
     );
 
+  const getCoordEvents: PeerHub["Service"]["getCoordEvents"] = Effect.fn("PeerHub.getCoordEvents")(
+    function* (input) {
+      yield* findProject(input.workspace, input.project);
+      const { hubUrl, session } = yield* requireSession;
+      return yield* hubApi.coordEvents(hubUrl, session, input.workspace, input.project, {
+        ...(input.task === undefined ? {} : { task: input.task }),
+        ...(input.path === undefined ? {} : { path: input.path }),
+        ...(input.limit === undefined ? {} : { limit: input.limit }),
+      });
+    },
+  );
+
+  const getStaleReads: PeerHub["Service"]["getStaleReads"] = Effect.fn("PeerHub.getStaleReads")(
+    function* (input) {
+      yield* findProject(input.workspace, input.project);
+      const { hubUrl, session } = yield* requireSession;
+      return yield* hubApi.staleReads(hubUrl, session, input.workspace, input.project, input);
+    },
+  );
+
   const contextVersions: PeerHub["Service"]["contextVersions"] = (input) =>
     requireSession.pipe(
       Effect.flatMap(({ hubUrl, session }) =>
@@ -3760,17 +4036,108 @@ const make = Effect.gen(function* () {
 
   const startAgent: PeerHub["Service"]["startAgent"] = Effect.fn("PeerHub.startAgent")(
     function* (input) {
-      const started = yield* Effect.tryPromise(() => Herdr.startHerdrAgent(input)).pipe(
+      yield* requireSession;
+      const { workspace, project } = yield* findProject(input.workspace, input.projectId);
+      const task = (yield* Ref.get(stateRef)).work
+        .get(sharedKey(workspace.slug, project.id))
+        ?.tasks.find((task) => task.id === input.taskId);
+      if (task === undefined || task.status === "done")
+        return yield* hubError("Select an open task in this project first.");
+      const repository = project.repositories.find(
+        (repository) => repository.id === input.repositoryId,
+      );
+      if (repository === undefined || !safeId(repository.id))
+        return yield* hubError("That repository does not belong to this project.");
+      if (project.capacity.personal !== "any")
+        return yield* hubError(
+          "This project needs an approved commercial or shared provider. Start a Peer thread with an allowed provider instead.",
+        );
+      if ((yield* Effect.promise(() => Herdr.listHerdrAgents())) === null)
+        return yield* hubError(
+          "herdr is not running on this environment. Install it from https://herdr.dev/docs/install/, start herdr here, then try again.",
+        );
+      const checkout = checkoutPath(
+        (yield* Ref.get(stateRef)).persisted,
+        workspace.slug,
+        project.id,
+        repository.id,
+      );
+      const tree = yield* Effect.tryPromise(() =>
+        Herdr.prepareHerdrTaskWorktree({
+          checkout,
+          baseBranch: repository.branch,
+          worktrees: NodePath.join(
+            workspaceRoot,
+            ".worktrees",
+            workspace.slug,
+            project.id,
+            repository.id,
+          ),
+          task: task.key ?? task.id,
+        }),
+      ).pipe(
         Effect.mapError((error) =>
           hubError(
-            `herdr did not start the agent${error.cause instanceof Error ? `: ${error.cause.message}` : "."}`,
+            `Could not prepare the task checkout: ${error.cause instanceof Error ? error.cause.message : "check the local repository branch."}`,
           ),
         ),
       );
+      const started = yield* Effect.tryPromise(() =>
+        Herdr.startHerdrAgent({
+          cwd: tree.cwd,
+          harness: input.harness,
+          env: {
+            PEER_TASK: task.key ?? task.id,
+            ...(claudeModInstalled && input.harness === "claude"
+              ? { PEER_CLAUDE_MOD_DIR: claudeModDir }
+              : {}),
+          },
+        }),
+      ).pipe(
+        Effect.mapError((error) =>
+          hubError(
+            `herdr did not start the agent${error.cause instanceof Error ? `: ${error.cause.message}` : "."} The task checkout remains at ${tree.cwd}.`,
+          ),
+        ),
+      );
+      yield* updatePersisted((p) => ({
+        ...p,
+        assignments: {
+          ...p.assignments,
+          [`herdr:${started.terminalId}`]: {
+            workspace: workspace.slug,
+            project: project.id,
+            task: task.id,
+          },
+        },
+      }));
       // Show it at once; herdr's events would say within a moment.
       yield* refreshHerdr;
+      const agent = ((yield* Ref.get(stateRef)).herdr ?? []).find(
+        (agent) => agent.terminalId === started.terminalId,
+      );
+      let promptError = started.promptError;
+      if (agent !== undefined) {
+        yield* keepAssignments([agent]);
+        if (agent.status === "blocked")
+          promptError =
+            "The agent is waiting for an answer in herdr. Answer it there, then send the task prompt.";
+        else {
+          const prompt =
+            input.prompt?.trim() ||
+            `${task.key === undefined ? "" : `${task.key}: `}${task.title}. Work in your own checkout and coordinate shared changes through Peer.`;
+          const sent = yield* Effect.tryPromise(() =>
+            Herdr.promptHerdrAgent(agent.name ?? agent.paneId, prompt),
+          ).pipe(Effect.result);
+          if (sent._tag === "Failure")
+            promptError = `The task prompt could not be confirmed. Read the agent before retrying: ${sent.failure.cause instanceof Error ? sent.failure.cause.message : "herdr did not answer"}.`;
+        }
+      } else
+        promptError =
+          "The agent started but is not visible yet. Check herdr before sending its task prompt.";
+      yield* refreshWork;
       yield* publish;
-      return started;
+      return { ...started, ...(promptError === undefined ? {} : { promptError }) };
     },
   );
 
@@ -4195,6 +4562,8 @@ const make = Effect.gen(function* () {
     watchAgent,
     promptAgent,
     startAgent,
+    getCoordEvents,
+    getStaleReads,
     shareThread,
     observeThread,
     readContext,

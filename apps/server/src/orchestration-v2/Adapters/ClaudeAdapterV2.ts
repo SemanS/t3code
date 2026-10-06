@@ -118,6 +118,8 @@ import { T3_CODE_ORCHESTRATION_INSTRUCTIONS } from "../../provider/T3Orchestrati
 import { buildRuntimeInstructions } from "../../provider/RuntimeInstructions.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as HubPolicy from "../../peerHub/hubPolicy.ts";
+import { withClaudeMod } from "../../peerHub/claudeMod/install.ts";
+import { readClaudeModDirectory } from "../../peerHub/claudeMod/runtime.ts";
 import * as IdAllocator from "../IdAllocator.ts";
 import { makeProviderFailure, makeProviderRetryTurnItem } from "../ProviderFailure.ts";
 import { turnScopedSelectionTransition } from "../ProviderSelectionTransition.ts";
@@ -790,6 +792,8 @@ export function makeClaudeQueryOptions(input: {
   readonly settings?: ClaudeSettings;
   readonly sdkSettings?: string | ClaudeSdkSettings;
   readonly environment?: NodeJS.ProcessEnv;
+  /** PeerHub's opted-in private package; unrelated inline plugins keep their environment paths. */
+  readonly peerPluginDir?: string;
   readonly mcpServers?: ClaudeQueryOptions["mcpServers"];
   /** Appended after T3's own instructions, e.g. a Peer workspace project brief. */
   readonly appendSystemPrompt?: string;
@@ -835,6 +839,14 @@ export function makeClaudeQueryOptions(input: {
           ...(typeof querySettings === "object" && querySettings !== null ? querySettings : {}),
           autoCompactWindow: Number(input.settings.autoCompactWindow),
         } as ClaudeSdkSettings);
+  const peerPluginDir =
+    input.environment?.PEER_COORDINATION === "off" ? undefined : input.peerPluginDir;
+  // The SDK owns this explicit load. Remove only its duplicate inline env entry.
+  const environment =
+    peerPluginDir === undefined || input.environment === undefined
+      ? input.environment
+      : ((withClaudeMod({ env: input.environment }, peerPluginDir, false).env ??
+          {}) as NodeJS.ProcessEnv);
   const options: ClaudeAgentSdkQueryOptions = {
     model: compiledSelection.apiModelId,
     tools: claudeAgentSdkQueryToolsForSdk(selectedTools),
@@ -878,7 +890,10 @@ export function makeClaudeQueryOptions(input: {
     ...(input.settings?.binaryPath
       ? { pathToClaudeCodeExecutable: input.settings.binaryPath }
       : {}),
-    ...(input.environment === undefined ? {} : { env: input.environment }),
+    ...(environment === undefined ? {} : { env: environment }),
+    ...(peerPluginDir === undefined
+      ? {}
+      : { plugins: [{ type: "local" as const, path: peerPluginDir }] }),
     ...(input.mcpServers === undefined ? {} : { mcpServers: input.mcpServers }),
     systemPrompt: {
       type: "preset" as const,
@@ -6902,6 +6917,7 @@ export function makeClaudeAdapterV2(
           const hasPersistedProviderTurn = turnInput.providerTurnOrdinal > 1;
           const shouldResume =
             resumeSessionAt !== undefined || openedWithResume || hasPersistedProviderTurn;
+          const peerPluginDir = readClaudeModDirectory();
           const querySession = yield* queryRunner
             .open({
               threadId: turnInput.threadId,
@@ -6915,6 +6931,7 @@ export function makeClaudeAdapterV2(
                 attachmentsDir,
                 settings: adapterOptions.settings,
                 environment: adapterOptions.environment,
+                ...(peerPluginDir === undefined ? {} : { peerPluginDir }),
                 tools: queryPolicy.tools ?? CLAUDE_CODE_PRESET_TOOLS,
                 ...mcpOverrides,
                 permissionMode: queryPolicy.permissionMode,

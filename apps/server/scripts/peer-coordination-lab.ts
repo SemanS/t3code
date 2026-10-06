@@ -30,11 +30,22 @@
 //      was not ready reaches the agent at its next step instead of being lost.
 //  16. Reviewed knowledge: the project's `.ai` is in the index (`peer knowledge` reads and searches
 //      it), and an entry whose paths name a file the agent changes says so, once.
+//  17. Two computers edit one file at the same moment: the hub decides each first edit in one step,
+//      so exactly one of the two runs and the other is stopped before it edits; the one let through
+//      is stopped on its next edit of the file until it writes a note. Repeated with a new file each
+//      time. It needs a hub that has `/intent`, and says so when PEERHUB_BIN has none.
 //
 // It prints what each agent was told and leaves both computers' coordination logs.
 //
 //   PEERHUB_BIN=../server/target/debug/peerhub node apps/server/scripts/peer-coordination-lab.ts
 //   KEEP_LAB=1 keeps the throwaway homes and logs.
+//   LAB_RACE_RUNS=100 repeats step 17's race that many times (20 by default).
+//
+// The computers run apps/server/dist/bin.mjs: build it (`vp pack` in apps/server) after changing the
+// broker, or the lab tests the build it finds. LAB_SERVER_BIN=<dir>/bin.mjs runs a private build
+// (`vp pack -d <fresh-empty-dir>` in apps/server). After packing succeeds, attach its runtime
+// node_modules and copy the web build to <dir>/client. Never pack into a directory that already
+// contains links: the bundle cleaner may follow them. The private build leaves dist alone.
 //
 // REAL_AGENTS=1 HERDR_BIN=… runs real Claude Code sessions instead (Sonnet, one herdr server per
 // computer, Peer's hooks and context permissions passed with --settings, the user's own settings
@@ -82,7 +93,8 @@ const TASKS = REAL && process.env.REAL_SCENARIO === "tasks";
 const SETTLE = REAL && process.env.REAL_SCENARIO === "settle";
 /** With real agents, a keeper idle this long gives way (production waits ten minutes). */
 const REAL_IDLE_SECS = 45;
-const bin = NodePath.join(repoRoot, "apps/server/dist/bin.mjs");
+/** The server the computers run: the bundle in apps/server/dist, or `LAB_SERVER_BIN` (a private build, `vp pack -d <dir>`). */
+const bin = process.env.LAB_SERVER_BIN ?? NodePath.join(repoRoot, "apps/server/dist/bin.mjs");
 /** A stand-in for the Claude Code that judges related work in the background, and what it was asked. */
 const fakeModel = NodePath.join(lab, "fake-claude");
 const modelCalls = NodePath.join(lab, "model-calls.jsonl");
@@ -455,6 +467,28 @@ function agent(computer: Computer, sessionId: string, pane: string) {
         tool_input: { file_path: file(path), old_string: "a", new_string: "b" },
       });
     },
+    /**
+     * A hook run that is started but has not begun: its script waits for the event, which `go()`
+     * hands it, so two agents' hooks can begin in the same moment (`hook` waits for its run).
+     */
+    prepare(event: string, extra: Record<string, unknown> = {}) {
+      const child = NodeChildProcess.spawn("sh", [computer.scripts.hook], {
+        env,
+        stdio: ["pipe", "pipe", "ignore"],
+      });
+      let out = "";
+      child.stdout.on("data", (chunk: Buffer) => (out += chunk.toString()));
+      const finished = new Promise<HookOut>((resolve, reject) => {
+        child.on("error", reject);
+        child.on("close", () => resolve(out.trim() === "" ? null : (JSON.parse(out) as HookOut)));
+      });
+      return {
+        go(): Promise<HookOut> {
+          child.stdin.end(JSON.stringify({ ...base, hook_event_name: event, ...extra }));
+          return finished;
+        },
+      };
+    },
     /** Runs `peer …` the way the agent's Bash tool would: its hook first, then what the hook made of it. */
     peer(...args: string[]) {
       const command = ["peer", ...args.map((a) => `"${a}"`)].join(" ");
@@ -607,6 +641,144 @@ function writeFakeModel() {
   );
 }
 
+// ---- two computers, one file, one moment (step 17) ----
+
+/** How many times step 17 races the two computers for a new file. */
+const RACE_RUNS = Math.max(1, Number(process.env.LAB_RACE_RUNS) || 20);
+
+/** Whether the hub decides edits (`/intent`): a hub from before it answers 404, or 405. */
+async function hubDecidesEdits(): Promise<boolean> {
+  const response = await fetch(`${hubUrl}/v1/workspaces/acme/coord/lab/intent`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${hubSession}` },
+    body: JSON.stringify({ environment: "lab-probe", session: "claude:lab-probe", paths: [] }),
+  });
+  await response.arrayBuffer();
+  return response.status !== 404 && response.status !== 405;
+}
+
+/** What the hub said of each file, in order, as a computer's Peer logged it: `intent` is its word, not the computer's. */
+function hubVerdicts(computer: Computer, sessions: ReadonlyArray<string>): Map<string, string[]> {
+  const byFile = new Map<string, string[]>();
+  for (const entry of events(computer)) {
+    if (entry.event !== "intent" || !sessions.includes(String(entry.session))) continue;
+    for (const one of entry.verdicts as ReadonlyArray<{ path: string; verdict: string }>) {
+      byFile.set(one.path, [...(byFile.get(one.path) ?? []), one.verdict]);
+    }
+  }
+  return byFile;
+}
+
+/**
+ * Ana's and Bob's agents run the PreToolUse hook for the same file nobody touched, started in the
+ * same moment on two computers. The hub decides each first edit in one step, so exactly one runs and
+ * the other is stopped before it edits; the one let through is stopped on its next edit of the file
+ * until it writes a note, and then passes. A new file each time.
+ */
+async function sameMomentEdits(ana: Computer, bob: Computer, runs: number) {
+  const agents = [
+    agent(ana, "lab-race-ana", "w7:p1"),
+    agent(bob, "lab-race-bob", "w7:p1"),
+  ] as const;
+  const sessions = ["claude:lab-race-ana", "claude:lab-race-bob"];
+  for (const one of agents) one.start();
+  // The hub knows the sessions its computers reported: let both be.
+  await sleep(1500);
+
+  // Alone on a file, an agent is cleared by the hub: the log shows it was asked, so this build of
+  // the computers' Peer asks the hub at all.
+  const [first] = agents;
+  const alone = first.edit("PreToolUse", "lab-race/probe.ts");
+  await sleep(300);
+  check(
+    decision(alone) === undefined &&
+      hubVerdicts(ana, sessions).get("lab-race/probe.ts")?.[0] === "clear",
+    "an agent alone on a file is cleared by the hub (the log has its word; if not, the server build predates Peer's intent calls: `vp pack` in apps/server)",
+  );
+
+  const files: string[] = [];
+  const walls: number[] = [];
+  for (let run = 0; run < runs; run += 1) {
+    const file = `lab-race/run-${run}.ts`;
+    files.push(file);
+    const expectRun = (ok: boolean, what: string, got: unknown) => {
+      if (!ok) {
+        throw new Error(
+          `run ${run + 1} of ${runs} (${file}): expected ${what}, got ${JSON.stringify(got)}`,
+        );
+      }
+    };
+    // Both hooks are started and wait for their event, which they get in the same tick.
+    const hooks = agents.map((one) =>
+      one.prepare("PreToolUse", {
+        tool_name: "Edit",
+        tool_input: { file_path: one.file(file), old_string: "a", new_string: "b" },
+      }),
+    );
+    await sleep(50);
+    const began = Date.now();
+    const outs = await Promise.all(hooks.map((hook) => hook.go()));
+    walls.push(Date.now() - began);
+    const stopped = outs.flatMap((out, at) => (decision(out) === "deny" ? [at] : []));
+    expectRun(
+      stopped.length === 1,
+      "exactly one of the two first edits stopped before it edits, the other let through",
+      outs,
+    );
+    const stoppedAt = stopped[0] ?? 0;
+    const stoppedAgent = agents[stoppedAt]!;
+    const passed = agents[1 - stoppedAt]!;
+    const why = reason(outs[stoppedAt] ?? null);
+    expectRun(why?.includes("note") === true, "the stopped agent told how to answer", why);
+    if (run === 0) told(`${stoppedAgent.name} (stopped at the same moment)`, why);
+
+    // The agent that was let through changes the file; the other's claim is on it too.
+    passed.edit("PostToolUse", file);
+    const again = passed.edit("PreToolUse", file);
+    expectRun(
+      decision(again) === "deny",
+      `${passed.name}'s next edit of the file stopped until it writes a note`,
+      again,
+    );
+    const noted = passed.peer("note", `I change ${file} first, the other agent leaves it to me`);
+    expectRun(noted.startsWith("Noted on overlap"), "its note to reach the overlap", noted);
+    const after = passed.edit("PreToolUse", file);
+    expectRun(decision(after) === undefined, "its edit to pass after its note", after);
+    // The stopped agent is not shut out for good: its own note lets it pass as well, and the next
+    // race starts with nothing unsettled between the two.
+    const answered = stoppedAgent.peer("note", `I leave ${file} to the other agent`);
+    expectRun(
+      answered.startsWith("Noted on overlap"),
+      "the stopped agent's note to reach the overlap",
+      answered,
+    );
+    const late = stoppedAgent.edit("PreToolUse", file);
+    expectRun(decision(late) === undefined, "the stopped agent to pass after its own note", late);
+  }
+  await sleep(300);
+  check(
+    files.every((file) => {
+      const firsts = [ana, bob].map((one) => hubVerdicts(one, sessions).get(file)?.[0] ?? "(none)");
+      return firsts.toSorted().join() === "clear,deny";
+    }),
+    `in each of ${runs} races the hub cleared one first edit and denied the other: it decided, not the computers' own views`,
+  );
+  const fellBack = [ana, bob].flatMap((one) =>
+    events(one).filter(
+      (entry) =>
+        /^intent\.(failed|legacy|unverified)$/.test(entry.event) &&
+        (entry.event === "intent.legacy" || sessions.includes(String(entry.session))),
+    ),
+  );
+  check(fellBack.length === 0, "the hub answered every one of them: no fallback was needed");
+  const ordered = walls.toSorted((a, b) => a - b);
+  say(
+    "the two first edits, from the same moment to both answers",
+    `p50 ${ordered[Math.floor(ordered.length / 2)]} ms, p95 ${ordered[Math.min(ordered.length - 1, Math.floor(ordered.length * 0.95))]} ms, max ${ordered.at(-1)} ms`,
+  );
+  for (const one of agents) one.hook("SessionEnd", { reason: "exit" });
+}
+
 const program = Effect.gen(function* () {
   yield* Effect.promise(() =>
     waitFor("the hub", async () => (await fetch(`${hubUrl}/health`)).ok, hub.output),
@@ -722,7 +894,9 @@ const program = Effect.gen(function* () {
     anaStart?.includes("You keep the shared context of lab (work outside tasks)") === true,
     "the first agent on a work keeps its shared context",
   );
-  const sharedPath = /You keep the shared context of .+? in (\S+\.md)\./.exec(anaStart ?? "")?.[1];
+  const sharedPath = /You keep the shared context of .+? in (\S+\.md)[.,]/.exec(
+    anaStart ?? "",
+  )?.[1];
   check(
     sharedPath !== undefined && NodeFS.existsSync(sharedPath),
     "Peer started it from a template",
@@ -772,11 +946,22 @@ const program = Effect.gen(function* () {
   told(`${bobs.name} (next step)`, changed);
   check(
     changed?.includes("changed (version 1, by Ana's agent") === true &&
-      changed.includes("applyVat()") &&
-      changed.includes("not instructions"),
-    "it hears the change at its next step, as reference from its team",
+      !changed.includes("applyVat()") &&
+      changed.includes("Read the current version: peer context") &&
+      changed.length < 1800,
+    "it hears a bounded version pointer at its next step without the full shared body",
   );
-  const bobOwn = /Peer keeps your working context in (\S+\.md)\./.exec(bobStart ?? "")?.[1];
+  const requestedShared = bobs.peer("context");
+  check(
+    requestedShared.includes("applyVat()") && requestedShared.includes("<shared-context>"),
+    "an explicit peer context request retrieves the full shared version as team reference",
+  );
+  const anaOwn = /Peer keeps your private working context in (\S+\.md),/.exec(anaStart ?? "")?.[1];
+  check(
+    anaOwn !== undefined && anaOwn !== sharedPath && NodeFS.existsSync(anaOwn),
+    "the keeper's private notes live apart from the shared context",
+  );
+  const bobOwn = /Peer keeps your private working context in (\S+\.md),/.exec(bobStart ?? "")?.[1];
   check(
     bobOwn !== undefined && NodeFS.existsSync(bobOwn),
     "the other agent keeps a working context of its own",
@@ -799,14 +984,25 @@ const program = Effect.gen(function* () {
   yield* Effect.promise(() => sleep(3500));
   const toKeeper = context(anas.edit("PostToolUse", "src/pricing.ts"));
   told(`${anas.name} (next step)`, toKeeper);
+  const findingNotice = toKeeper
+    ?.split("\n\n")
+    .find((part) => part.startsWith("Peer · for the shared context"));
   check(
-    toKeeper?.includes("you keep, your teammates' agents found") === true &&
-      toKeeper.includes("totalPrice() everywhere"),
-    "what the other agent found reaches the keeper, to fold in",
+    toKeeper?.includes("team findings await review") === true &&
+      findingNotice !== undefined &&
+      !findingNotice.includes("totalPrice() everywhere") &&
+      findingNotice.includes("peer context") &&
+      findingNotice.length < 600,
+    "the keeper hears a short notice of new team findings",
+  );
+  const requestedFindings = anas.peer("context");
+  check(
+    requestedFindings.includes("totalPrice() everywhere") && requestedFindings.includes("Bob ("),
+    "the keeper explicitly retrieves the original team finding with its author",
   );
   check(
     !(context(anas.edit("PostToolUse", "src/pricing.ts")) ?? "").includes(
-      "totalPrice() everywhere",
+      "team findings await review",
     ),
     "and reaches it once",
   );
@@ -866,15 +1062,17 @@ const program = Effect.gen(function* () {
   const keeperBack = context(anas.hook("SessionStart", { source: "compact" }));
   told(`${anas.name} (after a compaction)`, keeperBack);
   check(
-    keeperBack?.includes("the shared context as it stands (version 5;") === true &&
-      keeperBack.includes("applyVat()"),
-    "after a compaction the keeper gets the shared context back",
+    keeperBack?.includes("version 5;") === true &&
+      keeperBack.includes("Read: peer context") &&
+      !keeperBack.includes("applyVat()"),
+    "after compaction the keeper gets a current shared version pointer",
   );
   const readerBack = context(bobs.hook("SessionStart", { source: "compact" }));
   told(`${bobs.name} (after a compaction)`, readerBack);
   check(
     readerBack?.includes("renaming the callers in src/cart.ts") === true &&
-      readerBack.includes("kept by Ana's agent (version 5"),
+      readerBack.includes("version 5;") &&
+      readerBack.includes("Read: peer context"),
     "and the other agent its own context, with the shared one to read",
   );
 
@@ -911,10 +1109,16 @@ const program = Effect.gen(function* () {
   check(
     handed?.includes(
       "you (Bob's agent) keep the shared context of lab (work outside tasks) now",
-    ) === true && handed.includes("applyVat()"),
-    "it hears so at its next step, with the context as it stands",
+    ) === true &&
+      !handed.includes("applyVat()") &&
+      handed.includes("peer context"),
+    "it hears the takeover with a short pointer instead of an automatic full context",
   );
   check(decision(editShared(bobs, bobShared)) === "allow", "and may edit it now");
+  check(
+    bobs.peer("context").includes("applyVat()"),
+    "the new keeper explicitly reads the inherited shared version",
+  );
 
   // 9. What an agent marks for the project becomes a knowledge candidate people decide on.
   NodeFS.writeFileSync(
@@ -1215,7 +1419,7 @@ const program = Effect.gen(function* () {
       exporterStart.includes("no shared context yet"),
     "an agent on another task hears who works on the related task, on which computer",
   );
-  const namesPath = /You keep the shared context of KRK-7 · Speaker names in (\S+\.md)\./.exec(
+  const namesPath = /You keep the shared context of KRK-7 · Speaker names in (\S+\.md)[.,]/.exec(
     namerStart ?? "",
   )?.[1];
   check(namesPath !== undefined, "the keeper knows its task's context file");
@@ -1480,7 +1684,7 @@ const program = Effect.gen(function* () {
   git(bob.checkout, "checkout", "--quiet", "-b", "krk-12-bars");
   const statsAgent = agent(ana, "lab-ana-stats", "w4:p1");
   const statsStart = statsAgent.start().told;
-  const statsPath = /shared context of KRK-11 · .+? in (\/\S+\.md)\./.exec(statsStart ?? "")?.[1];
+  const statsPath = /shared context of KRK-11 · .+? in (\/\S+\.md)[.,]/.exec(statsStart ?? "")?.[1];
   check(statsPath !== undefined, "the agent on KRK-11 keeps its task's context");
   const statsLines = [
     "# KRK-11 · Speaker talk time",
@@ -1605,13 +1809,16 @@ const program = Effect.gen(function* () {
   check(
     barsHeard?.includes("KRK-11 · Speaker talk time") === true &&
       barsHeard.includes("a context you read, was written again (version 3, by Ana's agent)") &&
-      barsHeard.includes(
-        "+ - The talk time share is a percentage of the total speech, rounded to a whole number",
-      ) &&
-      barsHeard.includes("+ - Docs for the new route are regenerated with the usual script") &&
-      barsHeard.includes("- - Share is of the total speech, not of the media length") &&
-      barsHeard.includes("Read all of it: peer context KRK-11"),
-    "a context the agent read is reported when it changes: the lines that came and went, whatever they are about",
+      !barsHeard.includes("+ - The talk time share is a percentage") &&
+      !barsHeard.includes("+ - Docs for the new route") &&
+      barsHeard.includes("peer context KRK-11"),
+    "a context the agent read is reported by version and retrieval pointer when it changes",
+  );
+  const refreshedRead = barsAgent.peer("context", "KRK-11");
+  check(
+    refreshedRead.includes("rounded to a whole number") &&
+      refreshedRead.includes("Docs for the new route"),
+    "explicit reading of the updated shared version retrieves the actual changed data",
   );
   check(
     !context(
@@ -1889,6 +2096,17 @@ const program = Effect.gen(function* () {
     "`peer index` lists the work and the knowledge together",
   );
   kxAgent.hook("SessionEnd", { reason: "exit" });
+
+  // 17. Two computers edit one file at the same moment: the hub decides each first edit in one
+  //     step, so exactly one runs and the other is stopped before it edits.
+  if (yield* Effect.promise(hubDecidesEdits)) {
+    yield* Effect.promise(() => sameMomentEdits(ana, bob, RACE_RUNS));
+  } else {
+    observe(
+      false,
+      "step 17 (two computers edit one file at the same moment) was not run: this hub has no /intent (PEERHUB_BIN is from before the hub decides edits)",
+    );
+  }
 
   for (const computer of [ana, bob]) {
     const lines = NodeFS.readFileSync(computer.log, "utf8").trim().split("\n");

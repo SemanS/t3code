@@ -162,7 +162,7 @@ export const PeerTask = Schema.Struct({
   key: Schema.optional(Schema.String),
   title: Schema.String,
   area: Schema.optional(Schema.String),
-  status: Schema.Literals(["open", "done"]),
+  status: Schema.Literals(["open", "review", "done"]),
   createdBy: Schema.String,
   createdAt: Schema.String,
   updatedAt: Schema.String,
@@ -207,6 +207,9 @@ export const PeerLocalAgent = Schema.Struct({
   /** The workspace project whose checkout it runs in. */
   workspace: Schema.optional(Schema.String),
   projectId: Schema.optional(Schema.String),
+  coordinationLevel: Schema.optional(Schema.Literals(["A", "B", "C"])),
+  postHocPaths: Schema.optional(Schema.Array(Schema.String)),
+  postHocPathsTruncated: Schema.optional(Schema.Number),
 });
 export type PeerLocalAgent = typeof PeerLocalAgent.Type;
 
@@ -345,6 +348,15 @@ export type PeerJoinableWorkspace = typeof PeerJoinableWorkspace.Type;
 export const PeerCoordinationPolicy = Schema.Literals(["notify", "coordinate", "ask"]);
 export type PeerCoordinationPolicy = typeof PeerCoordinationPolicy.Type;
 
+/**
+ * What a project asks of its agents. A person's Settings pick one of the first
+ * three for their computer, which only counts where the project sets none;
+ * `exclusive` is the project's alone: nobody changes a file another live
+ * session holds.
+ */
+export const PeerProjectPolicy = Schema.Literals(["notify", "coordinate", "ask", "exclusive"]);
+export type PeerProjectPolicy = typeof PeerProjectPolicy.Type;
+
 /** An agent session at work on a workspace project, as coordination sees it. */
 export const PeerCoordSession = Schema.Struct({
   /** `claude:<session id>` */
@@ -353,6 +365,7 @@ export const PeerCoordSession = Schema.Struct({
   workspace: Schema.String,
   project: Schema.String,
   email: Schema.String,
+  environment: Schema.optional(Schema.String),
   label: Schema.String,
   agent: Schema.optional(Schema.String),
   task: Schema.optional(Schema.String),
@@ -368,6 +381,14 @@ export const PeerCoordSession = Schema.Struct({
   activeAt: Schema.optional(Schema.String),
 });
 export type PeerCoordSession = typeof PeerCoordSession.Type;
+
+/** What the hub keeps of an overlap's acknowledgements; a hub from before them has none. */
+const overlapAcknowledgements = {
+  /** When the files it covers last changed: an acknowledgement counts only from then on. */
+  filesAt: Schema.optional(Schema.String),
+  /** When each of its sessions acknowledged it, by session id; a note counts as one. */
+  acks: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+};
 
 /**
  * Two agent sessions changing the same files. Its notes are the one thing
@@ -392,12 +413,79 @@ export const PeerOverlap = Schema.Struct({
     }),
   ),
   updatedAt: Schema.String,
+  ...overlapAcknowledgements,
   /** The agent session that closes it once its agents agree. */
   closer: Schema.optional(Schema.String),
   /** When a person asked its agents to settle it, unless an agent wrote since. */
   askedAt: Schema.optional(Schema.String),
 });
 export type PeerOverlap = typeof PeerOverlap.Type;
+
+/** An overlap as the hub keeps it, which the coordination view and `intent` carry. */
+export const PeerOverlapRecord = Schema.Struct({
+  id: Schema.String,
+  project: Schema.String,
+  sessions: Schema.Array(Schema.String),
+  files: Schema.Array(Schema.String),
+  state: Schema.Literals(["open", "resolved"]),
+  resolution: Schema.optional(Schema.String),
+  resolvedFiles: Schema.optional(Schema.Array(Schema.String)),
+  notes: PeerOverlap.fields.notes,
+  ...overlapAcknowledgements,
+  openedAt: Schema.String,
+  updatedAt: Schema.String,
+});
+export type PeerOverlapRecord = typeof PeerOverlapRecord.Type;
+
+/**
+ * An agent about to change files asks the hub, which decides in one step: it
+ * registers the session as a holder of each path, opens or extends the
+ * overlaps with the other live sessions on it, and answers per path.
+ */
+export const PeerIntentRequest = Schema.Struct({
+  environment: Schema.String,
+  /** The agent session, `<agent>:<id>`. */
+  session: Schema.String,
+  /** Relative to the repository; at most 50. */
+  paths: Schema.Array(Schema.String),
+  /** This computer's own policy: it counts only where the project sets none. */
+  policy: Schema.optional(PeerCoordinationPolicy),
+  /** Names this command, so repeating it has no further effect. */
+  op: Schema.optional(Schema.String),
+});
+export type PeerIntentRequest = typeof PeerIntentRequest.Type;
+
+/**
+ * What the hub decided about one path: `clear` (nobody else, or everything
+ * acknowledged), `notify`, `deny` (`coordinate` and not acknowledged), `ask`
+ * (the agent's person decides), `held` (`exclusive` and another live session
+ * holds it).
+ */
+export const PeerIntentVerdictKind = Schema.Literals(["clear", "notify", "deny", "ask", "held"]);
+export type PeerIntentVerdictKind = typeof PeerIntentVerdictKind.Type;
+
+export const PeerIntentVerdict = Schema.Struct({
+  path: Schema.String,
+  verdict: PeerIntentVerdictKind,
+  /** The other live sessions on the path. */
+  with: Schema.Array(Schema.String),
+  /** The overlaps (ids) with them, in `PeerIntentResponse.overlaps`. */
+  overlaps: Schema.Array(Schema.String),
+  /** For `held`: the session that holds the path. */
+  holder: Schema.optional(Schema.String),
+});
+export type PeerIntentVerdict = typeof PeerIntentVerdict.Type;
+
+export const PeerIntentResponse = Schema.Struct({
+  /** The policy that decided, and whether the project set it or this computer's default did. */
+  policy: PeerProjectPolicy,
+  policySource: Schema.Literals(["project", "client"]),
+  verdicts: Schema.Array(PeerIntentVerdict),
+  /** The overlaps the verdicts name, in full. */
+  overlaps: Schema.Array(PeerOverlapRecord),
+  at: Schema.String,
+});
+export type PeerIntentResponse = typeof PeerIntentResponse.Type;
 
 /** Agents on the same project staying out of each other's way (experimental). */
 /** What an agent found for its team: a line of the "For the team" part of its working context. */
@@ -508,6 +596,7 @@ export const PeerContextKeeper = Schema.Struct({
   email: Schema.String,
   environment: Schema.String,
   since: Schema.String,
+  epoch: Schema.optional(Schema.Number),
 });
 export type PeerContextKeeper = typeof PeerContextKeeper.Type;
 
@@ -522,6 +611,7 @@ export const PeerWorkContext = Schema.Struct({
   scope: Schema.String,
   /** 0 until its first keeper writes it. */
   version: Schema.Number,
+  epoch: Schema.optional(Schema.Number),
   keeper: Schema.optional(PeerContextKeeper),
   updatedAt: Schema.String,
   /** Who wrote this version: the keeper's person, or the person who brought an older one back. */
@@ -601,6 +691,7 @@ export const PeerCoordinationState = Schema.Struct({
   policy: PeerCoordinationPolicy,
   /** Claude Code runs Peer's coordination hooks. */
   claudeHooks: Schema.Boolean,
+  claudeMod: Schema.optional(Schema.Boolean),
   /** Codex runs Peer's coordination hooks; absent from a Peer that cannot add them. */
   codexHooks: Schema.optional(Schema.Boolean),
   /** Codex trusts Peer's hooks (its person approved them in Codex); only while they are added. */
@@ -663,6 +754,7 @@ export const PeerHubStatus = Schema.Struct({
   agents: Schema.Struct({
     herdr: Schema.Literals(["running", "not-running"]),
     list: Schema.Array(PeerLocalAgent),
+    postHocSkipped: Schema.optional(Schema.Number),
   }),
   github: PeerGitHubState,
   coordination: PeerCoordinationState,
@@ -747,7 +839,7 @@ export const PeerHubUpdateTaskInput = Schema.Struct({
   title: Schema.optional(TrimmedNonEmptyString),
   /** An empty string clears it. */
   area: Schema.optional(Schema.String),
-  status: Schema.optional(Schema.Literals(["open", "done"])),
+  status: Schema.optional(Schema.Literals(["open", "review", "done"])),
 });
 export type PeerHubUpdateTaskInput = typeof PeerHubUpdateTaskInput.Type;
 
@@ -768,6 +860,7 @@ export const PeerHubAssignThreadInput = Schema.Struct({
 export type PeerHubAssignThreadInput = typeof PeerHubAssignThreadInput.Type;
 
 export const PeerHubSetCoordinationInput = Schema.Struct({
+  claudeMod: Schema.optional(Schema.Boolean),
   enabled: Schema.optional(Schema.Boolean),
   policy: Schema.optional(PeerCoordinationPolicy),
   /** Add Peer's hooks to Claude Code's user settings, or take them out. */
@@ -829,6 +922,88 @@ export const PeerHubContextInput = Schema.Struct({
   version: Schema.optional(Schema.Number),
 });
 export type PeerHubContextInput = typeof PeerHubContextInput.Type;
+
+/** One committed coordination transition, with its participants and exact context version. */
+export const PeerCoordEvent = Schema.Struct({
+  id: Schema.String,
+  kind: Schema.String,
+  project: Schema.String,
+  at: Schema.String,
+  email: Schema.optional(Schema.String),
+  session: Schema.optional(Schema.String),
+  environment: Schema.optional(Schema.String),
+  task: Schema.optional(Schema.String),
+  scope: Schema.optional(Schema.String),
+  paths: Schema.Array(Schema.String),
+  overlap: Schema.optional(Schema.String),
+  version: Schema.optional(Schema.Number),
+  epoch: Schema.optional(Schema.Number),
+  participants: Schema.Array(Schema.String),
+  op: Schema.optional(Schema.String),
+});
+export type PeerCoordEvent = typeof PeerCoordEvent.Type;
+
+export const PeerContextRead = Schema.Struct({
+  project: Schema.String,
+  scope: Schema.String,
+  session: Schema.String,
+  environment: Schema.String,
+  version: Schema.Number,
+  at: Schema.String,
+});
+export type PeerContextRead = typeof PeerContextRead.Type;
+
+export const PeerStaleReads = Schema.Struct({
+  fresh: Schema.Boolean,
+  stale: Schema.Array(
+    Schema.Struct({
+      project: Schema.String,
+      scope: Schema.String,
+      readVersion: Schema.Number,
+      currentVersion: Schema.Number,
+      at: Schema.String,
+      updatedAt: Schema.String,
+    }),
+  ),
+});
+export type PeerStaleReads = typeof PeerStaleReads.Type;
+
+export const PeerHubCoordEventsInput = Schema.Struct({
+  workspace: TrimmedNonEmptyString,
+  project: TrimmedNonEmptyString,
+  task: Schema.optional(TrimmedNonEmptyString),
+  path: Schema.optional(TrimmedNonEmptyString),
+  limit: Schema.optional(
+    Schema.Number.check(Schema.isInt(), Schema.isBetween({ minimum: 1, maximum: 500 })),
+  ),
+  revision: Schema.optional(Schema.String),
+});
+export type PeerHubCoordEventsInput = typeof PeerHubCoordEventsInput.Type;
+
+export const PeerHubStaleReadsInput = Schema.Struct({
+  workspace: TrimmedNonEmptyString,
+  project: TrimmedNonEmptyString,
+  session: TrimmedNonEmptyString,
+  environment: TrimmedNonEmptyString,
+  revision: Schema.optional(Schema.String),
+});
+export type PeerHubStaleReadsInput = typeof PeerHubStaleReadsInput.Type;
+
+export const PeerHubStartAgentInput = Schema.Struct({
+  workspace: TrimmedNonEmptyString,
+  projectId: TrimmedNonEmptyString,
+  taskId: TrimmedNonEmptyString,
+  repositoryId: TrimmedNonEmptyString,
+  harness: Schema.Literals(["claude", "codex"]),
+  prompt: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(20_000))),
+});
+export type PeerHubStartAgentInput = typeof PeerHubStartAgentInput.Type;
+export const PeerHubStartAgentResult = Schema.Struct({
+  paneId: Schema.String,
+  terminalId: Schema.String,
+  promptError: Schema.optional(Schema.String),
+});
+export type PeerHubStartAgentResult = typeof PeerHubStartAgentResult.Type;
 
 /** A project's knowledge candidates; `waiting` is the count the caller knows of, so a new one reads again. */
 export const PeerHubCandidatesInput = Schema.Struct({

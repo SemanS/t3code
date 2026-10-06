@@ -381,6 +381,12 @@ import {
   PeerContextVersionText,
   PeerWorkContextText,
   PeerHubPromptAgentInput,
+  PeerHubStartAgentInput,
+  PeerHubStartAgentResult,
+  PeerHubCoordEventsInput,
+  PeerHubStaleReadsInput,
+  PeerCoordEvent,
+  PeerStaleReads,
   PeerHubShareThreadInput,
 } from "./peerHub.ts";
 import {
@@ -566,6 +572,9 @@ export const WS_METHODS = {
   peerHubFocusAgent: "peerHub.focusAgent",
   peerHubWatchAgent: "peerHub.watchAgent",
   peerHubPromptAgent: "peerHub.promptAgent",
+  peerHubStartAgent: "peerHub.startAgent",
+  peerHubCoordEvents: "peerHub.coordEvents",
+  peerHubStaleReads: "peerHub.staleReads",
   peerHubShareThread: "peerHub.shareThread",
   peerHubObserveThread: "peerHub.observeThread",
   peerHubReadContext: "peerHub.readContext",
@@ -1981,6 +1990,22 @@ const WsPeerHubPromptAgentRpc = Rpc.make(WS_METHODS.peerHubPromptAgent, {
   error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
 });
 
+const WsPeerHubStartAgentRpc = Rpc.make(WS_METHODS.peerHubStartAgent, {
+  payload: PeerHubStartAgentInput,
+  success: PeerHubStartAgentResult,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+const WsPeerHubCoordEventsRpc = Rpc.make(WS_METHODS.peerHubCoordEvents, {
+  payload: PeerHubCoordEventsInput,
+  success: Schema.Array(PeerCoordEvent),
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+const WsPeerHubStaleReadsRpc = Rpc.make(WS_METHODS.peerHubStaleReads, {
+  payload: PeerHubStaleReadsInput,
+  success: PeerStaleReads,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
 const WsPeerHubShareThreadRpc = Rpc.make(WS_METHODS.peerHubShareThread, {
   payload: PeerHubShareThreadInput,
   success: PeerHubStatus,
@@ -2235,6 +2260,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsPeerHubFocusAgentRpc,
   WsPeerHubWatchAgentRpc,
   WsPeerHubPromptAgentRpc,
+  WsPeerHubStartAgentRpc,
+  WsPeerHubCoordEventsRpc,
+  WsPeerHubStaleReadsRpc,
   WsPeerHubShareThreadRpc,
   WsPeerHubObserveThreadRpc,
   WsPeerHubReadContextRpc,

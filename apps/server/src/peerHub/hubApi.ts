@@ -9,8 +9,14 @@ import {
   PeerFoundWorkspace,
   PeerHubError,
   PeerHubProjectUsage,
+  PeerIntentRequest,
+  PeerIntentResponse,
   PeerManifest,
+  PeerOverlapRecord,
   PeerTask,
+  PeerCoordEvent,
+  PeerContextRead,
+  PeerStaleReads,
   PeerWorkThread,
   PeerWorkPullRequest,
   PeerWorkspaceRole,
@@ -111,26 +117,7 @@ const HubCoordSession = Schema.Struct({
 });
 export type HubCoordSession = typeof HubCoordSession.Type;
 
-const HubOverlap = Schema.Struct({
-  id: Schema.String,
-  project: Schema.String,
-  sessions: Schema.Array(Schema.String),
-  files: Schema.Array(Schema.String),
-  state: Schema.Literals(["open", "resolved"]),
-  resolution: Schema.optional(Schema.String),
-  resolvedFiles: Schema.optional(Schema.Array(Schema.String)),
-  notes: Schema.Array(
-    Schema.Struct({
-      id: Schema.String,
-      session: Schema.optional(Schema.String),
-      email: Schema.String,
-      text: Schema.String,
-      at: Schema.String,
-    }),
-  ),
-  openedAt: Schema.String,
-  updatedAt: Schema.String,
-});
+const HubOverlap = PeerOverlapRecord;
 export type HubOverlap = typeof HubOverlap.Type;
 
 const HubFinding = Schema.Struct({
@@ -152,6 +139,7 @@ const HubContextKeeper = Schema.Struct({
   email: Schema.String,
   environment: Schema.String,
   since: Schema.String,
+  epoch: Schema.optional(Schema.Number),
 });
 export type HubContextKeeper = typeof HubContextKeeper.Type;
 
@@ -160,6 +148,7 @@ const HubContext = Schema.Struct({
   project: Schema.String,
   scope: Schema.String,
   version: Schema.Number,
+  epoch: Schema.optional(Schema.Number),
   keeper: Schema.optional(HubContextKeeper),
   updatedAt: Schema.String,
   updatedBy: Schema.optional(Schema.String),
@@ -218,6 +207,12 @@ const CoordView = Schema.Struct({
   candidates: Schema.optional(
     Schema.Array(Schema.Struct({ project: Schema.String, proposed: Schema.Number })),
   ),
+  /**
+   * The policy each project sets (see `PeerProjectPolicy`); a project without one is not listed, and a
+   * hub from before project policies sends none. Read with `projectPolicy`: a newer hub may name a policy
+   * this Peer does not know, which must not cost it the whole view.
+   */
+  policies: Schema.optional(Schema.Record(Schema.String, Schema.String)),
   at: Schema.String,
 });
 
@@ -255,6 +250,17 @@ const HubKnowledgeCandidate = Schema.Struct({
 });
 export type HubKnowledgeCandidate = typeof HubKnowledgeCandidate.Type;
 export type HubCoordView = typeof CoordView.Type;
+
+export type HubIntentRequest = PeerIntentRequest;
+export type HubIntentAnswer = PeerIntentResponse;
+export type HubIntentVerdict = PeerIntentResponse["verdicts"][number];
+
+/** What an answer is when the hub has no such route: a hub from before it. Not an error. */
+export interface HubUnsupported {
+  readonly unsupported: true;
+}
+const UNSUPPORTED: HubUnsupported = { unsupported: true };
+export const isUnsupported = (answer: object): answer is HubUnsupported => "unsupported" in answer;
 
 /** One agent session as this environment reports it for coordination. */
 export interface ReportedSession {
@@ -348,8 +354,15 @@ export const make = Effect.gen(function* () {
       readonly body?: unknown;
       /** What a 404 means instead of an error, e.g. "no such workspace". */
       readonly notFound?: { readonly value: Missing };
+      /**
+       * What a hub without this route means: it answers 404, or 405 where the path exists for other
+       * methods, often with no JSON at all.
+       */
+      readonly unsupported?: { readonly value: Missing };
       /** What a 409 means instead of an error, from its code and details; undefined: an error. */
       readonly conflict?: (code: string, details: unknown) => Missing | undefined;
+      /** How long to wait for the hub to answer, in milliseconds; 20 seconds when absent. */
+      readonly timeoutMs?: number;
     },
   ): Effect.Effect<S["Type"] | Missing, PeerHubError> =>
     Effect.gen(function* () {
@@ -373,11 +386,14 @@ export const make = Effect.gen(function* () {
           ? withAuth
           : withAuth.pipe(HttpClientRequest.bodyJsonUnsafe(input.body));
       const response = yield* client.execute(prepared).pipe(
-        Effect.timeout("20 seconds"),
+        Effect.timeout(input.timeoutMs ?? 20_000),
         Effect.mapError(
           () => new PeerHubError({ detail: `Could not reach the hub at ${input.hubUrl}.` }),
         ),
       );
+      if (input.unsupported !== undefined && (response.status === 404 || response.status === 405)) {
+        return input.unsupported.value;
+      }
       const json = yield* response.json.pipe(
         Effect.mapError(
           () =>
@@ -588,7 +604,7 @@ export const make = Effect.gen(function* () {
       slug: string,
       project: string,
       overlap: string,
-      body: { readonly session?: string; readonly text: string },
+      body: { readonly session?: string; readonly text: string; readonly op?: string },
     ) =>
       request(HubOverlap, {
         hubUrl,
@@ -604,7 +620,7 @@ export const make = Effect.gen(function* () {
       slug: string,
       project: string,
       overlap: string,
-      body: { readonly session?: string; readonly resolution: string },
+      body: { readonly session?: string; readonly resolution: string; readonly op?: string },
     ) =>
       request(HubOverlap, {
         hubUrl,
@@ -612,6 +628,47 @@ export const make = Effect.gen(function* () {
         method: "POST",
         session,
         body,
+      }),
+
+    /**
+     * An agent about to change files asks the hub, which registers it as their holder and decides in
+     * one step (see `PeerIntentResponse`). Unsupported: a hub from before it. Fails when the hub does
+     * not answer within `timeoutMs`, or refuses.
+     */
+    intent: (
+      hubUrl: string,
+      session: string,
+      slug: string,
+      project: string,
+      body: PeerIntentRequest,
+      options: { readonly timeoutMs?: number } = {},
+    ) =>
+      request(PeerIntentResponse, {
+        hubUrl,
+        path: workspacePath(slug, `/coord/${segment(project)}/intent`),
+        method: "POST",
+        session,
+        body,
+        unsupported: { value: UNSUPPORTED },
+        ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      }),
+
+    /** An agent session acknowledges an overlap (a note counts as one too). Unsupported: a hub from before it. */
+    ack: (
+      hubUrl: string,
+      session: string,
+      slug: string,
+      project: string,
+      overlap: string,
+      body: { readonly session: string; readonly op?: string; readonly filesAt?: string },
+    ) =>
+      request(HubOverlap, {
+        hubUrl,
+        path: workspacePath(slug, `/coord/${segment(project)}/${segment(overlap)}/ack`),
+        method: "POST",
+        session,
+        body,
+        unsupported: { value: UNSUPPORTED },
       }),
 
     /** A task's shared context with its text, or null when it has none. */
@@ -733,7 +790,13 @@ export const make = Effect.gen(function* () {
       slug: string,
       project: string,
       scope: string,
-      body: { readonly environment: string; readonly session: string; readonly release?: boolean },
+      body: {
+        readonly environment: string;
+        readonly session: string;
+        readonly release?: boolean;
+        readonly epoch?: number;
+        readonly op?: string;
+      },
     ) =>
       request(HubContextText, {
         hubUrl,
@@ -750,6 +813,65 @@ export const make = Effect.gen(function* () {
       }),
 
     /** A new version from the session keeping a context, written on `baseVersion`. */
+    contextRead: (
+      hubUrl: string,
+      session: string,
+      slug: string,
+      project: string,
+      scope: string,
+      body: {
+        readonly session: string;
+        readonly environment: string;
+        readonly version: number;
+        readonly op?: string;
+      },
+    ) =>
+      request(PeerContextRead, {
+        hubUrl,
+        session,
+        method: "POST",
+        path: workspacePath(slug, `/contexts/${segment(project)}/${segment(scope)}/read`),
+        body,
+      }),
+
+    staleReads: (
+      hubUrl: string,
+      session: string,
+      slug: string,
+      project: string,
+      reader: { readonly session: string; readonly environment: string },
+    ) =>
+      request(PeerStaleReads, {
+        hubUrl,
+        session,
+        path: workspacePath(
+          slug,
+          `/coord/${segment(project)}/stale?session=${segment(reader.session)}&environment=${segment(reader.environment)}`,
+        ),
+      }),
+
+    coordEvents: (
+      hubUrl: string,
+      session: string,
+      slug: string,
+      project: string,
+      filter: { readonly task?: string; readonly path?: string; readonly limit?: number } = {},
+    ) => {
+      const query = [
+        ...(filter.task === undefined ? [] : [`task=${segment(filter.task)}`]),
+        ...(filter.path === undefined ? [] : [`path=${segment(filter.path)}`]),
+        ...(filter.limit === undefined ? [] : [`limit=${filter.limit}`]),
+      ].join("&");
+      return request(Schema.Array(PeerCoordEvent), {
+        hubUrl,
+        session,
+        path: workspacePath(
+          slug,
+          `/coord/${segment(project)}/events${query === "" ? "" : `?${query}`}`,
+        ),
+      });
+    },
+
     writeContext: (
       hubUrl: string,
       session: string,
@@ -761,6 +883,8 @@ export const make = Effect.gen(function* () {
         readonly session: string;
         readonly baseVersion: number;
         readonly text: string;
+        readonly epoch?: number;
+        readonly op?: string;
       },
     ) =>
       request(HubContextText, {
@@ -807,7 +931,10 @@ export const make = Effect.gen(function* () {
       body: {
         readonly title?: string;
         readonly area?: string;
-        readonly status?: "open" | "done";
+        readonly status?: "open" | "review" | "done";
+        readonly session?: string;
+        readonly environment?: string;
+        readonly op?: string;
       },
     ) =>
       request(PeerTask, {

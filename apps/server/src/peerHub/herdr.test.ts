@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off - a fake herdr server on a Unix socket, speaking its newline-delimited JSON.
 import * as NodeFS from "node:fs";
+import * as NodeChildProcess from "node:child_process";
 import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -8,12 +9,18 @@ import { afterEach, assert, describe, it } from "@effect/vitest";
 
 import {
   followHerdrAgents,
+  boundHerdrObservations,
   herdrNotIdleHint,
   herdrWorkStatus,
+  herdrStatusPaths,
+  HerdrCompletionTracker,
   listHerdrAgents,
   readHerdrAgent,
   startHerdrAgent,
+  prepareHerdrTaskWorktree,
+  readHerdrChangedPaths,
   watchHerdrAgents,
+  wakeHerdrAgent,
   type HerdrWatchEnd,
 } from "./herdr.ts";
 
@@ -41,6 +48,152 @@ const line = (message: object) => `${JSON.stringify(message)}\n`;
 const listening: Array<() => Promise<void>> = [];
 afterEach(async () => {
   for (const stop of listening.splice(0)) await stop();
+});
+
+describe("herdr completion observations", () => {
+  it("keeps every live enforcement session and shows how many observations could not fit", () => {
+    const primary = Array.from({ length: 49 }, (_, index) => `hook-${index}`);
+    assert.deepStrictEqual(boundHerdrObservations(primary, ["observed-1", "observed-2"]), {
+      sessions: [...primary, "observed-1"],
+      skipped: 1,
+    });
+    const full = [...primary, "hook-49"];
+    assert.deepStrictEqual(boundHerdrObservations(full, ["observed-1"]), {
+      sessions: full,
+      skipped: 1,
+    });
+    assert.deepStrictEqual(
+      boundHerdrObservations([...full, "hook-50"], ["observed-1"]),
+      { sessions: [...full, "hook-50"], skipped: 1 },
+      "An existing enforcement session is never silently discarded to fit observations",
+    );
+  });
+  it("detects each completed turn once, including one wholly between polls, and separates conversations", () => {
+    const tracker = new HerdrCompletionTracker();
+    const agent = {
+      terminalId: "t1",
+      paneId: "p1",
+      agent: "claude",
+      title: "agent",
+      status: "idle" as const,
+      completionSeq: undefined,
+      cwd: "/work",
+      session: { id: "s1", path: undefined },
+    };
+    assert.strictEqual(tracker.completed(agent), false, "startup idle is not completed work");
+    assert.strictEqual(tracker.completed({ ...agent, completionSeq: 10 }), true);
+    assert.strictEqual(tracker.completed({ ...agent, completionSeq: 10 }), false);
+    assert.strictEqual(tracker.completed({ ...agent, completionSeq: 11 }), true);
+    assert.strictEqual(tracker.completed({ ...agent, status: "working" }), false);
+    assert.strictEqual(tracker.completed(agent), true, "old servers need an observed working edge");
+    assert.strictEqual(
+      tracker.completed({ ...agent, session: { id: "s2", path: undefined } }),
+      false,
+      "a switched conversation starts a new observation",
+    );
+  });
+
+  it("preserves spaces, newlines and both sides of renames without shell parsing", () => {
+    assert.deepStrictEqual(
+      herdrStatusPaths(" M src/a b.ts\0R  new\nname.ts\0old name.ts\0?? $(private).txt\0"),
+      ["$(private).txt", "new\nname.ts", "old name.ts", "src/a b.ts"],
+    );
+  });
+});
+
+describe("task worktree", () => {
+  it("creates a feature branch for the issue and observes only the agent's checkout", async () => {
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "peer-task-"));
+    listening.push(async () => NodeFS.rmSync(directory, { recursive: true, force: true }));
+    const checkout = NodePath.join(directory, "checkout");
+    NodeFS.mkdirSync(checkout);
+    const git = (...args: string[]) =>
+      NodeChildProcess.execFileSync("git", ["-C", checkout, ...args], { encoding: "utf8" });
+    git("init", "-b", "main");
+    NodeFS.writeFileSync(NodePath.join(checkout, "base.ts"), "base\n");
+    git("add", ".");
+    git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "base");
+    NodeFS.writeFileSync(NodePath.join(checkout, "base.ts"), "person's work\n");
+    const tree = await prepareHerdrTaskWorktree({
+      checkout,
+      baseBranch: "main",
+      worktrees: NodePath.join(directory, "trees"),
+      task: "KRK-812",
+    });
+    assert.match(tree.branch, /^feature\/KRK-812-[a-f0-9]{8}$/);
+    assert.strictEqual(NodeFS.readFileSync(NodePath.join(tree.cwd, "base.ts"), "utf8"), "base\n");
+    assert.deepStrictEqual(await readHerdrChangedPaths(tree.cwd), []);
+    NodeFS.writeFileSync(NodePath.join(tree.cwd, "a b.ts"), "agent's work\n");
+    assert.deepStrictEqual(await readHerdrChangedPaths(tree.cwd), ["a b.ts"]);
+    assert.strictEqual(
+      NodeFS.readFileSync(NodePath.join(checkout, "base.ts"), "utf8"),
+      "person's work\n",
+    );
+  });
+});
+
+describe("wakeHerdrAgent", () => {
+  const expected = {
+    terminalId: "t-w1:p1",
+    paneId: "w1:p1",
+    agent: "claude",
+    title: "agent",
+    status: "idle" as const,
+    completionSeq: 12,
+    cwd: "/work",
+    session: { id: "s1", path: undefined },
+  };
+  const current = (extra: Record<string, unknown> = {}) =>
+    agentInfo("w1:p1", {
+      agent_session: { kind: "id", value: "s1" },
+      completion_seq: 12,
+      name: "peer-one",
+      ...extra,
+    });
+
+  it("rechecks identity then uses the live name for a moved pane", async () => {
+    const herdr = await fakeHerdr((request) =>
+      request.method === "agent.list"
+        ? { result: agentList([current({ pane_id: "w2:p2" })]) }
+        : { result: {} },
+    );
+    assert.deepStrictEqual(
+      await wakeHerdrAgent(expected, "[Peer coordination update]", herdr.socketPath),
+      { status: "queued" },
+    );
+    assert.deepStrictEqual(herdr.requests[1]?.params, {
+      target: "peer-one",
+      text: "[Peer coordination update]",
+    });
+  });
+
+  it("does not send to a new conversation or one that started working meanwhile", async () => {
+    for (const extra of [
+      { agent_session: { kind: "id", value: "s2" } },
+      { agent_status: "working" },
+      { completion_seq: 13 },
+    ]) {
+      const herdr = await fakeHerdr(() => ({ result: agentList([current(extra)]) }));
+      assert.strictEqual(
+        (await wakeHerdrAgent(expected, "marker", herdr.socketPath)).status,
+        "unavailable",
+      );
+      assert.strictEqual(herdr.count("agent.prompt"), 0);
+    }
+  });
+
+  it("does not report delivery or retry after a submitted prompt loses its reply", async () => {
+    const herdr = await fakeHerdr((request, connection) => {
+      if (request.method === "agent.list") return { result: agentList([current()]) };
+      connection.end();
+      return undefined;
+    });
+    assert.strictEqual(
+      (await wakeHerdrAgent(expected, "marker", herdr.socketPath)).status,
+      "uncertain",
+    );
+    assert.strictEqual(herdr.count("agent.prompt"), 1);
+  });
 });
 
 /** A herdr server that answers every request the way `answer` says, and keeps a record of them. */
@@ -827,6 +980,36 @@ describe("startHerdrAgent", () => {
     assert.strictEqual(herdr.count("agent.prompt"), 0);
     assert.strictEqual(herdr.count("workspace.close"), 0);
     await herdr.stop();
+  });
+
+  it("keeps the new pane when the launch reply is lost, and does not repeat the start", async () => {
+    const uncertain = await fakeHerdr((request, connection) => {
+      if (request.method === "workspace.list")
+        return { result: { type: "workspace_list", workspaces: [] } };
+      if (request.method === "workspace.create")
+        return {
+          result: {
+            type: "workspace_created",
+            workspace: { workspace_id: "w2" },
+            root_pane: { pane_id: "w2:p1", terminal_id: "t-w2:p1" },
+          },
+        };
+      if (request.method === "agent.start") {
+        connection.end();
+        return undefined;
+      }
+      return { result: {} };
+    });
+    const failure = await startHerdrAgent(
+      { cwd, harness: "claude" },
+      { socketPath: uncertain.socketPath, ...fast },
+    ).then(
+      () => assert.fail("The missing reply cannot confirm a launch"),
+      (error: unknown) => error,
+    );
+    assert.match((failure as Error).message, /Inspect pane w2:p1/);
+    assert.strictEqual(uncertain.count("agent.start"), 1);
+    assert.strictEqual(uncertain.count("workspace.close"), 0);
   });
 
   it("keeps the pane of an agent that never became interactive, and names it", async () => {

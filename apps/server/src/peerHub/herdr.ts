@@ -10,7 +10,9 @@
  * @module peerHub/herdr
  */
 import * as NodeCrypto from "node:crypto";
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
+import * as NodeFSP from "node:fs/promises";
 import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -18,11 +20,14 @@ import * as NodePath from "node:path";
 import type { PeerWorkStatus } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import { isSafeGitRef } from "./gitSafety.ts";
 
 export interface HerdrAgent {
   /** Stable while the terminal lives; pane ids move when panes do. */
   readonly terminalId: string;
   readonly paneId: string;
+  /** A live name follows the current occupant; prefer it to a pane when prompting. */
+  readonly name?: string | undefined;
   readonly agent: string | undefined;
   readonly title: string;
   readonly status: PeerWorkStatus;
@@ -98,6 +103,14 @@ class HerdrRefused extends Error {
   }
 }
 
+class HerdrTransportError extends Error {
+  readonly submitted: boolean;
+  constructor(message: string, submitted: boolean) {
+    super(message);
+    this.submitted = submitted;
+  }
+}
+
 /** The refusal in an error reply; replies from other herdr versions may leave out the code. */
 function refusalOf(error: unknown): HerdrRefused {
   const body = typeof error === "object" && error !== null ? error : {};
@@ -119,16 +132,27 @@ function call(
     const id = `peer-${NodeCrypto.randomUUID()}`;
     const socket = NodeNet.createConnection(socketPath);
     let buffer = "";
+    let submitted = false;
+    let settled = false;
     const finish = (error: Error | null, result?: unknown) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       socket.destroy();
-      if (error) reject(error);
+      if (error)
+        reject(
+          error instanceof HerdrRefused ? error : new HerdrTransportError(error.message, submitted),
+        );
       else resolve(result);
     };
     const timer = setTimeout(() => finish(new Error("herdr did not answer")), timeoutMs);
     socket.setEncoding("utf8");
-    socket.on("connect", () => socket.write(`${JSON.stringify({ id, method, params })}\n`));
+    socket.on("connect", () => {
+      submitted = true;
+      socket.write(`${JSON.stringify({ id, method, params })}\n`);
+    });
     socket.on("error", (error) => finish(error));
+    socket.on("close", () => finish(new Error("herdr closed the connection before answering")));
     socket.on("data", (chunk: string) => {
       buffer += chunk;
       for (let newline = buffer.indexOf("\n"); newline >= 0; newline = buffer.indexOf("\n")) {
@@ -176,6 +200,7 @@ export async function listHerdrAgents(
   return decoded.value.agents.map((info) => ({
     terminalId: info.terminal_id,
     paneId: info.pane_id,
+    ...(pick(info.name) === undefined ? {} : { name: pick(info.name) }),
     agent: pick(info.agent),
     title:
       pick(info.title, info.terminal_title_stripped, info.name, info.display_agent, info.agent) ??
@@ -269,6 +294,110 @@ export async function promptHerdrAgent(
   socketPath: string = herdrSocketPath(),
 ): Promise<void> {
   await call(socketPath, "agent.prompt", { target: paneId, text }, 5000);
+}
+
+export type HerdrWakeResult = {
+  readonly status: "queued" | "uncertain" | "unavailable";
+  readonly reason?: string;
+};
+
+/**
+ * Re-read identity before waking an idle agent. A lost reply is not retried:
+ * herdr may already have typed the marker. Only the receiving hook establishes
+ * delivery. herdr has no native-session compare-and-swap on agent.prompt.
+ */
+export async function wakeHerdrAgent(
+  expected: HerdrAgent,
+  text: string,
+  socketPath: string = herdrSocketPath(),
+): Promise<HerdrWakeResult> {
+  const fresh = (await listHerdrAgents(socketPath))?.find(
+    (agent) => agent.terminalId === expected.terminalId,
+  );
+  if (
+    fresh === undefined ||
+    fresh.agent !== expected.agent ||
+    fresh.session?.id !== expected.session?.id ||
+    fresh.session?.path !== expected.session?.path ||
+    fresh.completionSeq !== expected.completionSeq ||
+    (fresh.status !== "idle" && fresh.status !== "done") ||
+    (expected.session?.id === undefined && expected.session?.path === undefined)
+  )
+    return { status: "unavailable", reason: "Agent identity or idle state changed." };
+  try {
+    await promptHerdrAgent(fresh.name ?? fresh.paneId, text, socketPath);
+    return { status: "queued" };
+  } catch (error) {
+    return {
+      status: error instanceof HerdrTransportError && error.submitted ? "uncertain" : "unavailable",
+      reason: error instanceof Error ? error.message : "herdr did not take the marker",
+    };
+  }
+}
+
+/** Paths from Git's NUL-delimited status; rename/copy records carry an extra source path. */
+export function herdrStatusPaths(status: string): ReadonlyArray<string> {
+  const entries = status.split("\0");
+  const paths = new Set<string>();
+  for (let index = 0; index < entries.length; index++) {
+    const entry = entries[index]!;
+    if (entry.length < 4 || entry[2] !== " ") continue;
+    paths.add(entry.slice(3));
+    if (entry.slice(0, 2).includes("R") || entry.slice(0, 2).includes("C")) {
+      const source = entries[++index];
+      if (source) paths.add(source);
+    }
+  }
+  return [...paths].toSorted();
+}
+
+/** Live enforcement sessions take precedence over observations within the hub's report limit. */
+export function boundHerdrObservations<T>(
+  primary: ReadonlyArray<T>,
+  observations: ReadonlyArray<T>,
+) {
+  const available = Math.max(0, 50 - primary.length);
+  return {
+    sessions: [...primary, ...observations.slice(0, available)],
+    skipped: Math.max(0, observations.length - available),
+  };
+}
+
+/** Observes uncommitted paths in this worktree after work; it cannot attribute every change to its agent. */
+export function readHerdrChangedPaths(cwd: string): Promise<ReadonlyArray<string> | null> {
+  return new Promise((resolve) => {
+    NodeChildProcess.execFile(
+      "git",
+      ["-C", cwd, "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+      { timeout: 3000, maxBuffer: 1024 * 1024, encoding: "utf8", windowsHide: true },
+      (error, stdout) => resolve(error === null ? herdrStatusPaths(stdout) : null),
+    );
+  });
+}
+
+/** completion_seq catches a whole turn between polls; old servers need an observed working → idle edge. */
+export class HerdrCompletionTracker {
+  private readonly observed = new Map<
+    string,
+    { status: PeerWorkStatus; seq: number | undefined }
+  >();
+
+  completed(agent: HerdrAgent): boolean {
+    const key = [
+      agent.terminalId,
+      agent.agent,
+      agent.session?.id,
+      agent.session?.path,
+      agent.cwd,
+    ].join("\0");
+    const before = this.observed.get(key);
+    this.observed.set(key, { status: agent.status, seq: agent.completionSeq });
+    if (this.observed.size > 500) this.observed.delete(this.observed.keys().next().value!);
+    if (agent.status !== "idle" && agent.status !== "done") return false;
+    return agent.completionSeq !== undefined
+      ? agent.completionSeq !== before?.seq
+      : before?.status === "working";
+  }
 }
 
 /** Brings the agent's pane forward in herdr's attached client. */
@@ -536,6 +665,39 @@ export interface StartHerdrAgentInput {
   readonly prompt?: string | undefined;
   /** Set in the pane's shell, so the agent has it too. */
   readonly env?: Readonly<Record<string, string>> | undefined;
+}
+
+/** A dedicated task checkout; no shell interpolation or edits to the person's current tree. */
+export async function prepareHerdrTaskWorktree(input: {
+  readonly checkout: string;
+  readonly baseBranch: string;
+  readonly worktrees: string;
+  readonly task: string;
+}): Promise<{ readonly cwd: string; readonly branch: string }> {
+  if (!NodePath.isAbsolute(input.checkout) || !NodePath.isAbsolute(input.worktrees)) {
+    throw new Error("The checkout and worktree directories must be full paths");
+  }
+  if (!isSafeGitRef(input.baseBranch))
+    throw new Error("The repository branch is not a safe Git ref");
+  const task =
+    input.task
+      .replace(/[^A-Za-z0-9_-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 70) || "task";
+  const name = `${task}-${NodeCrypto.randomUUID().slice(0, 8)}`;
+  const branch = `feature/${name}`;
+  const cwd = NodePath.join(input.worktrees, name);
+  await NodeFSP.mkdir(input.worktrees, { recursive: true });
+  await new Promise<void>((resolve, reject) => {
+    NodeChildProcess.execFile(
+      "git",
+      ["-C", input.checkout, "worktree", "add", "-b", branch, "--", cwd, input.baseBranch],
+      { timeout: 15_000, maxBuffer: 1024 * 1024, encoding: "utf8", windowsHide: true },
+      (error, _stdout, stderr) =>
+        error === null ? resolve() : reject(new Error(stderr.trim() || error.message)),
+    );
+  });
+  return { cwd, branch };
 }
 
 export interface StartedHerdrAgent {
@@ -811,6 +973,14 @@ export async function startHerdrAgent(
         Date.now() < shellDeadline &&
         (await shellInitializing(path, pane.paneId));
       if (!waiting) {
+        // A lost reply may have followed a successful launch. Keep that pane:
+        // undoing an uncertain start could terminate an agent already at work.
+        if (error instanceof HerdrTransportError && error.submitted) {
+          throw new Error(
+            `The launch could not be confirmed. Inspect pane ${pane.paneId} in herdr before retrying.`,
+            { cause: error },
+          );
+        }
         await pane.undo().catch(() => undefined);
         throw error;
       }
