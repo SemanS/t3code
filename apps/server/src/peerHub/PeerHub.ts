@@ -125,6 +125,7 @@ import {
   type CheckoutPlace,
 } from "./coordinationBroker.ts";
 import { GIT_ALLOWED_PROTOCOLS, isSafeGitRef, isSafeGitRemote } from "./gitSafety.ts";
+import { idFromName } from "./names.ts";
 import {
   activeGitHubAccount,
   gitHubCredentialHelper,
@@ -346,18 +347,6 @@ function peersOf(
     byEnvironment.set(key, entry);
   }
   return [...byEnvironment.values()];
-}
-
-/** A kebab-case id from a name, at most 40 characters. */
-function kebab(name: string): string {
-  return name
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 40)
-    .replace(/-+$/g, "");
 }
 
 export class PeerHub extends Context.Service<
@@ -1016,10 +1005,8 @@ const make = Effect.gen(function* () {
         about: told.about,
         scope: told.scope,
         name: told.name,
-        level: told.level,
-        kind: told.kind,
+        how: told.how,
         why: told.why,
-        source: told.source,
         ...(told.entryKind === undefined ? {} : { entryKind: told.entryKind }),
         ...(told.path === undefined ? {} : { path: told.path }),
         at: told.at,
@@ -3394,7 +3381,7 @@ const make = Effect.gen(function* () {
         ).pipe(Effect.orElseSucceed(() => "")));
       return {
         name: title,
-        repoId: kebab(NodePath.basename(root)) || "app",
+        repoId: idFromName(NodePath.basename(root), "repo"),
         url,
         branch: head === "" || head === "HEAD" ? "main" : head,
         root,
@@ -3447,7 +3434,7 @@ const make = Effect.gen(function* () {
         github?.name ?? NodePath.basename(url.replace(/\/+$/, "")).replace(/\.git$/i, "");
       return {
         name,
-        repoId: kebab(name) || "app",
+        repoId: idFromName(name, "repo"),
         url,
         branch: /^ref: refs\/heads\/(\S+)\s+HEAD$/m.exec(head)?.[1] ?? "main",
         root: null,
@@ -3468,8 +3455,8 @@ const make = Effect.gen(function* () {
       else if (input.projectId !== undefined) shared = yield* localRepository(input.projectId);
       else return yield* hubError("Choose a project on this computer or enter a repository.");
       const name = input.name ?? shared.name;
-      const id = kebab(name);
-      if (!safeId(id)) return yield* hubError("Give the project a name with letters or digits.");
+      const id = idFromName(name, "project");
+      if (!safeId(id)) return yield* hubError("Give the project a name.");
       yield* hubApi.shareProject(hubUrl, session, input.workspace, {
         id,
         name,

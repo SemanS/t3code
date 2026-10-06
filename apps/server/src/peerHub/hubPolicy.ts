@@ -172,7 +172,7 @@ export function capacityRejection(
 
 /**
  * Whether a workspace project accepts the member's own login for what is not an agent's thread:
- * a model that reads the project's text on it (`relatedModel`). Only `personal: any` does; a
+ * a model that reads the project's text on it (`findModel`). Only `personal: any` does; a
  * project that wants commercial seats or shared capacity only, or one this does not know, does not.
  */
 export function projectAcceptsPersonal(

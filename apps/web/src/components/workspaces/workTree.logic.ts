@@ -495,10 +495,10 @@ function projectTree(input: {
   };
 }
 
-/** What Peer told one agent, as the work's page lists it. */
+/** What one agent did with the team's work and knowledge, as the work's page lists it. */
 export interface WorkAdviceRow {
   readonly key: string;
-  /** Whose agent was told, and what it is called. */
+  /** Whose agent it is, and what it is called. */
   readonly person: string;
   readonly mine: boolean;
   readonly agent: string;
@@ -506,10 +506,9 @@ export interface WorkAdviceRow {
   /** A work's scope to open its page, or `kx:<id>` for an entry of the project's knowledge. */
   readonly scope: string;
   readonly name: string;
-  readonly level: number;
-  readonly kind: "new" | "closer" | "changed";
+  /** The agent read it or asked its agents, a model found it for the agent, or an entry governs files it changes. */
+  readonly how: "read" | "asked" | "found" | "governs";
   readonly why: string;
-  readonly source: "words" | "paths" | "model";
   /** For knowledge: decision, convention, learning or incident, and where its file is. */
   readonly entryKind: string | undefined;
   readonly path: string | undefined;
@@ -517,8 +516,8 @@ export interface WorkAdviceRow {
 }
 
 /**
- * What Peer told the agents on one work (a task, or the project's work on no task) of related work
- * and of the project's knowledge, newest first: people see what their agents are pointed to.
+ * What the agents on one work (a task, or the project's work on no task) did with the team's work
+ * and the project's knowledge, newest first: people see what their agents rely on.
  */
 export function adviceOnWork(input: {
   readonly status: PeerHubStatus;
@@ -548,10 +547,8 @@ export function adviceOnWork(input: {
           about: advice.about,
           scope: advice.scope,
           name: advice.name,
-          level: advice.level,
-          kind: advice.kind,
+          how: advice.how,
           why: advice.why,
-          source: advice.source,
           entryKind: advice.entryKind,
           path: advice.path,
           at: advice.at,
@@ -562,24 +559,21 @@ export function adviceOnWork(input: {
     .slice(0, 12);
 }
 
-/** What one telling says, in a line: whose agent, and what happened. */
+/** What one row says, in a line: whose agent, and what it did. */
 export function adviceLabel(row: WorkAdviceRow): string {
   const who = row.mine ? "Your agent" : `${row.person}’s agent`;
-  const what =
-    row.about === "knowledge"
-      ? `was reminded of ${row.entryKind === undefined ? "an entry" : `a ${row.entryKind}`} of the project`
-      : row.kind === "closer"
-        ? "was told this work came closer to its own"
-        : row.kind === "changed"
-          ? "heard this work said more where it bears on its own"
-          : "was pointed to this related work";
-  const how =
-    row.source === "model"
-      ? " (a model that read both said so)"
-      : row.source === "paths"
-        ? " (it governs files the agent works on)"
-        : "";
-  return `${who} ${what}${how}`;
+  const entry =
+    row.entryKind === undefined ? "an entry of the project" : `a ${row.entryKind} of the project`;
+  switch (row.how) {
+    case "read":
+      return `${who} read ${row.about === "knowledge" ? entry : "this work’s context"}`;
+    case "asked":
+      return `${who} asked this work’s agents`;
+    case "found":
+      return `${who} was pointed to ${row.about === "knowledge" ? entry : "this work"} by a model it asked`;
+    case "governs":
+      return `${who} was reminded of ${entry} that governs files it changes`;
+  }
 }
 
 /** Every workspace project this person is on, as a tree. */

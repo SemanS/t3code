@@ -568,28 +568,25 @@ export const PeerContextVersionText = Schema.Struct({
 export type PeerContextVersionText = typeof PeerContextVersionText.Type;
 
 /**
- * What Peer told one of this computer's agents: a work on the project that relates to what it does,
- * or reviewed knowledge of the project (`.ai`) that bears on it. People see it to trust, or
- * correct, what their agents are pointed to.
+ * What one of this computer's agents did with the team's work and knowledge, or what Peer noted of
+ * it: it read a work's shared context, asked its agents, a model found work for it (`peer find`),
+ * or an entry of the project's `.ai` governs files it changes. People see it to trust, or correct,
+ * what their agents rely on.
  */
 export const PeerAdvice = Schema.Struct({
   workspace: Schema.String,
   project: Schema.String,
-  /** The agent session that was told: `claude:<session id>` or `codex:<session id>`. */
+  /** The agent session: `claude:<session id>` or `codex:<session id>`. */
   session: Schema.String,
   about: Schema.Literals(["work", "knowledge"]),
   /** A work: `task:<id>` or `project`. Knowledge: `kx:<entry id>`. */
   scope: Schema.String,
   /** How people name it: the work, or the knowledge entry's title. */
   name: Schema.String,
-  /** How closely it relates: 1 it is about the same things, 2 the same files or symbols, 3 your files use what it changes. */
-  level: Schema.Number,
-  /** First told, came closer, or said more where it bears on the agent. */
-  kind: Schema.Literals(["new", "closer", "changed"]),
+  /** The agent read it or asked its agents, a model found it for the agent, or an entry governs files it changes. */
+  how: Schema.Literals(["read", "asked", "found", "governs"]),
   /** Why, in a sentence. */
   why: Schema.String,
-  /** What matched: words, the paths an entry governs, or a model that read both. */
-  source: Schema.Literals(["words", "paths", "model"]),
   /** For knowledge: decision, convention, learning or incident. */
   entryKind: Schema.optional(Schema.String),
   /** For knowledge: where the entry is, relative to the repository. */
@@ -615,7 +612,7 @@ export const PeerCoordinationState = Schema.Struct({
   findings: Schema.Array(PeerFinding),
   /** The shared contexts of your projects' tasks, without their text. */
   contexts: Schema.Array(PeerWorkContext),
-  /** What Peer told this computer's agents of related work and the project's knowledge, newest first. */
+  /** What this computer's agents did with the team's work and knowledge, newest first. */
   advice: Schema.optional(Schema.Array(PeerAdvice)),
   /** How many knowledge candidates wait for people, per project. */
   candidates: Schema.Array(

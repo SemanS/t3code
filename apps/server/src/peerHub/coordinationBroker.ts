@@ -24,7 +24,6 @@ import {
   announcementKey,
   asReference,
   boardNews,
-  boardText,
   changedPaths,
   claimedTask,
   closerOf,
@@ -64,7 +63,6 @@ import {
   withoutOutputTrim,
   teamNews,
   touches,
-  writtenText,
   type BoardEntry,
   type ContextHolder,
   type CoordinationView,
@@ -72,47 +70,44 @@ import {
   type SharedContext,
   type WorkAgent,
 } from "./coordination.ts";
+import {
+  FIND_ENTRIES,
+  FIND_WORKS,
+  contextLines,
+  findPrompt,
+  findRefusal,
+  modelEnabled,
+  parseFound,
+  runModel,
+  type FindEntry,
+  type FindWork,
+} from "./findModel.ts";
 import { projectAcceptsPersonal, readHubPolicyState } from "./hubPolicy.ts";
 import {
-  KNOWLEDGE_GAP_MS,
-  KNOWLEDGE_PER_HOUR,
-  knowledgeNews,
-  matchKnowledge,
-  profileEntry,
+  entryText,
+  governing,
+  governingText,
+  known,
+  knowledgeIndexText,
+  knowledgeLine,
   readKnowledge,
-  type KnowledgeProfile,
-} from "./knowledgeRouter.ts";
+  searchKnowledge,
+  standing,
+  type Known,
+} from "./knowledgeIndex.ts";
+import { askedByPerson, cutText, neutral, plural } from "./peerText.ts";
 import {
-  MODEL_HINT_MS,
-  MODEL_WORKS,
-  modelEnabled,
-  modelPrompt,
-  parseAdjudication,
-  runModel,
-  shouldAsk,
-  type ModelWork,
-} from "./relatedModel.ts";
-import {
-  neutral,
-  emptyFocus,
-  foldFile,
-  foldImports,
-  foldOwn,
-  foldPrompt,
-  importsIn,
-  profileOf,
-  relate,
-  relatedNews,
-  setTask,
-  RELATED_GAP_MS,
-  RELATED_PER_HOUR,
-  SPEAK_POINTS,
-  type Focus,
-  type Related,
-  type Told,
-  type WorkInput,
-  type WorkProfile,
-} from "./relevance.ts";
+  ASK_GIST_SHOWN,
+  ASK_INDEX_SHOWN,
+  INDEX_ALL,
+  INDEX_SHOWN,
+  KNOWLEDGE_SHOWN,
+  askIndexText,
+  askReminderText,
+  followedChange,
+  gistKey,
+  indexText,
+} from "./teamIndex.ts";
 import type {
   ContextRefusal,
   HubContext,
@@ -343,33 +338,28 @@ interface LocalSession {
   readonly settleHeard: Set<string>;
   /** Findings of other agents it has heard. */
   readonly heard: Set<string>;
-  /** What it is about now: its person's asks, its task, the files and symbols it works on. */
-  readonly focus: Focus;
-  /** The related works it was told of: how closely they related, and which version of their context. */
-  readonly related: Map<string, Told>;
-  /** When it was last told of related work, and when over the last hour. */
-  relatedAt: number;
-  readonly relatedTimes: number[];
-  /** The focus and the hub's view it was last matched against: nothing new, nothing to match. */
-  relatedFocus: number;
-  relatedView: number;
-  /** What its person asked last, for a model to judge the project's other works against. */
-  lastAsk: string;
-  /** What a model said of works against an ask (scope → why), and when; which ask it judged last, when, and how often. */
-  modelHints: ReadonlyMap<string, string>;
-  modelHintsAt: number;
-  modelFor: string;
-  modelAt: number;
-  readonly modelTimes: number[];
-  modelRunning: boolean;
-  /** The project's reviewed knowledge it was told of (entry ids), when, and how often over the last hour. */
+  /** The other works whose shared context it read (`peer context`): what it read, to tell it when that changes. */
+  readonly read: Map<string, ReadWork>;
+  /** The files it changes or is about to, as far as Peer saw: what the project's `.ai` may govern. */
+  readonly touching: Set<string>;
+  /** What was checked against `.ai` last: nothing new to check, nothing to say. */
+  governsChecked: number;
+  governsBook: ReadonlyArray<Known> | undefined;
+  /** The entries of the project's `.ai` it was told of or read (ids). */
   readonly knowledgeTold: Set<string>;
-  knowledgeAt: number;
-  readonly knowledgeTimes: number[];
-  /** The focus and the knowledge it was last matched against. */
-  knowledgeFocus: number;
-  knowledgeSeen: ReadonlyArray<KnowledgeProfile> | undefined;
-  /** What it was last told of related work and project knowledge, newest last: people see it in Peer. */
+  /**
+   * What the agent was told of each other work (`gistKey`), since its session started or its
+   * context was compacted: it is not told twice, only what changed. And when an ask last carried
+   * something, so a pause can be told from a flow of asks.
+   */
+  readonly told: Map<string, string>;
+  askIndexAt: number;
+  /** What Peer added to its context, in characters, by the hook that carried it. */
+  readonly injected: Map<string, number>;
+  /** When a model last looked for it (`peer find`), and how often over the last hour. */
+  findAt: number;
+  readonly findTimes: number[];
+  /** What it did with the team's work and knowledge, newest last: people see it in Peer. */
   readonly advice: Advice[];
 }
 
@@ -393,16 +383,23 @@ interface SharedMirror {
   pushing: Promise<void> | undefined;
 }
 
-/** What Peer told an agent, for people to see in Peer: a related work, or reviewed project knowledge. */
+/** A work's context as an agent read it, to tell it what changed there since. */
+interface ReadWork {
+  version: number;
+  text: string;
+  /** When it was last told of a change, or read it. */
+  toldAt: number;
+}
+
+/** What an agent did with the team's work and knowledge, or what Peer noted, for people to see in Peer. */
 interface Advice {
   readonly about: "work" | "knowledge";
   /** A work's scope, or `kx:<entry id>`. */
   readonly scope: string;
   readonly name: string;
-  readonly level: number;
-  readonly kind: "new" | "closer" | "changed";
+  /** The agent read it, asked its agents, a model found it for it, or an entry governs files it changes. */
+  readonly how: "read" | "asked" | "found" | "governs";
   readonly why: string;
-  readonly source: "words" | "paths" | "model";
   readonly entryKind?: string;
   readonly path?: string;
   readonly at: number;
@@ -411,12 +408,9 @@ interface Advice {
 /** Another work on a project as an agent could hear of it: its board entry and what it says of itself. */
 interface WorkRow {
   readonly entry: BoardEntry;
+  /** What its agents were asked and say they do. */
   readonly labels: ReadonlyArray<string>;
-  readonly files: ReadonlyArray<string>;
-  readonly findings: ReadonlyArray<string>;
   readonly text: string | undefined;
-  /** The version of its shared context this computer has a copy of. */
-  readonly mirrored: number;
   readonly updatedAt: number | undefined;
   readonly active: boolean;
   readonly working: boolean;
@@ -479,15 +473,38 @@ const SETTLE_NUDGES = 2;
 const HOOK_DEADLINE_MS = 3300;
 /** How long a hook waits for git to say what changed: a hook must not wait on a big repository. */
 const GIT_STATUS_MS = 1500;
-/** How often an agent hears of related work: every half minute, or `PEER_RELATED_GAP_MS` (the lab shortens it). */
-const RELATED_GAP = Number(process.env.PEER_RELATED_GAP_MS) || RELATED_GAP_MS;
-/** How often it hears of the project's reviewed knowledge; the lab shortens it with the same knob. */
-const KNOWLEDGE_GAP = Number(process.env.PEER_RELATED_GAP_MS) || KNOWLEDGE_GAP_MS;
 /** A repository's `.ai` is read again after this long (`PEER_KNOWLEDGE_FRESH_MS`); a hook waits for the read this long at most. */
 const KNOWLEDGE_FRESH_MS = Number(process.env.PEER_KNOWLEDGE_FRESH_MS) || 60_000;
 const KNOWLEDGE_READ_WAIT_MS = 400;
+/**
+ * How often an agent hears that a context it read was written again (`PEER_FOLLOW_GAP_MS`, which the
+ * lab shortens), and how long a pause must be before an ask that has nothing new in it is reminded
+ * of the others' work (`PEER_ASK_REMIND_MS`).
+ */
+const FOLLOW_GAP_MS = Number(process.env.PEER_FOLLOW_GAP_MS) || 2 * 60 * 1000;
+const ASK_REMIND_MS = Number(process.env.PEER_ASK_REMIND_MS) || 10 * 60 * 1000;
+/** How many contexts an agent is told of changes in, and files it is checked against `.ai` for. */
+const READ_KEPT = 12;
+const TOUCHING_KEPT = 100;
 
-const clip = (text: string, max: number) => text.replace(/\s+/g, " ").trim().slice(0, max);
+const clip = (text: string, max: number) => cutText(text.replace(/\s+/g, " ").trim(), max);
+
+/** What a hook's answer puts into the agent's context, in characters: its text, and the reason of a refusal. */
+function injectedChars(out: Record<string, unknown> | null): number {
+  const answer = out?.hookSpecificOutput as
+    | {
+        readonly additionalContext?: unknown;
+        readonly permissionDecision?: unknown;
+        readonly permissionDecisionReason?: unknown;
+      }
+    | undefined;
+  const text = typeof answer?.additionalContext === "string" ? answer.additionalContext.length : 0;
+  const reason =
+    answer?.permissionDecision === "deny" && typeof answer.permissionDecisionReason === "string"
+      ? answer.permissionDecisionReason.length
+      : 0;
+  return text + reason;
+}
 
 const sleepMs = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -515,25 +532,18 @@ export class CoordinationBroker {
   private readonly queueing = new Set<string>();
   /** Copies of the project's other works' contexts being made, per workspace. */
   private readonly boardMirroring = new Map<string, Promise<void>>();
-  /** What each other work says about itself, as matching reads it, while it says the same. */
-  private readonly profiles = new Map<
-    string,
-    { readonly stamp: string; readonly profile: WorkProfile }
-  >();
   /** What each repository's `.ai` holds, read at most once a minute, by the repository's root. */
   private readonly knowledge = new Map<
     string,
     {
       readonly at: number;
-      readonly profiles: ReadonlyArray<KnowledgeProfile>;
+      readonly book: ReadonlyArray<Known>;
       readonly reading: Promise<void> | undefined;
     }
   >();
-  /** Models asked about related work now on this computer, and a way to stop them with the broker. */
-  private modelsRunning = 0;
+  /** Models looking for agents now on this computer (`peer find`), and a way to stop them with the broker. */
+  private findsRunning = 0;
   private readonly modelAbort = new AbortController();
-  /** Sessions whose project did not let a model read its work (said once). */
-  private readonly modelSkipped = new Set<string>();
   /** The `git status` runs in flight, by repository. */
   private readonly gitRuns = new Map<string, Promise<string>>();
   private readonly ignoredCwds = new Map<string, number>();
@@ -878,27 +888,18 @@ export class CoordinationBroker {
       settleNudges: new Map(),
       settleHeard: new Set(),
       heard: new Set(),
-      focus: emptyFocus(),
-      related: new Map(),
-      relatedAt: 0,
-      relatedTimes: [],
-      relatedFocus: -1,
-      relatedView: -1,
-      lastAsk: "",
-      modelHints: new Map(),
-      modelHintsAt: 0,
-      modelFor: "",
-      modelAt: 0,
-      modelTimes: [],
-      modelRunning: false,
+      read: new Map(),
+      touching: new Set(),
+      governsChecked: 0,
+      governsBook: undefined,
       knowledgeTold: new Set(),
-      knowledgeAt: 0,
-      knowledgeTimes: [],
-      knowledgeFocus: -1,
-      knowledgeSeen: undefined,
+      told: new Map(),
+      askIndexAt: 0,
+      injected: new Map(),
+      findAt: 0,
+      findTimes: [],
       advice: [],
     };
-    this.refocus(session);
     // A session Peer meets again (Peer restarted, or the session outlived its TTL) keeps what
     // it shares: reporting it without its lines would take its findings back.
     await this.restoreContext(session);
@@ -984,15 +985,21 @@ export class CoordinationBroker {
     if (session === null) return null;
     if (pane !== undefined) session.pane = pane;
     const out = await this.answerHook(event, session, body);
+    const chars = injectedChars(out);
     this.log("hook", {
       session: session.id,
       hookEvent: event,
       tool: body.tool_name,
       files: editedFiles(body.tool_name, body.tool_input),
       answer: out ?? undefined,
+      ...(chars === 0 ? {} : { chars }),
       ms: Date.now() - started,
     });
-    if (!late.passed) return out;
+    if (!late.passed) {
+      // What reaches the agent is what Peer costs it: the log says how much, for tuning from real runs.
+      if (chars > 0) session.injected.set(event, (session.injected.get(event) ?? 0) + chars);
+      return out;
+    }
     // Its script stopped waiting before this was ready: what it had to say goes with the next step.
     const said = (out?.hookSpecificOutput as { readonly additionalContext?: unknown } | undefined)
       ?.additionalContext;
@@ -1034,7 +1041,7 @@ export class CoordinationBroker {
         session.status = "working";
         // What the person asked first says more than a terminal title ("Claude Code").
         const asked = typeof body.prompt === "string" ? clip(body.prompt, 200) : "";
-        const prompt = asked.length > 60 ? `${asked.slice(0, 59)}…` : asked;
+        const prompt = asked.length > 60 ? `${cutText(asked, 59)}…` : asked;
         if (prompt !== "" && !session.labelFromPrompt) {
           session.label = prompt;
           session.labelFromPrompt = true;
@@ -1042,15 +1049,19 @@ export class CoordinationBroker {
         // It may have gone to another branch, which can name another task.
         session.branch =
           (await this.deps.branchOf(session.root).catch(() => undefined)) ?? session.branch;
-        // What the person asked is what the agent is about now: which work relates to it is news.
-        const fullPrompt = typeof body.prompt === "string" ? body.prompt : "";
-        if (this.advise(session, "prompt", () => foldPrompt(session.focus, fullPrompt), false)) {
-          // Only what the person asked is judged by a model: not a command, nor Peer's own wake note.
-          session.lastAsk = fullPrompt.slice(0, 2000);
-          this.log("focus.asked", { session: session.id, focus: this.focusLog(session) });
-        }
         this.markDirty();
-        return context(event, this.news(session));
+        // The index goes with what the person asked: the agent decides, as it starts on the ask,
+        // whether somebody else does a part of it. No ranking of the works against the ask. What
+        // the news told of a work is not told again by the index, so the news comes first.
+        const fullPrompt = typeof body.prompt === "string" ? body.prompt : "";
+        const news = this.news(session);
+        const index = this.advise(
+          session,
+          "index",
+          () => this.askIndexFor(session, fullPrompt),
+          null,
+        );
+        return context(event, [news, index].filter((part) => part !== null).join("\n\n") || null);
       }
       case "PreToolUse":
         this.touch(session);
@@ -1065,7 +1076,6 @@ export class CoordinationBroker {
         }
         let file: string | null = null;
         let contextEdited = false;
-        const changedFiles: string[] = [];
         for (const path of this.editedPaths(session, body)) {
           if (this.samePath(path, session.ownContextPath)) {
             await this.readTeamLines(session);
@@ -1080,7 +1090,7 @@ export class CoordinationBroker {
           const changed = inRepository(session, path);
           if (changed === null) continue;
           file = changed;
-          changedFiles.push(changed);
+          this.noteTouching(session, changed);
           session.dirty.add(changed);
           session.files = [...session.files.filter((f) => f !== changed), changed].slice(
             -MAX_FILES,
@@ -1094,8 +1104,6 @@ export class CoordinationBroker {
           }
           this.markDirty();
         }
-        // The modules the files it changed use: what it builds on, which another work may change.
-        await this.learnImports(session, changedFiles);
         const news = this.news(session);
         if (contextEdited && file === null) return context(event, news);
         const nudge = this.nudge(session, file);
@@ -1138,7 +1146,11 @@ export class CoordinationBroker {
       case "SessionEnd":
         void this.release(session);
         this.sessions.delete(session.id);
-        this.log("session.ended", { session: session.id });
+        this.log("session.ended", {
+          session: session.id,
+          injected: Object.fromEntries(session.injected),
+          tokens: Math.round([...session.injected.values()].reduce((a, b) => a + b, 0) / 4),
+        });
         this.markDirty();
         return null;
       default:
@@ -1197,14 +1209,7 @@ export class CoordinationBroker {
     session.files = [...session.files.filter((file) => !changed.includes(file)), ...changed].slice(
       -MAX_FILES,
     );
-    this.advise(
-      session,
-      "files",
-      () => {
-        for (const file of changed) foldFile(session.focus, file);
-      },
-      undefined,
-    );
+    for (const file of changed) this.noteTouching(session, file);
     this.markDirty();
     this.log("files.shell", { session: session.id, files: changed });
   }
@@ -1245,8 +1250,6 @@ export class CoordinationBroker {
     body: Record<string, unknown>,
   ): Promise<Record<string, unknown> | null> {
     if (body.tool_name === "Bash") return this.beforeShell(session, body);
-    // A file it is about to change, and the names it writes there, are what it works on now.
-    this.advise(session, "edits", () => this.foldEdits(session, body), undefined);
     const files: string[] = [];
     for (const path of this.editedPaths(session, body)) {
       if (this.keptBy(session, path)) continue;
@@ -1277,6 +1280,8 @@ export class CoordinationBroker {
       const file = inRepository(session, path);
       if (file !== null) files.push(file);
     }
+    // What the project's `.ai` governs among the files it is about to change is said before it does.
+    for (const file of files) this.noteTouching(session, file);
     if (files.length === 0) {
       // Its own contexts only: Claude Code edits them unasked. Codex takes no "allow" without a
       // rewrite, and asks for them through PermissionRequest instead. A file elsewhere outside the
@@ -1471,8 +1476,8 @@ export class CoordinationBroker {
         this.rosterNews(session),
         this.sharedNews(session),
         this.findingNews(session),
-        this.advise(session, "tell", () => this.relatedNewsFor(session), null),
-        this.advise(session, "knowledge", () => this.knowledgeNewsFor(session), null),
+        this.advise(session, "followed", () => this.followedNews(session), null),
+        this.advise(session, "governs", () => this.governsNews(session), null),
         this.boardNewsFor(session),
       );
     }
@@ -1719,17 +1724,32 @@ export class CoordinationBroker {
       session.sharedToldAt = 0;
     }
     const guidance = await this.deps.projectGuidance(session.root).catch(() => null);
-    // The project's other work, and where to read each: what this agent's work may depend on.
-    // Its hook waits a few seconds at most: copies still on their way are named by `peer context`.
+    // The project's other work, and where to read each: the index the agent chooses from. Its
+    // hook waits a few seconds at most: copies still on their way are named by `peer context`.
     await Promise.race([this.mirrorBoard(session.workspace), sleepMs(BOARD_START_WAIT_MS)]);
-    const board = this.board(session);
+    await this.ensureKnowledge(session).catch(() => undefined);
+    const works = this.indexWorks(session, INDEX_ALL);
     for (const scope of this.writtenScopes(session.workspace, session.project)) {
       session.boardHeard.add(scope);
     }
+    // A new conversation, or one that was compacted, knows nothing of the others' work yet: what
+    // each builds comes with its next ask.
+    session.told.clear();
+    session.askIndexAt = 0;
     const text = startContext({
       me: this.me(session),
       ...(session.agent === "codex" ? { cliPath: this.scripts.peer } : {}),
-      board: boardText(board, this.cli, Date.now()),
+      index: indexText({
+        works,
+        knowledge: knowledgeIndexText(this.knowledgeBook(session), {
+          cli: this.cli,
+          shown: KNOWLEDGE_SHOWN,
+          titles: true,
+        }),
+        now: Date.now(),
+        cli: this.cli,
+        shown: INDEX_SHOWN,
+      }),
       guidance,
       own: {
         path: session.ownContextPath,
@@ -1748,7 +1768,8 @@ export class CoordinationBroker {
       shared: mirror === undefined ? undefined : { scope: mirror.scope, version: mirror.version },
       saved: saved?.length ?? 0,
       findings: findings.map((finding) => finding.id),
-      board: board.map((entry) => entry.scope),
+      index: works.slice(0, INDEX_SHOWN).map((entry) => entry.scope),
+      knowledge: standing(this.knowledgeBook(session)).length,
       bytes: text.length,
     });
     return text;
@@ -1801,8 +1822,6 @@ export class CoordinationBroker {
     const team = teamLines(text);
     const changed = team.join("\n") !== session.team.join("\n");
     session.team = team;
-    // Its own account of what it does says, in its words, what work relates to it.
-    this.advise(session, "own", () => foldOwn(session.focus, text), false);
     this.log("context.updated", { session: session.id, bytes: text.length, team, changed });
     if (changed) this.markDirty();
   }
@@ -2076,7 +2095,6 @@ export class CoordinationBroker {
     if (text === null || text === mirror.text) return;
     session.contextAt = Date.now();
     session.contextKept = contextWritten(text);
-    this.advise(session, "own", () => foldOwn(session.focus, text), false);
     const before = new Set(projectLines(mirror.text));
     const after = projectLines(text);
     for (const line of after) if (!before.has(line)) session.marked.add(line);
@@ -2441,7 +2459,7 @@ export class CoordinationBroker {
     return scopes.find((scope) => claimedTask(scope)?.toLowerCase() === wanted);
   }
 
-  /** An agent at work elsewhere on the project, as the board shows it: whose, and what it does now. */
+  /** An agent at work elsewhere on the project, as the index shows it: whose, what it does now, and where. */
   private boardAgent(workspace: string, other: HubCoordSession): string {
     const agent =
       other.agent === undefined ? "" : `${AGENT_NAMES[other.agent as AgentKind] ?? other.agent}, `;
@@ -2452,7 +2470,13 @@ export class CoordinationBroker {
           ? "waiting for its person"
           : `idle ${sinceText(other.activeAt ?? other.seenAt)}`;
     const where = other.environment === this.deps.environment ? "" : ", on another computer";
-    return `${this.deps.nameOf(workspace, other.email)}'s agent (${agent}${doing}${where}, ${other.files.length} file(s) changed)`;
+    // What it changes now says what it builds: the newest files, as far as the hub knows them.
+    const files = other.files.slice(-3);
+    const at =
+      files.length === 0
+        ? ""
+        : `: ${files.join(", ")}${other.files.length > files.length ? ` (+${other.files.length - files.length})` : ""}`;
+    return `${this.deps.nameOf(workspace, other.email)}'s agent (${agent}${doing}${where}${at})`;
   }
 
   /** The written shared contexts of a project the hub lists, by scope. */
@@ -2491,7 +2515,6 @@ export class CoordinationBroker {
       ...unfinished.map((thread) => scopeOf(thread.task)),
     ]);
     scopes.delete(own);
-    const findings = this.findingsOf(workspace).filter((f) => f.project === project);
     return [...scopes].flatMap((scope) => {
       const context = contexts.find((c) => c.scope === scope);
       const agents = others.filter((s) => scopeOf(s.task) === scope);
@@ -2534,20 +2557,10 @@ export class CoordinationBroker {
             updatedAt,
           },
           labels: agents.flatMap((s) => [s.label, s.intent ?? ""]).filter((text) => text !== ""),
-          files: [
-            ...new Set(
-              agents.flatMap((s) => [
-                ...s.files,
-                ...s.claims.filter((claim) => claimedTask(claim) === undefined),
-              ]),
-            ),
-          ],
-          findings: findings.filter((f) => scopeOf(f.task) === scope).map((f) => f.text),
           text:
             mirror !== undefined && mirror.version > 0 && contextWritten(mirror.text)
               ? mirror.text
               : undefined,
-          mirrored: mirror?.version ?? 0,
           updatedAt,
           active: agents.length > 0,
           working: agents.some((s) => s.status === "working"),
@@ -2556,69 +2569,35 @@ export class CoordinationBroker {
     });
   }
 
-  /** What a work says about itself, as matching reads it; kept while it says the same. */
-  private profileOf(workspace: string, project: string, row: WorkRow): WorkProfile {
-    const key = `${workspace}\u0000${project}\u0000${row.entry.scope}`;
-    const stamp = [
-      row.entry.name,
-      row.entry.version,
-      row.entry.gist,
-      row.mirrored,
-      row.labels.join("\u0001"),
-      row.files.join("\u0001"),
-      row.findings.join("\u0001"),
-      row.updatedAt,
-      row.active,
-    ].join("\u0002");
-    const input: WorkInput = {
-      entry: row.entry,
-      labels: row.labels,
-      files: row.files,
-      findings: row.findings,
-      text: row.text,
-      updatedAt: row.updatedAt,
-      active: row.active,
-    };
-    const cached = this.profiles.get(key);
-    // Who is at work on it changes by the minute; what it says, rarely.
-    if (cached?.stamp === stamp) return { ...cached.profile, input };
-    const profile = profileOf(input);
-    if (this.profiles.size > 100) this.profiles.clear();
-    this.profiles.set(key, { stamp, profile });
-    return profile;
+  /** Works with agents at work on them first, those being worked on now first of those, then the most recently written. */
+  private static byActivity(a: WorkRow, b: WorkRow): number {
+    return (
+      Number(b.active) - Number(a.active) ||
+      Number(b.working) - Number(a.working) ||
+      (b.updatedAt ?? 0) - (a.updatedAt ?? 0)
+    );
   }
 
-  /**
-   * The project's other works for an agent on `session`'s, those that relate to what it does
-   * first, then those with agents at work on them, then the most recently written.
-   */
+  /** The project's other works for an agent on `session`'s, in the order of who is at work on them. */
   private board(session: LocalSession, limit = BOARD_SHOWN): BoardEntry[] {
-    const rows = this.works(session);
-    const now = Date.now();
-    // Ranking by relation is advice too: when it fails the board is ordered by who is at work.
-    const relation = this.advise(
-      session,
-      "board",
-      () =>
-        new Map(
-          relate(
-            session.focus,
-            rows.map((row) => this.profileOf(session.workspace, session.project, row)),
-            now,
-          ).map((related) => [related.work.input.entry.scope, related.points] as const),
-        ),
-      new Map<string, number>(),
-    );
-    return rows
-      .toSorted(
-        (a, b) =>
-          (relation.get(b.entry.scope) ?? 0) - (relation.get(a.entry.scope) ?? 0) ||
-          Number(b.active) - Number(a.active) ||
-          Number(b.working) - Number(a.working) ||
-          (b.updatedAt ?? 0) - (a.updatedAt ?? 0),
-      )
+    return this.works(session)
+      .toSorted(CoordinationBroker.byActivity)
       .slice(0, limit)
       .map((row) => row.entry);
+  }
+
+  /** The board with what this agent did with each work: which version of its context it read, whether it asked its agents. */
+  private indexWorks(session: LocalSession, limit: number): BoardEntry[] {
+    return this.board(session, limit).map((entry) => {
+      const read = session.read.get(entry.scope)?.version;
+      const task = claimedTask(entry.scope);
+      const asked = task !== undefined && session.asks.has(taskClaim(task));
+      return {
+        ...entry,
+        ...(read === undefined ? {} : { read }),
+        ...(asked ? { asked: true } : {}),
+      };
+    });
   }
 
   /** Work that showed up on the project since the session last heard: told once, at its next step. */
@@ -2627,7 +2606,11 @@ export class CoordinationBroker {
       .filter((entry) => (entry.version ?? 0) > 0 && !session.boardHeard.has(entry.scope))
       .slice(0, 3);
     if (fresh.length === 0) return null;
-    for (const entry of fresh) session.boardHeard.add(entry.scope);
+    for (const entry of fresh) {
+      session.boardHeard.add(entry.scope);
+      // The news carries the line with its gist: the next ask need not say it again.
+      session.told.set(entry.scope, gistKey(entry));
+    }
     const text = boardNews(fresh, this.cli, Date.now());
     this.log("board.told", {
       session: session.id,
@@ -2637,291 +2620,205 @@ export class CoordinationBroker {
     return text;
   }
 
-  // ---- related work: what the project's other works say that bears on what an agent does ----
+  // ---- the index: what the agent chooses its context from ----
 
   /**
-   * Related work is advice: whatever goes wrong in it must never break the hook that also carries
+   * The index is advice: whatever goes wrong in it must never break the hook that also carries
    * Peer's decisions (a stopped edit, a note), so it is logged and the hook goes on without it.
    */
   private advise<T>(session: LocalSession, what: string, run: () => T, fallback: T): T {
     try {
       return run();
     } catch (error) {
-      this.log("related.failed", { session: session.id, what, error: messageOf(error) });
+      this.log("index.failed", { session: session.id, what, error: messageOf(error) });
       return fallback;
     }
   }
 
-  /** The task a session is on, as its focus has it. */
-  private refocus(session: LocalSession) {
-    this.advise(session, "task", () => this.setFocusTask(session), undefined);
-  }
-
-  private setFocusTask(session: LocalSession) {
-    setTask(
-      session.focus,
-      session.task === undefined
-        ? undefined
-        : {
-            handle: this.handleOf(session.workspace, session.project, scopeOf(session.task)),
-            title: this.deps.taskName(session.workspace, session.project, session.task),
-          },
-    );
-  }
-
-  /** What an editing tool call changes, for the agent's focus: its files and the names it writes there. */
-  private foldEdits(session: LocalSession, body: Record<string, unknown>) {
-    const written = writtenText(body.tool_name, body.tool_input);
-    for (const path of this.editedPaths(session, body)) {
-      if (this.keptBy(session, path)) continue;
-      const file = inRepository(session, path);
-      if (file !== null) foldFile(session.focus, file, written);
-    }
-  }
-
-  /** The project's own modules the files an agent changed use: what it builds on. */
-  private async learnImports(session: LocalSession, files: ReadonlyArray<string>) {
-    for (const file of files.slice(0, 3)) {
-      if (!/\.(?:rs|[cm]?[jt]sx?|py|go)$/.test(file)) continue;
-      const text = await readHead(NodePath.join(session.root, file), 32 * 1024);
-      if (text !== null)
-        this.advise(session, "imports", () => foldImports(session.focus, importsIn(text)), false);
-    }
-  }
-
-  /** A session's focus for the log: what Peer matches the project's other works against. */
-  private focusLog(session: LocalSession) {
-    const { focus } = session;
-    return {
-      task: focus.task?.handle,
-      terms: [...focus.terms]
-        .toSorted((a, b) => b[1] - a[1])
-        .slice(0, 14)
-        .map(([term]) => term),
-      refs: [...focus.refs].slice(0, 8),
-      files: focus.files.size,
-      deps: [...focus.deps].slice(0, 8),
-    };
-  }
-
-  /** Remembers what an agent was told, for people to see in Peer (the last dozen per agent). */
+  /** Remembers what an agent did with the team's work, for people to see in Peer (the last dozen per agent). */
   private noteAdvice(session: LocalSession, entry: Advice) {
     session.advice.push(entry);
     if (session.advice.length > 12) session.advice.splice(0, session.advice.length - 12);
     this.deps.changed();
   }
 
-  /**
-   * The agent talked with a work's agents (an overlap of theirs, open or settled) or asked them:
-   * it knows of that work, and Peer has nothing to add.
-   */
-  private dealtWith(session: LocalSession, scope: string): boolean {
-    const view = this.merged(session.workspace, this.views.get(session.workspace));
-    const there = new Set(
-      view.sessions
-        .filter((s) => s.project === session.project && scopeOf(s.task) === scope)
-        .map((s) => s.id),
-    );
-    const talking = view.overlaps.some(
-      (o) =>
-        o.sessions.includes(session.id) &&
-        o.sessions.some((id) => id !== session.id && there.has(id)),
-    );
-    const task = claimedTask(scope);
-    return talking || (task !== undefined && session.asks.has(taskClaim(task)));
-  }
-
-  /** The agent read a work's context or asked its agents: that is what Peer would have pointed it to. */
-  private markRead(session: LocalSession, scope: string) {
-    const row = this.works(session).find((work) => work.entry.scope === scope);
-    if (row === undefined) return;
-    const profile = this.profileOf(session.workspace, session.project, row);
-    session.related.set(scope, {
-      level: 3,
-      version: row.entry.version ?? 0,
-      lines: new Set(profile.lines.map((line) => line.text)),
-    });
-    session.boardHeard.add(scope);
+  /** A file the agent changes or is about to: the project's `.ai` may govern it. */
+  private noteTouching(session: LocalSession, file: string) {
+    if (session.touching.size < TOUCHING_KEPT) session.touching.add(file);
   }
 
   /**
-   * What the project's other works say that bears on what this agent does now. It looks again
-   * whenever the agent's focus (its person's asks, its files and the names it writes) or the hub's
-   * view (another work's context was written) changed since it last looked, so not once at the
-   * start but all along. It speaks of what is new: a work the agent was not told of, one that
-   * relates more closely now, one whose context was written again where it bears on the agent.
-   * Never more often than every half minute, and never to wake an agent. It tells; the agent decides.
+   * The agent read a work's shared context (`peer context`): Peer keeps what it read, to tell it
+   * what changes there, and has nothing more to say of the work.
    */
-  private relatedNewsFor(session: LocalSession): string | null {
-    const now = Date.now();
-    const view = this.viewAt.get(session.workspace) ?? 0;
-    const { focus } = session;
-    if (focus.revision === session.relatedFocus && view === session.relatedView) return null;
-    if (now - session.relatedAt < RELATED_GAP) return null;
-    const recent = session.relatedTimes.filter((at) => now - at < 60 * 60 * 1000);
-    session.relatedTimes.splice(0, session.relatedTimes.length, ...recent);
-    if (recent.length >= RELATED_PER_HOUR) return null;
-    const focusChanged = focus.revision !== session.relatedFocus;
-    session.relatedFocus = focus.revision;
-    session.relatedView = view;
-    const profiles = this.works(session)
-      .filter((row) => !this.dealtWith(session, row.entry.scope))
-      .map((row) => this.profileOf(session.workspace, session.project, row));
-    // Down to what would nearly have spoken, for the log: the thresholds are tuned from real runs.
-    const considered = relate(
-      focus,
-      profiles,
-      now,
-      1.5,
-      now - session.modelHintsAt < MODEL_HINT_MS ? session.modelHints : undefined,
-    );
-    // What words cannot judge (an ask in another language, a near miss) a model reads, meanwhile.
-    this.advise(
-      session,
-      "model",
-      () => this.askModel(session, profiles, considered, now),
-      undefined,
-    );
-    if (focusChanged && considered.length > 0) {
-      this.log("related.considered", {
-        session: session.id,
-        focus: this.focusLog(session),
-        works: considered.slice(0, 4).map((related) => ({
-          scope: related.work.input.entry.scope,
-          points: Math.round(related.points * 10) / 10,
-          level: related.level,
-          words: related.words,
-          refs: related.refs,
-          told: session.related.has(related.work.input.entry.scope),
-          speaks: related.points >= SPEAK_POINTS,
-          ...(related.model === undefined ? {} : { model: related.model }),
-        })),
-      });
+  private markRead(session: LocalSession, scope: string, version: number, text: string) {
+    session.read.delete(scope);
+    session.read.set(scope, { version, text: text.slice(0, SHARED_MAX_BYTES), toldAt: Date.now() });
+    if (session.read.size > READ_KEPT) {
+      const oldest = session.read.keys().next().value;
+      if (oldest !== undefined) session.read.delete(oldest);
     }
-    const answer = relatedNews({
-      related: considered.filter((related) => related.points >= SPEAK_POINTS),
-      focus,
-      told: session.related,
-      now,
+    session.boardHeard.add(scope);
+    const row = this.works(session).find((work) => work.entry.scope === scope);
+    this.noteAdvice(session, {
+      about: "work",
+      scope,
+      name: row?.entry.name ?? scope,
+      how: "read",
+      why: `read its shared context, version ${version}`,
+      at: Date.now(),
+    });
+  }
+
+  /** The agent asked a work's agents. */
+  private markAsked(session: LocalSession, scope: string) {
+    session.boardHeard.add(scope);
+    const row = this.works(session).find((work) => work.entry.scope === scope);
+    this.noteAdvice(session, {
+      about: "work",
+      scope,
+      name: row?.entry.name ?? scope,
+      how: "asked",
+      why: "asked the agents at work on it",
+      at: Date.now(),
+    });
+  }
+
+  /**
+   * What goes with an ask of the agent's person: the other works it was not told of yet, or whose
+   * gist changed since, by name and with what each says it builds. Peer does not say which of them
+   * relate to the ask: the agent reads the block, in the inference it runs anyway, and decides.
+   *
+   * It is said once. The agent was told what it was told; a block that repeated it would stay in
+   * its context and be read in every turn after. So an ask with nothing new gets nothing, or one
+   * line after a pause. A project with no other work (only its `.ai`) gets nothing at an ask: the
+   * start named its entries, and an entry that governs a file says so when the file is changed.
+   */
+  private askIndexFor(session: LocalSession, prompt: string): string | null {
+    if (!askedByPerson(prompt)) return null;
+    const works = this.indexWorks(session, INDEX_ALL);
+    if (works.length === 0) return null;
+    // What the agent read, or asked the agents of, it knows more of than a gist says.
+    const fresh = works.filter(
+      (entry) =>
+        entry.read === undefined &&
+        entry.asked !== true &&
+        session.told.get(entry.scope) !== gistKey(entry),
+    );
+    const now = Date.now();
+    if (fresh.length === 0) {
+      if (now - session.askIndexAt < ASK_REMIND_MS) return null;
+      session.askIndexAt = now;
+      this.log("index.asked", { session: session.id, kind: "reminder", works: [] });
+      return askReminderText(this.cli);
+    }
+    const knowledge = standing(this.knowledgeBook(session)).length;
+    const changed = session.told.size > 0;
+    const text = askIndexText({
+      works: fresh,
+      changed,
+      knowledge: knowledge > 0,
       cli: this.cli,
     });
-    if (answer === null) return null;
-    for (const [scope, told] of answer.told) {
-      session.related.set(scope, told);
-      // The board has nothing to add about a work this named.
-      session.boardHeard.add(scope);
-    }
-    for (const told of answer.entries)
-      this.noteAdvice(session, { about: "work", ...told, at: now });
-    session.relatedAt = now;
-    session.relatedTimes.push(now);
-    this.log("related.told", {
+    if (text === null) return null;
+    // Only the works the block gave the gist of are told: the rest come with the next ask.
+    const gisted = fresh.slice(0, ASK_GIST_SHOWN);
+    for (const entry of gisted) session.told.set(entry.scope, gistKey(entry));
+    session.askIndexAt = now;
+    this.log("index.asked", {
       session: session.id,
-      works: [...answer.told.keys()],
-      text: answer.text,
+      kind: changed ? "changed" : "first",
+      works: fresh.slice(0, ASK_INDEX_SHOWN).map((entry) => entry.scope),
+      told: gisted.map((entry) => entry.scope),
+      knowledge,
     });
-    return answer.text;
+    return text;
   }
 
   /**
-   * Asks a model which works relate to the agent's last ask, when words cannot tell (the ask is in
-   * another language, or a work nearly related), in the background: no hook waits for it, and what
-   * it says reaches the agent at its next step as a hint that `relate` weighs with the words.
+   * What changed in the contexts this agent chose to read, since it read them: the lines that came
+   * and went. Reading a context is subscribing to it; nothing else says what bears on the agent.
    */
-  private askModel(
-    session: LocalSession,
-    profiles: ReadonlyArray<WorkProfile>,
-    considered: ReadonlyArray<Related>,
-    now: number,
-  ) {
-    if (!modelEnabled()) return;
-    const recent = session.modelTimes.filter((at) => now - at < 60 * 60 * 1000);
-    session.modelTimes.splice(0, session.modelTimes.length, ...recent);
-    const spoke = considered.some((related) => related.points >= SPEAK_POINTS);
-    if (
-      !shouldAsk({
-        ask: session.lastAsk,
-        judged: session.modelFor,
-        works: profiles.length,
-        nearly: !spoke && considered.some((related) => related.points >= 2),
-        now,
-        lastAt: session.modelAt,
-        lastHour: recent.length,
-        running: session.modelRunning,
-        inFlight: this.modelsRunning,
-      })
-    ) {
-      return;
-    }
-    // It reads project text on the person's own login: only where the project accepts that.
-    if (!projectAcceptsPersonal(readHubPolicyState(), session.workspace, session.project)) {
-      session.modelFor = session.lastAsk;
-      if (!this.modelSkipped.has(session.id)) {
-        this.modelSkipped.add(session.id);
-        this.log("related.model.skipped", {
-          session: session.id,
-          why: "the project does not accept personal capacity",
-        });
+  private followedNews(session: LocalSession): string | null {
+    const now = Date.now();
+    const told: string[] = [];
+    for (const [scope, read] of session.read) {
+      if (told.length >= 2) break;
+      if (now - read.toldAt < FOLLOW_GAP_MS) continue;
+      const mirror = this.shared.get(this.sharedKey(session.workspace, session.project, scope));
+      if (mirror === undefined || mirror.version <= read.version || !contextWritten(mirror.text)) {
+        continue;
       }
-      return;
-    }
-    // The nearest first, then the ones at work: a model reads a handful.
-    const nearness = new Map(
-      considered.map((related) => [related.work.input.entry.scope, related.points]),
-    );
-    const works: ModelWork[] = profiles
-      .toSorted(
-        (a, b) =>
-          (nearness.get(b.input.entry.scope) ?? 0) - (nearness.get(a.input.entry.scope) ?? 0) ||
-          Number(b.input.active) - Number(a.input.active) ||
-          (b.input.updatedAt ?? 0) - (a.input.updatedAt ?? 0),
-      )
-      .slice(0, MODEL_WORKS)
-      .map((profile) => ({
-        scope: profile.input.entry.scope,
-        name: profile.input.entry.name,
-        gist: profile.input.entry.gist,
-        lines: profile.lines.map((line) => line.text),
-      }));
-    const asked = new Set(works.map((work) => work.scope));
-    const prompt = modelPrompt({ ask: session.lastAsk, task: session.focus.task?.title, works });
-    session.modelFor = session.lastAsk;
-    session.modelAt = now;
-    session.modelTimes.push(now);
-    session.modelRunning = true;
-    this.modelsRunning += 1;
-    void runModel(prompt, { signal: this.modelAbort.signal })
-      .then(
-        (output) => {
-          const hints = parseAdjudication(output, asked);
-          this.log("related.model", {
-            session: session.id,
-            works: [...asked],
-            hints: Object.fromEntries(hints),
-            ms: Date.now() - now,
-          });
-          // What a model said of an older ask does not hold for this one, even when it says nothing.
-          session.modelHints = hints;
-          session.modelHintsAt = Date.now();
-          // Look again at the agent's next step: what the model said may be what it hears.
-          if (hints.size > 0) session.relatedFocus = -1;
-        },
-        (error: unknown) => {
-          if (this.modelAbort.signal.aborted) return;
-          this.log("related.model.failed", {
-            session: session.id,
-            error: messageOf(error),
-            ms: Date.now() - now,
-          });
-        },
-      )
-      .finally(() => {
-        session.modelRunning = false;
-        this.modelsRunning -= 1;
+      const text = followedChange({
+        handle: this.handleOf(session.workspace, session.project, scope),
+        name: this.subjectOf(session.workspace, session.project, scope),
+        version: mirror.version,
+        before: read.text,
+        after: mirror.text,
+        by:
+          mirror.updatedBy === undefined
+            ? undefined
+            : this.deps.nameOf(mirror.workspace, mirror.updatedBy),
+        cli: this.cli,
       });
+      // Whatever it said, this is the version the agent has now.
+      read.version = mirror.version;
+      read.text = mirror.text.slice(0, SHARED_MAX_BYTES);
+      read.toldAt = now;
+      if (text === null) continue;
+      told.push(text);
+      this.log("follow.told", { session: session.id, scope, version: mirror.version, text });
+    }
+    return told.length === 0 ? null : told.join("\n\n");
   }
 
-  // ---- reviewed knowledge: what the project already decided or learned that bears on an agent's work ----
+  /**
+   * An entry of the project's `.ai` whose paths name a file the agent changes says so, once: a
+   * fact about a file, as a lock is, not a guess about what the agent does.
+   */
+  private governsNews(session: LocalSession): string | null {
+    const book = this.knowledgeBook(session);
+    if (
+      book.length === 0 ||
+      (session.touching.size === session.governsChecked && book === session.governsBook)
+    ) {
+      return null;
+    }
+    session.governsChecked = session.touching.size;
+    session.governsBook = book;
+    const all = governing(book, session.touching, session.knowledgeTold);
+    const found = all.slice(0, 3);
+    if (found.length === 0) return null;
+    // Those left over are said at the next step.
+    if (all.length > found.length) session.governsChecked = -1;
+    const now = Date.now();
+    for (const { entry, pattern, path } of found) {
+      session.knowledgeTold.add(entry.id);
+      this.noteAdvice(session, {
+        about: "knowledge",
+        scope: `kx:${entry.id}`,
+        name: entry.title,
+        how: "governs",
+        why: `it governs \`${pattern}\`, and you change \`${path}\``,
+        entryKind: entry.kind,
+        path: entry.file,
+        at: now,
+      });
+    }
+    const text = governingText(found, this.cli);
+    this.log("knowledge.governs", {
+      session: session.id,
+      entries: found.map(({ entry, pattern, path }) => ({ id: entry.id, pattern, path })),
+      text,
+    });
+    return text;
+  }
+
+  // ---- the project's `.ai`: read for the index, `peer knowledge` and what governs a file ----
+
+  private knowledgeBook(session: LocalSession): ReadonlyArray<Known> {
+    return this.knowledge.get(session.root)?.book ?? [];
+  }
 
   /**
    * Has the repository's `.ai` read for the agent's next steps: at most once a minute, and a hook
@@ -2935,16 +2832,16 @@ export class CoordinationBroker {
       return;
     }
     if (have !== undefined && Date.now() - have.at < KNOWLEDGE_FRESH_MS) return;
-    const before = have?.profiles ?? [];
-    const settle = (profiles: ReadonlyArray<KnowledgeProfile>) =>
-      this.knowledge.set(root, { at: Date.now(), profiles, reading: undefined });
+    const before = have?.book ?? [];
+    const settle = (book: ReadonlyArray<Known>) =>
+      this.knowledge.set(root, { at: Date.now(), book, reading: undefined });
     const reading = readKnowledge(root).then(
       (entries) => {
-        const profiles = entries.map(profileEntry);
-        if (profiles.length !== before.length) {
-          this.log("knowledge.read", { root, entries: profiles.length });
+        const book = entries.map(known);
+        if (book.length !== before.length) {
+          this.log("knowledge.read", { root, entries: book.length });
         }
-        settle(profiles);
+        settle(book);
       },
       (error: unknown) => {
         this.log("knowledge.failed", { root, error: messageOf(error) });
@@ -2956,64 +2853,202 @@ export class CoordinationBroker {
       const oldest = [...this.knowledge].toSorted(([, a], [, b]) => a.at - b.at)[0];
       if (oldest !== undefined) this.knowledge.delete(oldest[0]);
     }
-    this.knowledge.set(root, { at: have?.at ?? 0, profiles: before, reading });
+    this.knowledge.set(root, { at: have?.at ?? 0, book: before, reading });
     await Promise.race([reading, sleepMs(KNOWLEDGE_READ_WAIT_MS)]);
   }
 
-  /**
-   * What the project already decided or learned (reviewed in its `.ai`) that bears on what this
-   * agent does: entries that govern the files it works on, or are about what it was asked. It hears
-   * of an entry once, two at a time at most, never more often than every 20 s, and never to wake an
-   * agent. It tells; the agent decides.
-   */
-  private knowledgeNewsFor(session: LocalSession): string | null {
-    const profiles = this.knowledge.get(session.root)?.profiles;
-    if (profiles === undefined || profiles.length === 0) return null;
-    const { focus } = session;
-    if (focus.revision === session.knowledgeFocus && profiles === session.knowledgeSeen) {
-      return null;
+  /** `peer knowledge [<id or words>]`: the entries of the project's `.ai`, one of them, or a search. */
+  private async knowledgeCli(session: LocalSession, query: string): Promise<string> {
+    await this.ensureKnowledge(session);
+    const book = this.knowledgeBook(session);
+    if (book.length === 0) {
+      return "peer: this checkout has no `.ai` knowledge (no decisions, conventions, learnings or incidents).";
     }
-    const now = Date.now();
-    if (now - session.knowledgeAt < KNOWLEDGE_GAP) return null;
-    const recent = session.knowledgeTimes.filter((at) => now - at < 60 * 60 * 1000);
-    session.knowledgeTimes.splice(0, session.knowledgeTimes.length, ...recent);
-    if (recent.length >= KNOWLEDGE_PER_HOUR) return null;
-    session.knowledgeFocus = focus.revision;
-    session.knowledgeSeen = profiles;
-    const answer = knowledgeNews({
-      matches: matchKnowledge(focus, profiles, now),
-      told: session.knowledgeTold,
+    if (query === "") {
+      return (
+        knowledgeIndexText(book, { cli: this.cli, shown: 40 }) ?? "peer: nothing stands in `.ai`."
+      );
+    }
+    const hits = searchKnowledge(book, query);
+    if (hits.length === 0) {
+      return `peer: no entry matches "${clip(query, 80)}". ${this.cli} knowledge lists them.`;
+    }
+    const [only] = hits;
+    if (hits.length > 1 || only === undefined) {
+      return [
+        `Entries that match "${clip(query, 80)}" (\`${this.cli} knowledge <id>\` reads one):`,
+        ...hits.map((entry) => `- ${knowledgeLine(entry)}`),
+      ].join("\n");
+    }
+    session.knowledgeTold.add(only.id);
+    this.log("knowledge.opened", { session: session.id, entry: only.id });
+    this.noteAdvice(session, {
+      about: "knowledge",
+      scope: `kx:${only.id}`,
+      name: only.title,
+      how: "read",
+      why: "read it",
+      entryKind: only.kind,
+      path: only.file,
+      at: Date.now(),
     });
-    if (answer === null) return null;
-    for (const { entry, level, source, why } of answer.told) {
-      session.knowledgeTold.add(entry.id);
+    return `${entryText(only)}\n\nThe project's people keep this in \`.ai\`; check your change against it, and if it no longer holds, say so to your person.`;
+  }
+
+  // ---- `peer find`: a model looks when the agent cannot tell ----
+
+  /**
+   * `peer find "<what you will do>"`: the fallback for an agent that cannot tell from the index
+   * what bears on its work. A model (the person's own Claude Code; Sonnet 5.5 at medium effort
+   * unless `PEER_RELATED_MODEL` and `PEER_RELATED_EFFORT` say otherwise) reads the goal against the
+   * other works, with what their contexts say, and the project's `.ai` entries, and says which bear
+   * on it. It runs only when an agent runs the command, in the project's that accept personal logins.
+   */
+  private async find(session: LocalSession, goal: string): Promise<string> {
+    const cli = this.cli;
+    const choose = `${cli} index lists the work and the entries to choose from.`;
+    if (!modelEnabled()) {
+      return `peer: a model is turned off on this computer (PEER_RELATED_MODEL=off). ${choose}`;
+    }
+    if (!projectAcceptsPersonal(readHubPolicyState(), session.workspace, session.project)) {
+      this.log("find.skipped", {
+        session: session.id,
+        why: "the project does not accept personal capacity",
+      });
+      return `peer: ${session.project} does not accept the person's own login for this (its capacity policy wants commercial seats or shared capacity). ${choose}`;
+    }
+    await this.syncNow(session.workspace, 3000);
+    await this.ensureKnowledge(session).catch(() => undefined);
+    const rows = this.works(session).toSorted(CoordinationBroker.byActivity).slice(0, FIND_WORKS);
+    const works: FindWork[] = rows.map((row) => ({
+      id: row.entry.scope,
+      name: row.entry.name,
+      doing:
+        row.entry.agents.length === 0 ? "nobody at work on it now" : row.entry.agents.join("; "),
+      gist: row.entry.gist,
+      // What its agents were asked, then what its context says.
+      lines: [
+        ...row.labels.slice(0, 2),
+        ...(row.text === undefined ? [] : contextLines(row.text, 6)),
+      ],
+    }));
+    const entries: FindEntry[] = standing(this.knowledgeBook(session))
+      .slice(0, FIND_ENTRIES)
+      .map((entry) => ({
+        id: `kx:${entry.id}`,
+        kind: entry.kind,
+        title: entry.title,
+        summary: entry.summary,
+        paths: entry.paths,
+      }));
+    if (works.length === 0 && entries.length === 0) {
+      return "peer: there is no other work on this project and no `.ai` entry here to look at.";
+    }
+    // Check and reserve together after asynchronous reads: another request may have started
+    // a model while this one was synchronizing or reading the project's knowledge.
+    const now = Date.now();
+    session.findTimes.splice(
+      0,
+      session.findTimes.length,
+      ...session.findTimes.filter((at) => now - at < 60 * 60 * 1000),
+    );
+    const refusal = findRefusal({
+      now,
+      lastAt: session.findAt,
+      lastHour: session.findTimes.length,
+      inFlight: this.findsRunning,
+    });
+    if (refusal !== undefined) return `peer: ${refusal}.`;
+    session.findAt = now;
+    session.findTimes.push(now);
+    this.findsRunning += 1;
+    const started = Date.now();
+    let output: string;
+    try {
+      output = await runModel(
+        findPrompt({
+          goal,
+          task:
+            session.task === undefined
+              ? undefined
+              : this.deps.taskName(session.workspace, session.project, session.task),
+          works,
+          entries,
+        }),
+        { signal: this.modelAbort.signal },
+      );
+    } catch (error) {
+      this.log("find.failed", {
+        session: session.id,
+        error: messageOf(error),
+        ms: Date.now() - started,
+      });
+      return `peer: the model could not answer (${messageOf(error)}). ${choose}`;
+    } finally {
+      this.findsRunning -= 1;
+    }
+    const found = parseFound(output, new Set([...works, ...entries].map((one) => one.id)));
+    this.log("find.asked", {
+      session: session.id,
+      goal: clip(goal, 200),
+      works: works.length,
+      entries: entries.length,
+      found,
+      ms: Date.now() - started,
+    });
+    return this.foundText(session, found, rows, works.length, entries.length);
+  }
+
+  /** What `peer find` prints: the works and entries a model said bear on the goal, and how to read each. */
+  private foundText(
+    session: LocalSession,
+    found: ReadonlyArray<{ readonly id: string; readonly why: string }>,
+    rows: ReadonlyArray<WorkRow>,
+    workCount: number,
+    entryCount: number,
+  ): string {
+    const looked = `a model read your goal against ${plural(workCount, "work")} and ${plural(entryCount, "entry", "entries")} of \`.ai\``;
+    if (found.length === 0) return `Peer · ${looked} and found nothing that bears on it.`;
+    const now = Date.now();
+    const lines = found.flatMap(({ id, why }) => {
+      // A reason cut short ends in an ellipsis, which is its own full stop.
+      const sentence = why.endsWith("…") ? why : `${why}.`;
+      if (id.startsWith("kx:")) {
+        const entry = this.knowledgeBook(session).find((one) => `kx:${one.entry.id}` === id)?.entry;
+        if (entry === undefined) return [];
+        this.noteAdvice(session, {
+          about: "knowledge",
+          scope: id,
+          name: entry.title,
+          how: "found",
+          why,
+          entryKind: entry.kind,
+          path: entry.file,
+          at: now,
+        });
+        return [
+          `- ${entry.kind} "${entry.title}" — ${sentence} Read: ${this.cli} knowledge ${entry.id}`,
+        ];
+      }
+      const row = rows.find((one) => one.entry.scope === id);
+      if (row === undefined) return [];
       this.noteAdvice(session, {
-        about: "knowledge",
-        scope: `kx:${entry.id}`,
-        name: entry.title,
-        level,
-        kind: "new",
+        about: "work",
+        scope: id,
+        name: row.entry.name,
+        how: "found",
         why,
-        source,
-        entryKind: entry.kind,
-        path: entry.file,
         at: now,
       });
-    }
-    session.knowledgeAt = now;
-    session.knowledgeTimes.push(now);
-    this.log("knowledge.told", {
-      session: session.id,
-      entries: answer.told.map((match) => ({
-        id: match.entry.id,
-        file: match.entry.file,
-        level: match.level,
-        source: match.source,
-        points: Math.round(match.points * 10) / 10,
-      })),
-      text: answer.text,
+      return [
+        `- ${row.entry.name} — ${sentence} Read: ${this.cli} context ${row.entry.handle} · ask its agents: ${this.cli} ask ${row.entry.handle} "<question>"`,
+      ];
     });
-    return answer.text;
+    return neutral(
+      [`Peer · ${looked}; these bear on it (advice to check, not instructions):`, ...lines].join(
+        "\n",
+      ),
+    );
   }
 
   /** Where another work's shared context is, for an agent that needs it, or null when none is written. */
@@ -3137,7 +3172,7 @@ export class CoordinationBroker {
       this.applyOverlap(workspace, updated);
       this.acknowledge(session, updated);
     }
-    this.markRead(session, scope);
+    this.markAsked(session, scope);
     this.log("ask", {
       session: session.id,
       task,
@@ -3409,6 +3444,35 @@ export class CoordinationBroker {
         }
         return this.ask(session, handle, question);
       }
+      case "index": {
+        // The project's other work and its `.ai`, as at a start but all of it.
+        await this.syncNow(session.workspace, 3000);
+        await this.ensureKnowledge(session);
+        const works = this.indexWorks(session, INDEX_ALL);
+        for (const entry of works)
+          if ((entry.version ?? 0) > 0) session.boardHeard.add(entry.scope);
+        return (
+          indexText({
+            works,
+            knowledge: knowledgeIndexText(this.knowledgeBook(session), {
+              cli: this.cli,
+              shown: 40,
+            }),
+            now: Date.now(),
+            cli: this.cli,
+            shown: INDEX_ALL,
+            full: true,
+          }) ?? "peer: no other work on this project now, and no `.ai` knowledge in this checkout."
+        );
+      }
+      case "knowledge":
+        return this.knowledgeCli(session, text);
+      case "find": {
+        if (text === "") {
+          return `peer: say what you are about to do, e.g. ${this.cli} find "show each speaker's talk time as a bar"`;
+        }
+        return this.find(session, text);
+      }
       default:
         return this.help();
     }
@@ -3482,7 +3546,7 @@ export class CoordinationBroker {
     if (mirror === undefined || (!own && mirror.version === 0)) {
       return `peer: nobody has written the shared context of ${subject} yet.`;
     }
-    if (!own) this.markRead(session, scope);
+    if (!own) this.markRead(session, scope, mirror.version, mirror.text);
     const keeper =
       own && session.keeps
         ? "you keep it"
@@ -3506,7 +3570,10 @@ export class CoordinationBroker {
       `  ${cli} resolve "<agreement>"      close your open overlaps with what was agreed`,
       `  ${cli} claim <path>... [--intent "<why>"]   files or directories/ you are about to change`,
       `  ${cli} release [<path>...]        drop claims`,
+      `  ${cli} index                      the project's other work and its .ai, to choose what you need from`,
       `  ${cli} context [<task>] [history|<version>]  a work's shared context (yours by default), its versions, or one`,
+      `  ${cli} knowledge [<id or words>]  the project's decisions, conventions, learnings and incidents: list, search or read one`,
+      `  ${cli} find "<what you will do>"   a model looks for what bears on it, when you cannot tell`,
       `  ${cli} ask <task> "<question>"     the agents at work on a task yours depends on (they answer as a note)`,
     ].join("\n");
   }
@@ -3689,12 +3756,9 @@ export class CoordinationBroker {
           session.sharedHeard = 0;
           session.sharedHeardText = "";
           // What belonged to its old work is no part of the new: lines it marked for the project,
-          // what it was told of related work, whom the roster was kept for.
+          // the contexts it read for it, whom the roster was kept for.
           session.marked.clear();
-          session.related.clear();
-          // Nor does what a model said of its asks then.
-          session.modelHints = new Map();
-          session.modelHintsAt = 0;
+          session.read.clear();
           session.toldClosed = false;
           session.sharedToldAt = 0;
           session.roster = undefined;
@@ -3705,8 +3769,6 @@ export class CoordinationBroker {
             `Peer: your person put you on ${name(task)} (you were on ${name(from)}). Its shared context is ${this.cli} context${task === undefined ? "" : ` ${this.handleOf(session.workspace, session.project, scopeOf(task))}`}; your working context stays ${session.ownContextPath}.`,
           );
         }
-        // Its task's name may reach this computer after its session does.
-        this.refocus(session);
       }
       const workspaces = new Set<string>([
         ...this.deps.workspaces(),
@@ -3829,21 +3891,6 @@ function realPath(path: string): string {
       missing.unshift(NodePath.basename(existing));
       existing = parent;
     }
-  }
-}
-
-/** The first `bytes` of a file as text, or null when it cannot be read. */
-async function readHead(path: string, bytes: number): Promise<string | null> {
-  const handle = await NodeFSP.open(path, "r").catch(() => null);
-  if (handle === null) return null;
-  try {
-    const buffer = Buffer.alloc(bytes);
-    const { bytesRead } = await handle.read(buffer, 0, bytes, 0);
-    return buffer.subarray(0, bytesRead).toString("utf8");
-  } catch {
-    return null;
-  } finally {
-    await handle.close().catch(() => undefined);
   }
 }
 

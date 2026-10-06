@@ -536,7 +536,7 @@ describe("activeAgents", () => {
   });
 });
 
-describe("what Peer told an agent", () => {
+describe("what an agent did with the team's work", () => {
   const told = (
     over: Partial<NonNullable<PeerHubStatus["coordination"]["advice"]>[number]> = {},
   ): NonNullable<PeerHubStatus["coordination"]["advice"]>[number] => ({
@@ -546,10 +546,8 @@ describe("what Peer told an agent", () => {
     about: "work",
     scope: "task:str",
     name: "STR",
-    level: 1,
-    kind: "new",
-    why: 'it shares "variance calculation" with what you do',
-    source: "words",
+    how: "read",
+    why: "read its shared context, version 3",
     at: "2026-10-03T11:55:00Z",
     ...over,
   });
@@ -606,7 +604,7 @@ describe("what Peer told an agent", () => {
   it("is listed on the work its agent is on, newest first, with whose agent it was", () => {
     const status = withAdvice([
       told({ at: "2026-10-03T11:50:00Z", name: "Partner Rec", scope: "task:partner-rec" }),
-      told({ at: "2026-10-03T11:58:00Z", session: "codex:b", kind: "closer", level: 3 }),
+      told({ at: "2026-10-03T11:58:00Z", session: "codex:b", how: "asked" }),
       told({ session: "claude:c", name: "Loose ends" }),
     ]);
     const rows = on(status, "task:krk-812");
@@ -632,26 +630,25 @@ describe("what Peer told an agent", () => {
     expect(on({ ...base, coordination }, "task:krk-812")).toEqual([]);
   });
 
-  it("says in a line what happened, and what made Peer say it", () => {
+  it("says in a line whose agent did what", () => {
     const row = (over: Parameters<typeof told>[0]) => {
       const rows = on(withAdvice([told({ session: "codex:b", ...over })]), "task:krk-812");
       return adviceLabel(rows[0]!);
     };
-    expect(row({})).toBe("Yev’s agent was pointed to this related work");
-    expect(row({ kind: "closer" })).toBe("Yev’s agent was told this work came closer to its own");
-    expect(row({ kind: "changed" })).toBe(
-      "Yev’s agent heard this work said more where it bears on its own",
+    expect(row({})).toBe("Yev’s agent read this work’s context");
+    expect(row({ how: "asked" })).toBe("Yev’s agent asked this work’s agents");
+    expect(row({ how: "found" })).toBe("Yev’s agent was pointed to this work by a model it asked");
+    expect(row({ about: "knowledge", scope: "kx:d1", entryKind: "decision", how: "read" })).toBe(
+      "Yev’s agent read a decision of the project",
     );
-    expect(row({ source: "model" })).toBe(
-      "Yev’s agent was pointed to this related work (a model that read both said so)",
+    expect(row({ about: "knowledge", scope: "kx:d1", entryKind: "decision", how: "governs" })).toBe(
+      "Yev’s agent was reminded of a decision of the project that governs files it changes",
     );
-    expect(
-      row({ about: "knowledge", scope: "kx:d1", entryKind: "decision", source: "paths" }),
-    ).toBe(
-      "Yev’s agent was reminded of a decision of the project (it governs files the agent works on)",
+    expect(row({ about: "knowledge", scope: "kx:d1", how: "found" })).toBe(
+      "Yev’s agent was pointed to an entry of the project by a model it asked",
     );
     const mine = on(withAdvice([told({})]), "task:krk-812");
-    expect(adviceLabel(mine[0]!)).toBe("Your agent was pointed to this related work");
+    expect(adviceLabel(mine[0]!)).toBe("Your agent read this work’s context");
   });
 });
 

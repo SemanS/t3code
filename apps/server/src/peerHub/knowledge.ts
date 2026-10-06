@@ -24,8 +24,8 @@ export interface KontextRun {
 }
 
 /**
- * The environment of a model run on the person's own Claude Code (kontext's, and the one that
- * judges related work, `relatedModel`): Peer's own. The coordination lab keeps its Peers'
+ * The environment of a model run on the person's own Claude Code (kontext's, and the one an
+ * agent asks with `peer find`, `findModel`): Peer's own. The coordination lab keeps its Peers'
  * Claude Code settings apart (CLAUDE_CONFIG_DIR) and names, in
  * `PEER_KONTEXT_CLAUDE_CONFIG_DIR`, the person's own Claude Code that
  * kontext's llm adapter runs on; empty for Claude Code's default. Naming

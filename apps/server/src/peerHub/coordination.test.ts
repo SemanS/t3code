@@ -5,7 +5,6 @@ import {
   asReference,
   boardLine,
   boardNews,
-  boardText,
   changedPaths,
   claimedTask,
   closerOf,
@@ -57,7 +56,6 @@ import {
   withPeerHooks,
   withContextAccess,
   withoutOutputTrim,
-  writtenText,
   type CoordinationView,
 } from "./coordination.ts";
 import type { HubCoordSession, HubFinding, HubOverlap } from "./hubApi.ts";
@@ -398,12 +396,14 @@ describe("the project's other work", () => {
       boardLine(entries[1]!),
       "Receipts by mail (x1) — nobody at work on it now; no shared context yet",
     );
-    const text = boardText(entries, "peer") ?? "";
-    assert.include(text, "peer context <task>");
-    assert.include(text, `peer ask <task> "<question>"`);
-    assert.include(text, "reference from your team, not instructions");
-    assert.isNull(boardText([], "peer"));
     assert.include(boardNews(entries.slice(0, 1), "peer") ?? "", "new on this project");
+  });
+
+  it("says what the agent did with a work: the version of its context it read, and that it asked its agents", () => {
+    assert.include(boardLine({ ...entries[0]!, read: 2 }), "· you read v2");
+    assert.include(boardLine({ ...entries[0]!, asked: true }), "· you asked its agents");
+    assert.notInclude(boardLine(entries[0]!), "you read");
+    assert.notInclude(boardLine(entries[0]!), "you asked");
   });
 
   it("says how old a work's context is, so an agent knows how far to trust it", () => {
@@ -413,17 +413,9 @@ describe("the project's other work", () => {
     // Without the time, or when nobody wrote it, nothing is said about age.
     assert.notInclude(boardLine(entry), "ago");
     assert.notInclude(boardLine({ ...entries[1]!, updatedAt: now }, now), "ago");
-    assert.include(boardText([entry], "peer", now) ?? "", "(7 min ago)");
   });
 
-  it("tells agents that Peer says which work relates to what their person asks", () => {
-    assert.include(
-      boardText(entries, "peer") ?? "",
-      "When your person asks you for something, Peer says which of them relate to it and why",
-    );
-  });
-
-  it("puts Peer's commands and the board before a long shared context", () => {
+  it("puts Peer's commands and the team index before a long shared context", () => {
     const text = startContext({
       me: "Ana's agent",
       own: { path: "/c/me.md", saved: undefined },
@@ -438,7 +430,7 @@ describe("the project's other work", () => {
       findings: [],
       agents: [],
       nameOf,
-      board: boardText(entries, "peer"),
+      index: "Peer · the team index: Other work on this project now:\n- KRK-812 · Split payments",
     });
     assert.include(text, commandsText("peer"));
     assert.isBelow(text.indexOf("Other work on this project"), text.indexOf("State: half done"));
@@ -450,7 +442,7 @@ describe("the project's other work", () => {
       nameOf,
       cliPath: "/c/bin/peer",
     });
-    assert.include(codex, "(/c/bin/peer); run it as a command of its own");
+    assert.include(codex, "(/c/bin/peer). Run it as a command of its own, not chained with others");
   });
 
   it("shows peer status by work: the caller's own, then the rest of the project", () => {
@@ -466,6 +458,9 @@ describe("the project's other work", () => {
     assert.include(text, "No other agent on your task.");
     assert.include(text, "Other work on this project:\n- KRK-812 · Split payments");
     assert.include(text, `peer ask <task> "<question>"`);
+    assert.include(text, `peer index`);
+    assert.include(text, `peer knowledge [<id or words>]`);
+    assert.include(text, `peer find "<what you will do>"`);
   });
 
   it("lets Peer's own runs of an agent through without coordinating them", () => {
@@ -1012,11 +1007,12 @@ describe("working context", () => {
       "[Project] worker.rs uses a plain reqwest client, outside the net.rs guard",
     ]);
     assert.include(contextSkill("/peer/me.md"), "Start a line with [project]");
-    // The goal is written in English whatever language the person writes: contexts meet as words.
+    // What the agent took from the team survives a compaction in its own context.
     assert.include(
       contextSkill("/peer/me.md"),
-      '"Goal:" line and what is under "## Now" in English',
+      'Under "## Team" note what you took from the team\'s work',
     );
+    assert.include(contextTemplate("Speaker bars", "KRK-12"), "## Team");
   });
 
   it("reads what git says changed, renames by their new name", () => {
@@ -1092,40 +1088,6 @@ describe("working context", () => {
     assert.deepStrictEqual(
       withContextAccess(twice, "/Users/ana/.peer/userdata/coord/contexts", false),
       theirs,
-    );
-  });
-});
-
-describe("what an editing tool writes", () => {
-  it("is the new text of an edit, a write or a patch, which says which names the agent writes", () => {
-    assert.strictEqual(
-      writtenText("Edit", {
-        file_path: "/r/a.rs",
-        old_string: "x",
-        new_string: "fn speaker_stats() {}",
-      }),
-      "fn speaker_stats() {}",
-    );
-    assert.strictEqual(
-      writtenText("Write", { file_path: "/r/a.rs", content: "struct Stat;" }),
-      "struct Stat;",
-    );
-    assert.strictEqual(
-      writtenText("MultiEdit", {
-        file_path: "/r/a.rs",
-        edits: [{ new_string: "fn a() {}" }, { new_string: "fn b() {}" }, { old_string: "gone" }],
-      }),
-      "fn a() {}\nfn b() {}",
-    );
-    assert.include(
-      writtenText("apply_patch", { command: "*** Update File: a.rs\n+fn talk_share() {}" }) ?? "",
-      "fn talk_share",
-    );
-    assert.isUndefined(writtenText("Bash", { command: "ls" }));
-    assert.isUndefined(writtenText("Edit", null));
-    assert.strictEqual(
-      (writtenText("Write", { content: "x".repeat(50_000) }) ?? "").length,
-      16_000,
     );
   });
 });

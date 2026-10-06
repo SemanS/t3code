@@ -275,9 +275,10 @@ function Reports({ context }: { readonly context: WorkContextNode }) {
 }
 
 /**
- * What Peer told this work's agents: other work on the project that relates to what they were asked
- * (and why), and the project's reviewed knowledge that bears on their files. Peer tells, the agent
- * decides; people see it here to trust it or to correct what their agents are pointed to.
+ * What this work's agents did with the team's work and the project's knowledge: which contexts they
+ * read, whose agents they asked, what a model they asked pointed them to, and which decision of the
+ * project governs files they change. The agents choose from an index Peer gives them; people see
+ * here what they relied on, to trust it or to correct it.
  */
 function Advice({
   rows,
@@ -287,8 +288,8 @@ function Advice({
   readonly onOpenWork: (scope: string) => void;
 }) {
   return (
-    <section aria-label="What Peer told these agents">
-      <SectionTitle>Peer pointed these agents to · {rows.length}</SectionTitle>
+    <section aria-label="What these agents looked at">
+      <SectionTitle>What these agents looked at · {rows.length}</SectionTitle>
       <ul className="flex flex-col">
         {rows.map((row) => (
           <li key={row.key} className="flex min-w-0 items-start gap-2 py-1.5">
