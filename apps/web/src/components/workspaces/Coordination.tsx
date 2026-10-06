@@ -219,8 +219,8 @@ function ExperimentSteps() {
         <li>On both, start that agent in herdr in that checkout, each on a branch of its own.</li>
         <li>
           Computer A: “In apps/server/src/webhooks.rs every delivery should also send user-agent:
-          vocabulift-webhooks/&lt;version&gt; and webhook-attempt: &lt;n&gt; (1-based); pass the
-          attempt from round() into post(). Keep it small, do not run cargo, do not push.”
+          app-webhooks/&lt;version&gt; and webhook-attempt: &lt;n&gt; (1-based); pass the attempt
+          from round() into post(). Keep it small, do not run cargo, do not push.”
         </li>
         <li>
           A minute later, computer B: “In apps/server/src/webhooks.rs let post() sign the delivery
