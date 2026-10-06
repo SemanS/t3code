@@ -1170,6 +1170,76 @@ export function createServerEnvironmentAtoms<R, E>(
       tag: WS_METHODS.peerHubRestoreContext,
     }),
     /** A project's knowledge candidates; the count waiting in the input reads them again. */
+    peerHubMemoryState: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:peer-hub:memory-state",
+      tag: WS_METHODS.peerHubMemoryState,
+      staleTimeMs: 0,
+      idleTtlMs: 0,
+    }),
+    peerHubMemoryQueue: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:peer-hub:memory-queue",
+      tag: WS_METHODS.peerHubMemoryQueue,
+      staleTimeMs: 0,
+      idleTtlMs: 0,
+    }),
+    peerHubMemoryRetry: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:memory-retry",
+      tag: WS_METHODS.peerHubMemoryRetry,
+    }),
+    peerHubMemoryDiscard: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:memory-discard",
+      tag: WS_METHODS.peerHubMemoryDiscard,
+    }),
+    peerHubMemoryMode: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:peer-hub:memory-mode",
+      tag: WS_METHODS.peerHubMemoryMode,
+      staleTimeMs: 0,
+      idleTtlMs: 0,
+    }),
+    peerHubMemorySetMode: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:memory-setmode",
+      tag: WS_METHODS.peerHubMemorySetMode,
+    }),
+    peerHubMemorySearch: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:peer-hub:memory-search",
+      tag: WS_METHODS.peerHubMemorySearch,
+      staleTimeMs: 0,
+      idleTtlMs: 0,
+    }),
+    peerHubMemoryRead: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:peer-hub:memory-read",
+      tag: WS_METHODS.peerHubMemoryRead,
+      staleTimeMs: 0,
+      idleTtlMs: 0,
+    }),
+    peerHubMemoryProject: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:memory-project",
+      tag: WS_METHODS.peerHubMemoryProject,
+    }),
+    peerHubMemoryExecute: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:memory-execute",
+      tag: WS_METHODS.peerHubMemoryExecute,
+    }),
+    peerHubMemoryChanges: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:peer-hub:memory-changes",
+      tag: WS_METHODS.peerHubMemoryChanges,
+      staleTimeMs: 0,
+      idleTtlMs: 0,
+    }),
+    peerHubMemoryReceipts: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:peer-hub:memory-receipts",
+      tag: WS_METHODS.peerHubMemoryReceipts,
+      staleTimeMs: 0,
+      idleTtlMs: 0,
+    }),
+    peerHubMemoryKeep: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:memory-keep",
+      tag: WS_METHODS.peerHubMemoryKeep,
+    }),
+    peerHubMemoryImportKnowledge: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:memory-importknowledge",
+      tag: WS_METHODS.peerHubMemoryImportKnowledge,
+    }),
     peerHubKnowledgeCandidates: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:peer-hub:knowledge-candidates",
       tag: WS_METHODS.peerHubKnowledgeCandidates,

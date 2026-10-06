@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./peer-memory": {
+      "types": "./src/peerMemory.ts",
+      "default": "./src/peerMemory.ts"
+    },
     "./composerThreadItems": {
       "types": "./src/composerThreadItems.ts",
       "default": "./src/composerThreadItems.ts"

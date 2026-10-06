@@ -128,6 +128,7 @@ function LocalSettingsRouteScreen() {
 }
 
 function SettingsIndexSections() {
+  const navigation = useNavigation();
   const { selectedTargets, projectGroups, selectedProjectKey } = useSettingsEnvironmentFilter();
   const noServerTargets = selectedTargets.length === 0;
   const selectedProject = projectGroups.find((group) => group.key === selectedProjectKey);
@@ -158,6 +159,11 @@ function SettingsIndexSections() {
       </SettingsSection>
 
       <SettingsSection title="Projects & threads">
+        <SettingsRow
+          icon="brain"
+          label="Memory"
+          onPress={() => navigation.navigate("MemoryProjects")}
+        />
         {selectedProjectKey !== null ? (
           <SettingsRow
             icon="folder"

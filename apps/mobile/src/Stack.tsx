@@ -53,6 +53,9 @@ import { ThreadRouteScreen } from "./features/threads/ThreadRouteScreen";
 import { ConnectionsRouteScreen } from "./features/connection/ConnectionsRouteScreen";
 import { ConnectionsNewRouteScreen } from "./features/connection/ConnectionsNewRouteScreen";
 import { HomeRouteScreen } from "./features/home/HomeRouteScreen";
+import { MemoryProjectsRouteScreen } from "./features/memory/MemoryProjectsRouteScreen";
+import { MemoryRouteScreen } from "./features/memory/MemoryRouteScreen";
+import { MemoryRecordRouteScreen } from "./features/memory/MemoryRecordRouteScreen";
 import { AddProjectDestinationRoute } from "./features/projects/AddProjectDestinationRoute";
 import { AddProjectLocalRoute } from "./features/projects/AddProjectLocalRoute";
 import { AddProjectNewRoute } from "./features/projects/AddProjectNewRoute";
@@ -683,6 +686,24 @@ const RootStackConfig = createNativeStackNavigator({
         headerBackVisible: false,
         ...getCompactBrandHeaderOptions(),
       },
+    }),
+    MemoryProjects: createNativeStackScreen({
+      screen: MemoryProjectsRouteScreen,
+      linking: "memory",
+      options: { ...GLASS_HEADER_OPTIONS, title: "Memory" },
+    }),
+    Memory: createNativeStackScreen({
+      screen: MemoryRouteScreen,
+      linking: "memory/:environmentId/:workspace/:project",
+      options: { ...GLASS_HEADER_OPTIONS, title: "Memory" },
+    }),
+    MemoryRecord: createNativeStackScreen({
+      screen: MemoryRecordRouteScreen,
+      linking: {
+        path: "memory/:environmentId/:workspace/:project/:id/:version",
+        parse: { version: Number },
+      },
+      options: { ...GLASS_HEADER_OPTIONS, title: "Memory detail" },
     }),
     Thread: createNativeStackScreen({
       screen: ThreadRouteScreen,

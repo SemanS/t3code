@@ -124,6 +124,7 @@ import {
   resolveProjectPathForDispatch,
 } from "../lib/projectPaths";
 import { onOpenCommandPalette } from "../commandPaletteBus";
+import { usePeerHubStatus } from "./workspaces/WorkspaceAccess";
 import { isPreviewFocused } from "../lib/previewFocus";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import {
@@ -721,6 +722,7 @@ function OpenCommandPaletteDialog(props: {
   const { environments } = useEnvironments();
   const desktopLocalBootstraps = useDesktopLocalBootstraps();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const peerHub = usePeerHubStatus(primaryEnvironmentId);
   const availableSettingsSearchItems = useAvailableSettingsSearchItems();
   const { activeDraftThread, activeThread, defaultProjectRef, handleNewThread } =
     useHandleNewThread();
@@ -2274,6 +2276,49 @@ function OpenCommandPaletteDialog(props: {
         });
       },
     });
+  }
+
+  for (const workspace of peerHub?.signedIn ? peerHub.workspaces : []) {
+    actionItems.push({
+      kind: "action",
+      value: `action:memory:${workspace.slug}:company`,
+      title: "Open Memory · Company knowledge",
+      description: workspace.name,
+      searchTerms: ["memory", "company", "knowledge", "review", workspace.slug],
+      icon: <FileSearchIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        await navigate({
+          to: "/memory/$workspace/$project",
+          params: { workspace: workspace.slug, project: "company" },
+          search: {},
+        });
+      },
+    });
+    for (const { project } of workspace.projects) {
+      actionItems.push({
+        kind: "action",
+        value: `action:memory:${workspace.slug}:${project.id}`,
+        title: `Open Memory · ${project.name}`,
+        description: workspace.name,
+        searchTerms: [
+          "memory",
+          "findings",
+          "evidence",
+          "topics",
+          "review",
+          project.name,
+          workspace.slug,
+        ],
+        icon: <FileSearchIcon className={ITEM_ICON_CLASS} />,
+        run: async () => {
+          await navigate({
+            to: "/memory/$workspace/$project",
+            params: { workspace: workspace.slug, project: project.id },
+            search: {},
+          });
+        },
+      });
+    }
   }
 
   const rootGroups = buildRootGroups({ actionItems, recentThreadItems });

@@ -7,6 +7,19 @@ function completed(input: unknown, output?: unknown): T3ToolSummaryCall {
 }
 
 describe("summarizeT3ToolCalls", () => {
+  it("summarizes memory tools without claiming that queued writes are committed", () => {
+    expect(summarizeT3ToolCalls("memory", [completed({}, { status: "pending" })])).toEqual({
+      label: "Used shared memory tools 1 time",
+      failedCount: 0,
+    });
+    expect(
+      summarizeT3ToolCalls("memory", [{ input: {}, output: undefined, outcome: "failed" }]),
+    ).toEqual({
+      label: "Tried to use shared memory tools 1 time",
+      failedCount: 1,
+    });
+  });
+
   it("counts registered projects, repository destinations, and accepted thread launches", () => {
     expect(
       summarizeT3ToolCalls("project-create", [

@@ -392,6 +392,9 @@ export function summarizeT3ToolCalls(
     case "browser":
       label = phrase("Used", "use", `browser ${times}`);
       break;
+    case "memory":
+      label = phrase("Used", "use", `shared memory tools ${times}`);
+      break;
     case "device":
       label = phrase("Used", "use", `device controls ${times}`);
       break;

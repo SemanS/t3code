@@ -20,6 +20,7 @@ import { WorkspacePageHeader } from "../WorkspacePageHeader";
 import { confirmed, reportFailure, useWorkActions } from "./WorkPanel";
 import { StatusGlyph } from "./workStatus";
 import { usePeerHubStatus } from "./WorkspaceAccess";
+import { WorkMemoryPanel } from "./WorkMemoryPanel";
 import {
   adviceLabel,
   adviceOnWork,
@@ -87,6 +88,12 @@ export function WorkContextView({ workspace, project, scope }: Place) {
           input: { workspace, project, scope, version: context.version },
         }),
   );
+  const memoryState = useEnvironmentQuery(
+    environmentId === null
+      ? null
+      : serverEnvironment.peerHubMemoryState({ environmentId, input: { workspace, project } }),
+  );
+  const memoryMode = memoryState.error === null && memoryState.data?.mode === "memory";
   const text = read.data?.text ?? "";
   const subject =
     task !== undefined
@@ -139,7 +146,11 @@ export function WorkContextView({ workspace, project, scope }: Place) {
             <span className="min-w-0 truncate text-sm font-medium text-foreground">{subject}</span>
             <span className="shrink-0 truncate text-xs text-muted-foreground">
               {[
-                scope === "project" ? "Shared context" : "Task context",
+                memoryMode
+                  ? "Work overview"
+                  : scope === "project"
+                    ? "Shared context"
+                    : "Task context",
                 context === undefined ? null : `version ${context.version}`,
                 context === undefined || context.tokens === 0 ? null : contextSize(context.tokens),
               ]
@@ -152,8 +163,9 @@ export function WorkContextView({ workspace, project, scope }: Place) {
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-6 py-6">
             {context === undefined ? (
               <p className="text-sm text-muted-foreground">
-                No shared context yet. The first agent that starts on this work, with agent
-                coordination on, starts it and keeps it.
+                {memoryMode
+                  ? "No shared work overview yet. Findings and questions are available below in Relevant memory."
+                  : "No shared context yet. The first agent that starts on this work, with agent coordination on, starts it and keeps it."}
               </p>
             ) : (
               <>
@@ -183,6 +195,14 @@ export function WorkContextView({ workspace, project, scope }: Place) {
                   </div>
                 ) : null}
               </>
+            )}
+            {environmentId === null ? null : (
+              <WorkMemoryPanel
+                environmentId={environmentId}
+                workspace={workspace}
+                project={project}
+                scope={scope}
+              />
             )}
             <section aria-label="Agents on this work">
               <SectionTitle>Agents on this work · {agents.length}</SectionTitle>
@@ -217,9 +237,9 @@ export function WorkContextView({ workspace, project, scope }: Place) {
               />
             )}
             <p className="text-xs leading-relaxed text-muted-foreground">
-              One agent keeps this context at a time: the first on the work, then the next when its
-              session ends or it stays idle while another agent works. The others read it and send
-              it what they find, and get it as reference from their team, never as instructions.
+              {memoryMode
+                ? "This text is a work overview. Findings and evidence remain in Memory; each agent's working context is private to its session."
+                : "One agent keeps this context at a time: the first on the work, then the next when its session ends or it stays idle while another agent works. The others read it and send it what they find, and get it as reference from their team, never as instructions."}
             </p>
           </div>
         </div>
