@@ -283,14 +283,20 @@ interface HerdrAgentState extends Herdr.HerdrAgent {
   };
 }
 
-/** What Peer shows and reports of herdr's agents, to tell a change from a re-read. */
+/**
+ * What Peer shows and reports of herdr's agents, to tell a change from a re-read.
+ * The completion is in it because a turn can start and finish between two reads
+ * and leave the state as it was.
+ */
 function herdrSignature(
   agents: ReadonlyArray<HerdrAgentState> | null,
   keyOf: (agent: HerdrAgentState) => string,
 ): string {
   if (agents === null) return "";
   return agents
-    .map((a) => [keyOf(a), a.paneId, a.status, a.title, a.cwd, a.branch].join("\u0000"))
+    .map((a) =>
+      [keyOf(a), a.paneId, a.status, a.completionSeq, a.title, a.cwd, a.branch].join("\u0000"),
+    )
     .toSorted()
     .join("\u0001");
 }
@@ -510,6 +516,13 @@ export class PeerHub extends Context.Service<
     readonly promptAgent: (
       input: PeerHubPromptAgentInput,
     ) => Effect.Effect<PeerHubStatus, PeerHubError>;
+    /**
+     * Starts a Claude Code or Codex agent in herdr, in a pane of Peer's own workspace there,
+     * and gives it its prompt once it is ready. Not a contract yet: no client calls it.
+     */
+    readonly startAgent: (
+      input: Herdr.StartHerdrAgentInput,
+    ) => Effect.Effect<Herdr.StartedHerdrAgent, PeerHubError>;
     /** Lets the team watch one of this computer's threads live, or stops it. */
     readonly shareThread: (
       input: PeerHubShareThreadInput,
@@ -1844,7 +1857,9 @@ const make = Effect.gen(function* () {
           repository: place.repositoryId,
           ...(task === undefined ? {} : { task }),
           title: agent.title.slice(0, 300),
-          status: agent.status,
+          // Finished work is "done" like a Peer thread's, whether or not someone looked in herdr.
+          // The local list keeps herdr's own state: Needs you clears once the person has looked.
+          status: Herdr.herdrWorkStatus(agent),
           ...(agent.agent === undefined ? {} : { harness: agent.agent }),
           ...(agent.branch === undefined ? {} : { branch: agent.branch }),
           source: "herdr",
@@ -2019,10 +2034,17 @@ const make = Effect.gen(function* () {
     return { gh, account };
   });
 
+  /** herdr's events say to read its agents again; a burst of them is one signal. */
+  const herdrChanged = yield* Queue.dropping<void>(1);
+  /** Lists herdr's agents with its events subscribed first, so no change goes unheard. */
+  const herdrFollower = Herdr.followHerdrAgents({
+    onChange: () => void Queue.offerUnsafe(herdrChanged, undefined),
+    retryMs: HERDR_RESYNC_MS,
+  });
   const herdrPlaces = new Map<string, { at: number; place: HerdrAgentState["place"] }>();
   /** What herdr runs on this computer, with each agent's git branch and worktree's repository. */
   const refreshHerdr = Effect.gen(function* () {
-    const agents = yield* Effect.promise(() => Herdr.listHerdrAgents());
+    const agents = yield* Effect.promise(() => herdrFollower.read());
     const nowMillis = DateTime.toEpochMillis(yield* DateTime.now);
     const withBranches =
       agents === null
@@ -2138,34 +2160,34 @@ const make = Effect.gen(function* () {
           ),
         } satisfies PeerAgentView;
       }
+      // herdr will not read a working full-screen agent's history. Say so rather than show nothing;
+      // the view is read again every second, so its output appears once herdr reports it idle or done.
       const terminal = yield* Effect.promise(() => Herdr.readHerdrAgent(agent.paneId));
+      const hint = [
+        terminal.kind === "notIdle" ? Herdr.herdrNotIdleHint(agent.status) : undefined,
+        agent.agent === "claude"
+          ? "To follow this conversation here instead of its terminal, install herdr's Claude Code integration once: herdr integration install claude"
+          : undefined,
+      ]
+        .filter((line) => line !== undefined)
+        .join(". ");
       return {
         ...base,
-        ...(terminal === null ? {} : { terminal }),
-        ...(agent.agent === "claude"
-          ? {
-              hint: "To follow this conversation here instead of its terminal, install herdr's Claude Code integration once: herdr integration install claude",
-            }
-          : {}),
+        ...(terminal.kind === "text" ? { terminal: terminal.text } : {}),
+        ...(hint === "" ? {} : { hint }),
       } satisfies PeerAgentView;
     });
 
   /**
    * Keeps herdr's agents current. herdr's events say when an agent appears,
    * leaves or changes state; Peer then reads the list, shows it at once and
-   * tells the hub within a couple of seconds. Without events (no herdr, or
-   * one from before them) Peer reads the list every few seconds instead.
+   * tells the hub within a couple of seconds. The events are subscribed before
+   * each list, and again at once when herdr drops them for falling behind.
+   * Without events (no herdr, or one from before them) Peer reads the list
+   * every few seconds instead.
    */
   const followHerdr = Effect.gen(function* () {
-    const changed = yield* Queue.dropping<void>(1);
-    const signal = () => void Queue.offerUnsafe(changed, undefined);
-    const watch = {
-      handle: null as Herdr.HerdrWatch | null,
-      panes: "",
-      refused: false,
-      retryAt: 0,
-    };
-    yield* Effect.addFinalizer(() => Effect.sync(() => watch.handle?.close()));
+    yield* Effect.addFinalizer(() => Effect.sync(() => herdrFollower.close()));
     let shown = "";
     let reported = "";
     let reportedAt = 0;
@@ -2185,36 +2207,11 @@ const make = Effect.gen(function* () {
         reportedAt = now;
         yield* background(refreshWork);
       }
-      if (watch.refused) {
-        watch.refused = false;
-        watch.retryAt = now + HERDR_RESYNC_MS;
-      }
-      // Follow the panes that run agents now: herdr reports state per pane.
-      const panes = (agents ?? []).map((agent) => agent.paneId).toSorted();
-      if (agents === null) {
-        watch.handle?.close();
-        watch.handle = null;
-      } else if (
-        (watch.handle === null || watch.panes !== panes.join(" ")) &&
-        now >= watch.retryAt
-      ) {
-        watch.handle?.close();
-        watch.panes = panes.join(" ");
-        watch.handle = Herdr.watchHerdrAgents({
-          paneIds: panes,
-          onChange: signal,
-          onEnd: (subscribed) => {
-            watch.handle = null;
-            watch.refused = !subscribed;
-            signal();
-          },
-        });
-      }
       return seen !== reported
         ? Math.max(100, HERDR_REPORT_GAP_MS - (now - reportedAt))
-        : watch.handle === null
-          ? HERDR_POLL_MS
-          : HERDR_RESYNC_MS;
+        : herdrFollower.live()
+          ? HERDR_RESYNC_MS
+          : HERDR_POLL_MS;
     });
 
     while (true) {
@@ -2225,11 +2222,11 @@ const make = Effect.gen(function* () {
           ),
         ),
       );
-      const woken = yield* Queue.take(changed).pipe(Effect.timeoutOption(wait));
+      const woken = yield* Queue.take(herdrChanged).pipe(Effect.timeoutOption(wait));
       if (Option.isSome(woken)) {
         // An agent starting or finishing sends a few events at once; read once they settle.
         yield* Effect.sleep(150);
-        yield* Queue.clear(changed);
+        yield* Queue.clear(herdrChanged);
       }
     }
   });
@@ -3761,6 +3758,22 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const startAgent: PeerHub["Service"]["startAgent"] = Effect.fn("PeerHub.startAgent")(
+    function* (input) {
+      const started = yield* Effect.tryPromise(() => Herdr.startHerdrAgent(input)).pipe(
+        Effect.mapError((error) =>
+          hubError(
+            `herdr did not start the agent${error.cause instanceof Error ? `: ${error.cause.message}` : "."}`,
+          ),
+        ),
+      );
+      // Show it at once; herdr's events would say within a moment.
+      yield* refreshHerdr;
+      yield* publish;
+      return started;
+    },
+  );
+
   /** What sharing gives the workspace: one repository, and where it is checked out here if it is. */
   interface SharedRepository {
     readonly name: string;
@@ -4181,6 +4194,7 @@ const make = Effect.gen(function* () {
     focusAgent,
     watchAgent,
     promptAgent,
+    startAgent,
     shareThread,
     observeThread,
     readContext,
