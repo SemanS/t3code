@@ -14,7 +14,9 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeHttp from "node:http";
 import * as NodePath from "node:path";
 
-import type { PeerCoordinationPolicy, PeerWorkStatus } from "@t3tools/contracts";
+import { runtimeStillPresent } from "./workLifecycle.ts";
+
+import type { PeerCoordinationPolicy, PeerWorkStatus, PeerWorkThread } from "@t3tools/contracts";
 
 import {
   AGENT_NAMES,
@@ -130,9 +132,18 @@ export interface CheckoutPlace {
   readonly project: string;
   /** The repository's working tree the agent is in. */
   readonly root: string;
+  readonly repositoryId?: string;
 }
 
 export interface BrokerDeps {
+  /** Confirmed runtime state; undefined leaves hook activity as the bounded fallback lease. */
+  readonly runtimeStatus?: (
+    session: string,
+    thread: string | undefined,
+    pane: string | undefined,
+  ) => PeerWorkStatus | null | undefined;
+  /** Durable unfinished work, including sessions no longer available to answer an ask. */
+  readonly work?: (workspace: string, project: string) => ReadonlyArray<PeerWorkThread>;
   readonly socketPath: string;
   readonly scriptsDir: string;
   readonly logPath: string;
@@ -278,6 +289,7 @@ interface LocalSession {
   claims: string[];
   intent: string | undefined;
   lastActivity: number;
+  lastPresent?: number;
   readonly memory: SessionMemory;
   /** Files whose edit its person was asked about: the edit happening means they approved. */
   readonly asked: Map<string, ReadonlyArray<string>>;
@@ -416,8 +428,6 @@ interface Waiter {
   readonly answer: (text: string) => void;
 }
 
-/** A session that did nothing for this long ended. */
-const SESSION_TTL_MS = 30 * 60 * 1000;
 const ACTIVE_SYNC_MS = 3000;
 const IDLE_SYNC_MS = 20_000;
 const DEBOUNCE_MS = 300;
@@ -2466,6 +2476,9 @@ export class CoordinationBroker {
       (s) => s.project === project && s.id !== session.id,
     );
     const contexts = (view?.contexts ?? []).filter((c) => c.project === project);
+    const unfinished = (this.deps.work?.(workspace, project) ?? []).filter(
+      (thread) => thread.delivery !== "merged" && thread.delivery !== "closed",
+    );
     const done = new Set(
       this.deps
         .tasks(workspace, project)
@@ -2475,6 +2488,7 @@ export class CoordinationBroker {
     const scopes = new Set([
       ...contexts.map((c) => c.scope),
       ...others.map((s) => scopeOf(s.task)),
+      ...unfinished.map((thread) => scopeOf(thread.task)),
     ]);
     scopes.delete(own);
     const findings = this.findingsOf(workspace).filter((f) => f.project === project);
@@ -2484,7 +2498,8 @@ export class CoordinationBroker {
       const written = context !== undefined && context.version > 0;
       const recent =
         written && Date.now() - Date.parse(context.updatedAt) < BOARD_DAYS * 24 * 60 * 60 * 1000;
-      if (agents.length === 0 && (done.has(scope) || !recent)) return [];
+      const pending = unfinished.filter((thread) => scopeOf(thread.task) === scope);
+      if (agents.length === 0 && (done.has(scope) || (!recent && pending.length === 0))) return [];
       const mirror = this.shared.get(this.sharedKey(workspace, project, scope));
       const updatedAt = written ? Date.parse(context.updatedAt) : undefined;
       return [
@@ -2496,7 +2511,15 @@ export class CoordinationBroker {
               scope === "project"
                 ? "Work outside tasks"
                 : this.subjectOf(workspace, project, scope),
-            agents: agents.map((s) => this.boardAgent(workspace, s)),
+            agents:
+              agents.length > 0
+                ? agents.map((s) => this.boardAgent(workspace, s))
+                : pending
+                    .slice(0, 3)
+                    .map(
+                      (thread) =>
+                        `${this.deps.nameOf(workspace, thread.email)}'s unfinished work (${thread.branch ?? thread.title}; runtime unavailable)`,
+                    ),
             keeper:
               context?.keeper === undefined
                 ? undefined
@@ -3636,11 +3659,24 @@ export class CoordinationBroker {
       this.lastSync = started;
       const now = Date.now();
       for (const [id, session] of this.sessions) {
-        if (now - session.lastActivity > SESSION_TTL_MS) {
+        const runtime = this.deps.runtimeStatus?.(id, session.thread, session.pane);
+        if (
+          !runtimeStillPresent({
+            runtime,
+            lastActivity: session.lastActivity,
+            lastPresent: session.lastPresent ?? session.startedAt,
+            now,
+          })
+        ) {
           void this.release(session);
           this.sessions.delete(id);
           this.log("session.expired", { session: id });
           continue;
+        }
+        // Presence is not activity: an idle runtime must not refresh the keeper's activity clock.
+        if (runtime !== undefined && runtime !== null) {
+          session.status = runtime === "done" ? "idle" : runtime;
+          session.lastPresent = now;
         }
         await this.findThread(session);
         // Put on another task (or taken off one): its work, and the shared context with it, change.

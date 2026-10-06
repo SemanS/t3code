@@ -12,6 +12,7 @@ import {
   PeerManifest,
   PeerTask,
   PeerWorkThread,
+  PeerWorkPullRequest,
   PeerWorkspaceRole,
   PeerWorkStatus,
 } from "@t3tools/contracts";
@@ -84,6 +85,10 @@ export interface ReportedThread {
   readonly source: "peer" | "herdr";
   /** Its owner lets the project's members watch it live. */
   readonly observable?: boolean;
+  readonly runtimePresent?: boolean;
+  readonly previousId?: string;
+  readonly repository?: string;
+  readonly pullRequests?: ReadonlyArray<PeerWorkPullRequest>;
 }
 
 const HubCoordSession = Schema.Struct({

@@ -144,6 +144,17 @@ export type PeerPresenceThread = typeof PeerPresenceThread.Type;
 export const PeerWorkStatus = Schema.Literals(["working", "blocked", "done", "idle", "unknown"]);
 export type PeerWorkStatus = typeof PeerWorkStatus.Type;
 
+/** Delivery outlives a runtime. A stopped agent is still unfinished work. */
+export const PeerWorkDelivery = Schema.Literals(["open", "review", "merged", "closed"]);
+export type PeerWorkDelivery = typeof PeerWorkDelivery.Type;
+
+export const PeerWorkPullRequest = Schema.Struct({
+  url: Schema.String,
+  state: Schema.Literals(["open", "closed", "merged", "unknown"]),
+  headBranch: Schema.String,
+});
+export type PeerWorkPullRequest = typeof PeerWorkPullRequest.Type;
+
 /** A piece of the product being built, e.g. `KRK-812 · Split Payments` under "Groups & Events". */
 export const PeerTask = Schema.Struct({
   id: Schema.String,
@@ -172,6 +183,11 @@ export const PeerWorkThread = Schema.Struct({
   seenAt: Schema.String,
   /** Its owner lets the project's members watch it live (Observe). */
   observable: Schema.optional(Schema.Boolean),
+  runtimePresent: Schema.optional(Schema.Boolean),
+  previousId: Schema.optional(Schema.String),
+  repository: Schema.optional(Schema.String),
+  pullRequests: Schema.optional(Schema.Array(PeerWorkPullRequest)),
+  delivery: Schema.optional(PeerWorkDelivery),
 });
 export type PeerWorkThread = typeof PeerWorkThread.Type;
 

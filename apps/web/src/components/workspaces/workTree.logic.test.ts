@@ -222,7 +222,7 @@ describe("buildWorkTree", () => {
     expect(partnerRec?.threads.map((t) => [t.title, t.status])).toEqual([
       ["Consolidated average", "done"],
     ]);
-    expect(partnerRec?.status).toBe("done");
+    expect(partnerRec?.status).toBe("idle"); // A settled runtime does not prove delivery.
     const str = project?.areas[1]?.tasks[1];
     expect(str?.threads[0]?.stale).toBe(true);
     expect(project?.unsorted.map((t) => t.title)).toEqual(["Tidy the README"]);
@@ -652,5 +652,102 @@ describe("what Peer told an agent", () => {
     );
     const mine = on(withAdvice([told({})]), "task:krk-812");
     expect(adviceLabel(mine[0]!)).toBe("Your agent was pointed to this related work");
+  });
+});
+
+describe("durable work and runtime presence", () => {
+  it("overlays a live local thread on its hub record without duplicating it", () => {
+    const base = kirkwood();
+    const hub = status(base);
+    const record = {
+      id: "peer:local",
+      task: "krk-812",
+      title: "Build",
+      email: hub.email!,
+      environment: HERE,
+      status: "idle" as const,
+      source: "peer" as const,
+      seenAt: new Date(NOW).toISOString(),
+      runtimePresent: true,
+      delivery: "review" as const,
+    };
+    const project = { ...base, work: { ...base.work, threads: [record] } };
+    const [tree] = buildWorkTree({
+      status: status(project),
+      localThreads: [shell("local", "Build", { branch: "fix/KRK-812" })],
+      now: NOW,
+    });
+    const nodes = tree!.areas.flatMap((area) => area.tasks).flatMap((task) => task.threads);
+    expect(nodes.filter((node) => node.title === "Build")).toHaveLength(1);
+    expect(nodes.find((node) => node.title === "Build")?.delivery).toBe("review");
+  });
+
+  it("keeps our absent runtime visible without an Observe action or a working task rollup", () => {
+    const base = kirkwood();
+    const hub = status(base);
+    const project = {
+      ...base,
+      work: {
+        ...base.work,
+        threads: [
+          {
+            id: "herdr:codex:gone",
+            task: "krk-812",
+            title: "Awaiting merge",
+            email: hub.email!,
+            environment: HERE,
+            status: "working" as const,
+            source: "herdr" as const,
+            runtimePresent: false,
+            observable: true,
+            seenAt: new Date(NOW).toISOString(),
+            delivery: "review" as const,
+          },
+        ],
+      },
+    };
+    const s = status(project);
+    const [tree] = buildWorkTree({
+      status: { ...s, agents: { ...s.agents, list: [] } },
+      localThreads: [],
+      now: NOW,
+    });
+    const task = tree!.areas[0]!.tasks[0]!;
+    expect(task.threads[0]?.stale).toBe(true);
+    expect(task.threads[0]?.open).toBeUndefined();
+    expect(task.threads[0]?.status).toBe("unknown");
+    expect(task.status).toBe("idle");
+    expect(task.threads[0]?.key).toBe("herdr:codex:gone");
+    expect(
+      threadMenuItems({
+        thread: task.threads[0]!,
+        taskId: task.id,
+        tasks: project.work.tasks,
+        running: false,
+      }).map((item) => item.id),
+    ).toEqual(["move"]);
+  });
+
+  it("overlays a temporary herdr identity without duplicating its stable work", () => {
+    const base = kirkwood();
+    const hub = status(base);
+    const record = {
+      id: "herdr:codex:stable",
+      previousId: "herdr:term1",
+      task: "krk-812",
+      title: "Investigation for KRK-812",
+      email: hub.email!,
+      environment: HERE,
+      status: "idle" as const,
+      source: "herdr" as const,
+      runtimePresent: true,
+      seenAt: new Date(NOW).toISOString(),
+      delivery: "review" as const,
+    };
+    const project = { ...base, work: { ...base.work, threads: [record] } };
+    const [tree] = buildWorkTree({ status: status(project), localThreads: [], now: NOW });
+    const rows = tree!.areas.flatMap((area) => area.tasks).flatMap((task) => task.threads);
+    expect(rows.filter((node) => node.title === record.title)).toHaveLength(1);
+    expect(rows.find((node) => node.title === record.title)?.key).toBe(record.id);
   });
 });

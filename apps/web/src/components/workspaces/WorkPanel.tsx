@@ -1302,11 +1302,11 @@ function ThreadCard({
   const [renaming, setRenaming] = useState(false);
   const open = thread.open;
   const local = open?.kind === "thread" ? open : undefined;
-  const actionable = thread.mine && (open?.kind === "thread" || open?.kind === "herdr");
+  const actionable = thread.mine && thread.placeable;
   const active = open !== undefined && activeThread === openKey(open);
   const here = useContext(WorkHereContext);
   const look = agentLook(thread.agent, here.providers);
-  const elsewhere = !actionable;
+  const elsewhere = !actionable && thread.localEnvironment !== true;
   const who = thread.mine ? (elsewhere ? "You · other computer" : "You") : thread.person;
   const machine = !thread.mine
     ? `${thread.person}’s computer`
@@ -1325,7 +1325,8 @@ function ThreadCard({
       : thread.observable
         ? `${thread.person} shares it: open it to watch it live`
         : `${thread.person}’s thread: only they change it`,
-    thread.stale ? "Not reported for a few minutes" : null,
+    thread.stale ? "Agent unavailable; its work and saved context remain here" : null,
+    thread.delivery === "review" ? "Waiting for every linked pull request to merge" : null,
   ].filter((line) => line !== null);
 
   const showMenu = async (position: MenuPosition) => {
@@ -1356,14 +1357,15 @@ function ThreadCard({
     else void actions.placeThread(scope, thread.key, choice.slice("task:".length));
   };
 
+  const runtimeLabel = thread.status === "done" ? "Turn finished" : STATUS_LABEL[thread.status];
   const statusLabel = thread.stale ? (
-    <span className="text-muted-foreground">Away</span>
+    <span className="text-muted-foreground">Agent offline</span>
   ) : thread.status === "idle" || thread.status === "unknown" ? (
     <span className="text-secondary-label tabular-nums">{activeLabel(thread.activeAt)}</span>
   ) : (
     <span className={cn("inline-flex items-center gap-1 font-medium", STATUS_TONE[thread.status])}>
       <StatusIcon status={thread.status} />
-      {STATUS_LABEL[thread.status]}
+      {runtimeLabel}
     </span>
   );
 
@@ -1375,7 +1377,7 @@ function ThreadCard({
             <div
               role={open === undefined ? undefined : "button"}
               tabIndex={open === undefined ? undefined : 0}
-              aria-label={`${thread.title}, ${who}, ${STATUS_LABEL[thread.status]}`}
+              aria-label={`${thread.title}, ${who}, ${runtimeLabel}`}
               aria-current={active ? "page" : undefined}
               className={cn(
                 "group/work-thread relative w-full overflow-hidden rounded-md px-2.5 py-1.5 text-left outline-none select-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
@@ -1448,6 +1450,19 @@ function ThreadCard({
                 )}
               >
                 {statusLabel}
+                {thread.delivery === undefined ? null : (
+                  <span className="text-muted-foreground">
+                    ·{" "}
+                    {
+                      {
+                        open: "In progress",
+                        review: "Awaiting merge",
+                        merged: "Merged",
+                        closed: "Closed",
+                      }[thread.delivery]
+                    }
+                  </span>
+                )}
               </span>
               {actionable ? (
                 <span className="pointer-events-none absolute inset-y-0 right-0 flex items-center opacity-0 group-hover/work-thread:pointer-events-auto group-hover/work-thread:static group-hover/work-thread:opacity-100 has-[:focus-visible]:pointer-events-auto has-[:focus-visible]:static has-[:focus-visible]:opacity-100">

@@ -84,6 +84,7 @@ import {
   type PeerWorkspaceState,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -134,6 +135,15 @@ import {
 } from "./github.ts";
 import * as AgentTranscript from "./agentTranscript.ts";
 import * as Herdr from "./herdr.ts";
+import {
+  boundedWorkReport,
+  mergePullRequestEvidence,
+  nativeRuntimePresent,
+  nativeWorkPullRequests,
+  pullRequestBatch,
+  restoreWorkIdentity,
+  WorkDeliveryTracker,
+} from "./workLifecycle.ts";
 import * as Knowledge from "./knowledge.ts";
 import * as HubApi from "./hubApi.ts";
 import {
@@ -260,6 +270,11 @@ interface ProjectWork {
 
 interface HerdrAgentState extends Herdr.HerdrAgent {
   readonly branch: string | undefined;
+  readonly place?: {
+    readonly workspace: string;
+    readonly projectId: string;
+    readonly repositoryId: string;
+  };
 }
 
 /** What Peer shows and reports of herdr's agents, to tell a change from a re-read. */
@@ -879,7 +894,13 @@ const make = Effect.gen(function* () {
             threads: work?.threads ?? [],
             assignments,
           },
-          peers: peersOf(work?.threads ?? [], names),
+          peers: peersOf(
+            (work?.threads ?? []).filter(
+              (thread) =>
+                thread.email !== s.persisted.email || thread.environment !== environmentId,
+            ),
+            names,
+          ),
         },
       };
     });
@@ -895,7 +916,7 @@ const make = Effect.gen(function* () {
             checkoutPath(s.persisted, workspace.slug, project.id, repo.id),
           );
           if (target === root || target.startsWith(`${root}${NodePath.sep}`)) {
-            return { workspace: workspace.slug, projectId: project.id };
+            return { workspace: workspace.slug, projectId: project.id, repositoryId: repo.id };
           }
         }
       }
@@ -919,7 +940,7 @@ const make = Effect.gen(function* () {
   };
 
   const localAgentView = (s: RuntimeState, agent: HerdrAgentState): PeerLocalAgent => {
-    const place = projectOfPath(s, agent.cwd);
+    const place = agent.place ?? projectOfPath(s, agent.cwd);
     return {
       id: agentKey(agent),
       paneId: agent.paneId,
@@ -1322,6 +1343,11 @@ const make = Effect.gen(function* () {
    * Reports this computer's threads — Peer's own and the agents herdr runs in
    * workspace checkouts — to each workspace, and reads everyone's work back.
    */
+  const runtimeClock = yield* Clock.Clock;
+  const deliveryTracker = new WorkDeliveryTracker();
+  const nativeRuntimes = new Map<string, PeerWorkStatus>();
+  let nativeRuntimesAt = 0;
+  let reportRound = 0;
   const refreshWorkUnlocked = Effect.gen(function* () {
     const sessionInfo = yield* requireSession.pipe(Effect.option);
     if (Option.isNone(sessionInfo)) return;
@@ -1335,6 +1361,10 @@ const make = Effect.gen(function* () {
       });
     const shell = yield* projections.getShellSnapshot({ location: "active" }).pipe(Effect.option);
     const threads = Option.isSome(shell) ? shell.value.threads : [];
+    if (Option.isSome(shell)) {
+      nativeRuntimes.clear();
+      nativeRuntimesAt = DateTime.toEpochMillis(yield* DateTime.now);
+    }
     const before = yield* Ref.get(stateRef);
     const work = new Map<string, ProjectWork>();
 
@@ -1342,7 +1372,7 @@ const make = Effect.gen(function* () {
       const manifest = workspace.manifest;
       if (manifest === null) continue;
       // T3 project id → workspace project id, for the threads running here.
-      const roots = new Map<string, string>();
+      const roots = new Map<string, { projectId: string; repositoryId: string }>();
       for (const project of manifest.projects) {
         if (!safeId(project.id)) continue;
         for (const repo of project.repositories) {
@@ -1350,33 +1380,61 @@ const make = Effect.gen(function* () {
           const t3 = yield* projects
             .getByWorkspaceRoot(checkoutPath(before.persisted, workspace.slug, project.id, repo.id))
             .pipe(Effect.orElseSucceed(() => Option.none()));
-          if (Option.isSome(t3)) roots.set(t3.value.id, project.id);
+          if (Option.isSome(t3))
+            roots.set(t3.value.id, { projectId: project.id, repositoryId: repo.id });
         }
       }
 
       const s = yield* Ref.get(stateRef);
       const shared = new Set(s.persisted.sharedThreads ?? []);
-      const reported: HubApi.ReportedThread[] = [];
+      let reported: HubApi.ReportedThread[] = [];
       for (const thread of threads) {
-        const projectId = roots.get(thread.projectId);
-        if (projectId === undefined) continue;
+        const place = roots.get(thread.projectId);
+        if (place === undefined) continue;
+        const { projectId, repositoryId } = place;
         const id = `peer:${thread.id}`;
         const task = assignedTask(s.persisted, id, workspace.slug, projectId);
         const harness = harnessForDriver(driverOf(thread.providerInstanceId));
+        const records = yield* projections
+          .getThreadRecords(thread.id, ["providerThreads", "providerSessions"])
+          .pipe(Effect.option);
+        const provider = Option.isSome(records)
+          ? records.value.providerThreads.find((p) => p.id === thread.activeProviderThreadId)
+          : undefined;
+        const nativeId = provider?.nativeThreadRef?.nativeId;
+        const runtimePresent = nativeRuntimePresent(
+          provider,
+          Option.isSome(records) ? records.value.providerSessions : [],
+        );
+        const nativeHarness =
+          provider === undefined ? undefined : harnessForDriver(provider.driver);
+        if (runtimePresent && nativeId !== undefined && nativeHarness !== undefined) {
+          nativeRuntimes.set(`${id}/${nativeHarness}:${nativeId}`, shellStatus(thread));
+        }
+        const repo = manifest.projects
+          .find((p) => p.id === projectId)
+          ?.repositories.find((r) => r.id === repositoryId);
+        const pullRequests =
+          repo === undefined
+            ? undefined
+            : nativeWorkPullRequests(repo.url, thread.branch, thread.pullRequests ?? []);
         reported.push({
           id,
           project: projectId,
+          repository: repositoryId,
           ...(task === undefined ? {} : { task }),
           title: thread.title.slice(0, 300),
           status: shellStatus(thread),
           ...(harness === undefined ? {} : { harness }),
           ...(thread.branch === null ? {} : { branch: thread.branch }),
           source: "peer",
+          runtimePresent,
+          ...(pullRequests === undefined ? {} : { pullRequests }),
           ...(shared.has(id) ? { observable: true } : {}),
         });
       }
       for (const agent of s.herdr ?? []) {
-        const place = projectOfPath(s, agent.cwd);
+        const place = agent.place ?? projectOfPath(s, agent.cwd);
         if (place === undefined || place.workspace !== workspace.slug) continue;
         const id = agentKey(agent);
         const task =
@@ -1385,19 +1443,103 @@ const make = Effect.gen(function* () {
         reported.push({
           id,
           project: place.projectId,
+          repository: place.repositoryId,
           ...(task === undefined ? {} : { task }),
           title: agent.title.slice(0, 300),
           status: agent.status,
           ...(agent.agent === undefined ? {} : { harness: agent.agent }),
           ...(agent.branch === undefined ? {} : { branch: agent.branch }),
           source: "herdr",
+          ...(id === `herdr:${agent.terminalId}`
+            ? {}
+            : { previousId: `herdr:${agent.terminalId}` }),
           ...(shared.has(id) ? { observable: true } : {}),
         });
       }
+      reported = reported.map((thread) =>
+        restoreWorkIdentity(
+          thread,
+          (before.work.get(sharedKey(workspace.slug, thread.project))?.threads ?? []).filter(
+            (old) => old.email === s.persisted.email && old.environment === environmentId,
+          ),
+        ),
+      );
+      // Keep absent runtimes in the ledger and reconcile their registered PRs too.
+      // The hub retains them through a restart before this computer has read its first view.
+      for (const project of manifest.projects) {
+        const previous = before.work.get(sharedKey(workspace.slug, project.id))?.threads ?? [];
+        for (const thread of previous) {
+          if (
+            thread.email !== s.persisted.email ||
+            thread.environment !== environmentId ||
+            reported.some((current) => current.id === thread.id || current.previousId === thread.id)
+          )
+            continue;
+          if (thread.delivery === "merged" || thread.delivery === "closed") continue;
+          const task =
+            assignedTask(s.persisted, thread.id, workspace.slug, project.id) ?? thread.task;
+          reported.push({
+            id: thread.id,
+            project: project.id,
+            title: thread.title,
+            status: "unknown",
+            source: thread.source,
+            runtimePresent: false,
+            observable: false,
+            ...(task === undefined ? {} : { task }),
+            ...(thread.branch === undefined ? {} : { branch: thread.branch }),
+            ...(thread.harness === undefined ? {} : { harness: thread.harness }),
+            ...(thread.repository === undefined ? {} : { repository: thread.repository }),
+            ...(thread.pullRequests === undefined ? {} : { pullRequests: thread.pullRequests }),
+          });
+        }
+      }
+      const now = DateTime.toEpochMillis(yield* DateTime.now);
+      const withDelivery = boundedWorkReport(reported, reportRound).map((thread) => {
+        const project = manifest.projects.find((p) => p.id === thread.project);
+        const previous = before.work
+          .get(sharedKey(workspace.slug, thread.project))
+          ?.threads.find(
+            (old) =>
+              old.id === thread.id &&
+              old.email === s.persisted.email &&
+              old.environment === environmentId &&
+              old.branch === thread.branch,
+          );
+        const repository = thread.repository ?? previous?.repository;
+        const repo = project?.repositories.find((r) => r.id === repository);
+        const required = thread.pullRequests ?? previous?.pullRequests;
+        const known = pullRequestBatch(required ?? [], thread.branch);
+        // Native threads already get host snapshots through their PR links. herdr and dormant
+        // threads use exact URLs once discovered; failed lookups leave hub evidence untouched.
+        const observed =
+          thread.source === "peer" &&
+          thread.runtimePresent !== false &&
+          thread.pullRequests !== undefined
+            ? thread.pullRequests
+            : repo === undefined || thread.branch === undefined || s.github.cli === null
+              ? undefined
+              : deliveryTracker.read(
+                  {
+                    workId: `${s.persisted.email}/${workspace.slug}/${thread.project}/${thread.id}`,
+                    repositoryUrl: repo.url,
+                    branch: thread.branch,
+                    known,
+                  },
+                  (args) => run(s.github.cli!, args, { timeoutMs: 5000 }),
+                  now,
+                );
+        const pullRequests = mergePullRequestEvidence(required, observed);
+        return {
+          ...thread,
+          ...(repository === undefined ? {} : { repository }),
+          ...(pullRequests === undefined ? {} : { pullRequests }),
+        };
+      });
       yield* hubApi
         .reportThreads(hubUrl, session, workspace.slug, {
           environment: environmentId,
-          threads: reported,
+          threads: withDelivery,
         })
         .pipe(Effect.ignoreCause({ log: true }));
 
@@ -1409,17 +1551,18 @@ const make = Effect.gen(function* () {
         }
         continue;
       }
-      for (const [key, value] of workOf(workspace.slug, fetched.value, s.persisted.email)) {
+      for (const [key, value] of workOf(workspace.slug, fetched.value)) {
         work.set(key, value);
       }
     }
+    reportRound += 1;
     yield* updateRuntime((current) => ({ ...current, work }));
   });
 
   const refreshWork = refreshWorkUnlocked.pipe(lock.withPermits(1));
 
   /** One workspace's work as the hub gave it, keyed like `RuntimeState.work`. */
-  const workOf = (slug: string, fetched: HubApi.HubWork, email: string | null) =>
+  const workOf = (slug: string, fetched: HubApi.HubWork) =>
     Object.entries(fetched.projects).map(
       ([projectId, projectWork]) =>
         [
@@ -1427,10 +1570,8 @@ const make = Effect.gen(function* () {
           {
             areas: projectWork.areas,
             tasks: projectWork.tasks,
-            // This computer's own threads show live from its thread list.
-            threads: projectWork.threads.filter(
-              (thread) => !(thread.environment === environmentId && thread.email === email),
-            ),
+            // The ledger includes our absent runtimes too; clients overlay their live threads.
+            threads: projectWork.threads,
           },
         ] as const,
     );
@@ -1442,10 +1583,9 @@ const make = Effect.gen(function* () {
       if (Option.isNone(sessionInfo)) return;
       const { hubUrl, session } = sessionInfo.value;
       const fetched = yield* hubApi.work(hubUrl, session, slug);
-      const email = (yield* Ref.get(stateRef)).persisted.email;
       yield* updateRuntime((current) => {
         const work = new Map([...current.work].filter(([key]) => !key.startsWith(`${slug}/`)));
-        for (const [key, value] of workOf(slug, fetched, email)) work.set(key, value);
+        for (const [key, value] of workOf(slug, fetched)) work.set(key, value);
         return { ...current, work };
       });
     });
@@ -1481,7 +1621,8 @@ const make = Effect.gen(function* () {
     return { gh, account };
   });
 
-  /** What herdr runs on this computer, with each agent's git branch. */
+  const herdrPlaces = new Map<string, { at: number; place: HerdrAgentState["place"] }>();
+  /** What herdr runs on this computer, with each agent's git branch and worktree's repository. */
   const refreshHerdr = Effect.gen(function* () {
     const agents = yield* Effect.promise(() => Herdr.listHerdrAgents());
     const nowMillis = DateTime.toEpochMillis(yield* DateTime.now);
@@ -1489,7 +1630,28 @@ const make = Effect.gen(function* () {
       agents === null
         ? null
         : yield* Effect.forEach(agents, (agent) =>
-            branchOf(agent.cwd, nowMillis).pipe(Effect.map((branch) => ({ ...agent, branch }))),
+            Effect.gen(function* () {
+              const branch = yield* branchOf(agent.cwd, nowMillis);
+              let place = projectOfPath(yield* Ref.get(stateRef), agent.cwd);
+              if (place === undefined && agent.cwd !== undefined) {
+                const cached = herdrPlaces.get(agent.cwd);
+                if (cached !== undefined && nowMillis - cached.at < 30_000) place = cached.place;
+                else {
+                  const resolved = yield* Effect.promise(() => placeOf(agent.cwd!));
+                  place =
+                    resolved?.repositoryId === undefined
+                      ? undefined
+                      : {
+                          workspace: resolved.workspace,
+                          projectId: resolved.project,
+                          repositoryId: resolved.repositoryId,
+                        };
+                  herdrPlaces.set(agent.cwd, { at: nowMillis, place });
+                  if (herdrPlaces.size > 500) herdrPlaces.delete(herdrPlaces.keys().next().value!);
+                }
+              }
+              return { ...agent, branch, ...(place === undefined ? {} : { place }) };
+            }),
           );
     yield* updateRuntime((s) => ({ ...s, herdr: withBranches }));
   });
@@ -2085,7 +2247,12 @@ const make = Effect.gen(function* () {
       (common === null ? undefined : projectOfPath(s, NodePath.dirname(common)));
     return place === undefined
       ? null
-      : { workspace: place.workspace, project: place.projectId, root: realpathOrSelf(toplevel) };
+      : {
+          workspace: place.workspace,
+          project: place.projectId,
+          root: realpathOrSelf(toplevel),
+          repositoryId: place.repositoryId,
+        };
   };
 
   /** What the workspace calls a person. */
@@ -2122,7 +2289,12 @@ const make = Effect.gen(function* () {
         .slice(0, 20);
       for (const thread of candidates) {
         const records = yield* projections.getThreadRecords(thread.id, ["providerThreads"]);
-        if (records.providerThreads.some((p) => p.nativeThreadRef?.nativeId === nativeId)) {
+        if (
+          records.providerThreads.some(
+            (p) =>
+              p.id === thread.activeProviderThreadId && p.nativeThreadRef?.nativeId === nativeId,
+          )
+        ) {
           return `peer:${thread.id}`;
         }
       }
@@ -2151,6 +2323,21 @@ const make = Effect.gen(function* () {
           );
           return name === "" || name === "HEAD" ? undefined : name;
         },
+        runtimeStatus: (id, thread, pane) => {
+          const agent = currentState().herdr?.find(
+            (candidate) =>
+              agentKey(candidate) === `herdr:${id}` &&
+              (pane === undefined || candidate.paneId === pane),
+          );
+          if (agent !== undefined) return agent.status;
+          if (thread !== undefined)
+            return runtimeClock.currentTimeMillisUnsafe() - nativeRuntimesAt < 180_000
+              ? (nativeRuntimes.get(`${thread}/${id}`) ?? null)
+              : null;
+          return pane === undefined ? undefined : null;
+        },
+        work: (workspace, project) =>
+          currentState().work.get(sharedKey(workspace, project))?.threads ?? [],
         herdrTitle: (pane) => currentState().herdr?.find((agent) => agent.paneId === pane)?.title,
         herdrPane: (agent, cwd, named) => {
           const here = realDirectory(cwd);
@@ -2571,8 +2758,21 @@ const make = Effect.gen(function* () {
   const assignThread: PeerHub["Service"]["assignThread"] = Effect.fn("PeerHub.assignThread")(
     function* (input) {
       yield* findProject(input.workspace, input.projectId);
-      if (!/^(peer|herdr):/.test(input.thread)) {
-        return yield* hubError("Only this computer's threads and herdr agents can be placed.");
+      const state = yield* Ref.get(stateRef);
+      const key = sharedKey(input.workspace, input.projectId);
+      const ownsRetained = state.work
+        .get(key)
+        ?.threads.some(
+          (thread) =>
+            thread.id === input.thread &&
+            thread.email === state.persisted.email &&
+            thread.environment === environmentId,
+        );
+      if (
+        !/^(peer|herdr):/.test(input.thread) &&
+        !(input.thread.startsWith("retained:") && ownsRetained)
+      ) {
+        return yield* hubError("Only this computer's work can be placed.");
       }
       yield* updatePersisted((p) => {
         const { [input.thread]: _previous, ...assignments } = p.assignments ?? {};
@@ -2590,6 +2790,31 @@ const make = Effect.gen(function* () {
                   },
                 },
         };
+      });
+      // Apply a placement to saved work as well, including clearing an old assignment.
+      // Mark it open until the hub derives delivery from the newly selected task.
+      yield* updateRuntime((current) => {
+        const project = current.work.get(key);
+        if (project === undefined) return current;
+        const work = new Map(current.work);
+        work.set(key, {
+          ...project,
+          threads: project.threads.map((thread) => {
+            if (
+              thread.id !== input.thread ||
+              thread.email !== current.persisted.email ||
+              thread.environment !== environmentId
+            )
+              return thread;
+            const { task: _task, ...rest } = thread;
+            return {
+              ...rest,
+              delivery: "open",
+              ...(input.taskId === null ? {} : { task: input.taskId }),
+            };
+          }),
+        });
+        return { ...current, work };
       });
       yield* refreshWorkUnlocked;
       return yield* publish;

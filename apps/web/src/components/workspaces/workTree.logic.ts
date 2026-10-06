@@ -15,6 +15,7 @@ import type {
   PeerProjectState,
   PeerTask,
   PeerWorkStatus,
+  PeerWorkDelivery,
   PeerWorkspaceState,
   ThreadId,
 } from "@t3tools/contracts";
@@ -39,6 +40,8 @@ export type WorkOpen =
     };
 
 export interface WorkThreadNode {
+  readonly delivery?: PeerWorkDelivery;
+  readonly localEnvironment?: boolean;
   readonly key: string;
   readonly title: string;
   readonly person: string;
@@ -189,9 +192,13 @@ function byActivity(a: WorkThreadNode, b: WorkThreadNode): number {
 }
 
 function rollup(threads: ReadonlyArray<WorkThreadNode>, done: boolean): PeerWorkStatus {
-  if (threads.some((t) => t.status === "blocked")) return "blocked";
-  if (threads.some((t) => t.status === "working")) return "working";
-  if (done || (threads.length > 0 && threads.every((t) => t.status === "done"))) return "done";
+  if (threads.some((t) => !t.stale && t.status === "blocked")) return "blocked";
+  if (threads.some((t) => !t.stale && t.status === "working")) return "working";
+  if (
+    done ||
+    (threads.length > 0 && threads.every((t) => t.delivery === "merged" || t.delivery === "closed"))
+  )
+    return "done";
   return "idle";
 }
 
@@ -278,6 +285,11 @@ function projectTree(input: {
       : taskNamedIn(work.tasks, texts)?.id) ?? null;
 
   const shared = new Set(status.sharedThreads);
+  const localRecord = (id: string) =>
+    work.threads.find(
+      (thread) =>
+        thread.id === id && thread.email === me && thread.environment === status.environmentId,
+    );
   const placed: Array<{ readonly task: string | null; readonly node: WorkThreadNode }> = [];
   for (const thread of input.localThreads) {
     if (
@@ -297,10 +309,12 @@ function projectTree(input: {
         person: myName,
         mine: true,
         status: localThreadStatus(thread),
+        delivery: localRecord(key)?.delivery ?? "open",
+        localEnvironment: true,
         harness: undefined,
         branch: thread.branch ?? undefined,
         source: "peer",
-        stale: false,
+        stale: localRecord(key)?.runtimePresent === false,
         open: { kind: "thread", environmentId: thread.environmentId, threadId: thread.id },
         placeable: true,
         concerns: undefined,
@@ -316,14 +330,29 @@ function projectTree(input: {
   }
   for (const agent of input.agents) {
     if (agent.workspace !== workspace.slug || agent.projectId !== state.project.id) continue;
+    const record =
+      localRecord(agent.id) ??
+      work.threads.find(
+        (thread) =>
+          thread.previousId === agent.id &&
+          thread.email === me &&
+          thread.environment === status.environmentId &&
+          (agent.branch === undefined || thread.branch === agent.branch),
+      );
+    const key = record?.id ?? agent.id;
     placed.push({
-      task: taskOf(work.assignments[agent.id], [agent.branch, agent.title]),
+      task: taskOf(work.assignments[key] ?? work.assignments[agent.id], [
+        agent.branch,
+        agent.title,
+      ]),
       node: {
-        key: agent.id,
+        key,
         title: agent.title,
         person: myName,
         mine: true,
         status: agent.status,
+        delivery: record?.delivery ?? "open",
+        localEnvironment: true,
         harness: agent.agent,
         branch: agent.branch,
         source: "herdr",
@@ -358,27 +387,35 @@ function projectTree(input: {
     overlapping.set(yours.has(a) ? b : a, overlap.files.join(", "));
   }
   for (const thread of work.threads) {
+    const localEnvironment = thread.email === me && thread.environment === status.environmentId;
+    if (localEnvironment && placed.some((entry) => entry.node.key === thread.id)) continue;
     const seenAt = Date.parse(thread.seenAt);
+    const stale =
+      thread.runtimePresent === false ||
+      !Number.isFinite(seenAt) ||
+      input.now - seenAt >= STALE_AFTER_MS;
     // A herdr agent known by its session reports `herdr:<agent>:<session>`; coordination says `<agent>:<session>`.
     const session = /^herdr:([^:]+:.+)$/.exec(thread.id)?.[1];
     const files = session === undefined ? undefined : overlapping.get(session);
     placed.push({
-      task:
-        thread.task !== undefined && work.tasks.some((t) => t.id === thread.task)
-          ? thread.task
-          : null,
+      task: taskOf(localEnvironment ? (work.assignments[thread.id] ?? thread.task) : thread.task, [
+        thread.branch,
+        thread.title,
+      ]),
       node: {
-        key: `${thread.environment}:${thread.id}`,
+        key: localEnvironment ? thread.id : `${thread.environment}:${thread.id}`,
         title: thread.title,
         person: personName(state, thread.email),
         mine: thread.email === me,
-        status: thread.status,
+        status: stale ? "unknown" : thread.status,
+        delivery: thread.delivery ?? "open",
+        localEnvironment,
         harness: thread.harness,
         branch: thread.branch,
         source: thread.source,
-        stale: Number.isFinite(seenAt) && input.now - seenAt > STALE_AFTER_MS,
+        stale,
         open:
-          thread.observable === true
+          !stale && thread.observable === true
             ? {
                 kind: "observe",
                 workspace: workspace.slug,
@@ -386,12 +423,12 @@ function projectTree(input: {
                 thread: thread.id,
               }
             : undefined,
-        placeable: false,
+        placeable: localEnvironment,
         concerns:
           files === undefined || thread.email === me
             ? undefined
             : `Its agent and yours both change ${files}`,
-        observable: thread.observable === true,
+        observable: !stale && thread.observable === true,
         agent: thread.harness === undefined ? undefined : { harness: thread.harness },
         activeAt: undefined,
         keepsContext: false,
@@ -698,13 +735,17 @@ export function threadMenuItems(input: {
   readonly running: boolean;
 }): ReadonlyArray<ContextMenuItem<WorkThreadMenuId>> {
   const { thread, taskId } = input;
-  if (!thread.mine || thread.open === undefined || thread.open.kind === "observe") return [];
-  const local = thread.open.kind === "thread";
+  if (!thread.mine || !thread.placeable) return [];
+  const local = thread.open?.kind === "thread";
   const choices = input.tasks.filter((task) => task.status === "open" || task.id === taskId);
   return [
-    local
-      ? { id: "rename", label: "Rename thread", icon: "pencil" }
-      : { id: "show-in-herdr", label: "Show in herdr" },
+    ...(thread.open === undefined
+      ? []
+      : [
+          local
+            ? { id: "rename" as const, label: "Rename thread", icon: "pencil" }
+            : { id: "show-in-herdr" as const, label: "Show in herdr" },
+        ]),
     ...(thread.placeable
       ? [
           {
@@ -727,9 +768,13 @@ export function threadMenuItems(input: {
           },
         ]
       : []),
-    thread.observable
-      ? { id: "unshare" as const, label: "Stop letting the team watch" }
-      : { id: "share" as const, label: "Let the team watch" },
+    ...(thread.stale
+      ? []
+      : [
+          thread.observable
+            ? { id: "unshare" as const, label: "Stop letting the team watch" }
+            : { id: "share" as const, label: "Let the team watch" },
+        ]),
     ...(local
       ? [
           {
