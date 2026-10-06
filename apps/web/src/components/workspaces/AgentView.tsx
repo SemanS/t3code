@@ -1,5 +1,9 @@
 import type { EnvironmentId, PeerAgentEntry, PeerAgentView } from "@t3tools/contracts";
 import {
+  peerCoordinationDetail,
+  peerCoordinationLabel,
+} from "@t3tools/client-runtime/peer-task-agent";
+import {
   BotIcon,
   FileTextIcon,
   GlobeIcon,
@@ -22,10 +26,11 @@ import ChatMarkdown from "../ChatMarkdown";
 import { Button } from "../ui/button";
 import { SidebarInset } from "../ui/sidebar";
 import { Textarea } from "../ui/textarea";
+import { Tooltip, TooltipTrigger, TooltipPopup } from "../ui/tooltip";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
 import { StatusGlyph } from "./workStatus";
-import { failureMessage } from "./WorkspaceAccess";
+import { failureMessage, usePeerHubStatus } from "./WorkspaceAccess";
 
 const TOOL_ICON: Readonly<Record<string, LucideIcon>> = {
   Bash: SquareTerminalIcon,
@@ -60,6 +65,10 @@ export function AgentView({ agentId }: { readonly agentId: string }) {
         : serverEnvironment.peerHubWatchAgent({ environmentId, input: { agentId } }),
     ).data ?? undefined;
   const focusAgent = useAtomCommand(serverEnvironment.peerHubFocusAgent, { reportFailure: false });
+  const status = usePeerHubStatus(environmentId);
+  const local = status?.agents.list.find(
+    (agent) => agent.id === agentId || agent.paneId === view?.paneId,
+  );
   const paneId = view?.paneId;
   const details = view === undefined ? [] : [view.agent, "herdr", view.branch].filter(Boolean);
 
@@ -99,6 +108,27 @@ export function AgentView({ agentId }: { readonly agentId: string }) {
             </Button>
           ) : null}
         </WorkspacePageHeader>
+        {local === undefined ? null : (
+          <div className="px-4 py-2 text-xs text-muted-foreground">
+            <Tooltip>
+              <TooltipTrigger render={<span tabIndex={0} />}>
+                {peerCoordinationLabel(local.coordinationLevel)}
+                {local.coordinationLevel === "C" && local.postHocPaths !== undefined
+                  ? ` · ${local.postHocPaths.length} uncommitted paths observed`
+                  : ""}
+              </TooltipTrigger>
+              <TooltipPopup>{peerCoordinationDetail(local.coordinationLevel)}</TooltipPopup>
+            </Tooltip>
+            {(local.postHocPathsTruncated ?? 0) > 0 ? (
+              <span> · {local.postHocPathsTruncated} additional paths remain local</span>
+            ) : null}
+            {(status?.agents.postHocSkipped ?? 0) > 0 ? (
+              <p role="status">
+                {status?.agents.postHocSkipped} agents' observations exceed the team's report limit.
+              </p>
+            ) : null}
+          </div>
+        )}
         <AgentTimeline view={view} />
         <AgentComposer environmentId={environmentId} view={view} />
       </div>

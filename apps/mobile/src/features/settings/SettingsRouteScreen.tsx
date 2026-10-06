@@ -159,6 +159,7 @@ function SettingsIndexSections() {
       </SettingsSection>
 
       <SettingsSection title="Projects & threads">
+        <SettingsRow icon="person.2" label="Peer workspaces" target="SettingsPeerHub" />
         <SettingsRow
           icon="brain"
           label="Memory"

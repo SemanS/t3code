@@ -1142,6 +1142,20 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:peer-hub:prompt-agent",
       tag: WS_METHODS.peerHubPromptAgent,
     }),
+    peerHubStartAgent: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:peer-hub:start-agent",
+      tag: WS_METHODS.peerHubStartAgent,
+    }),
+    peerHubCoordEvents: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:peer-hub:coord-events",
+      tag: WS_METHODS.peerHubCoordEvents,
+      staleTimeMs: 0,
+    }),
+    peerHubStaleReads: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:peer-hub:stale-reads",
+      tag: WS_METHODS.peerHubStaleReads,
+      staleTimeMs: 0,
+    }),
     peerHubShareThread: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:peer-hub:share-thread",
       tag: WS_METHODS.peerHubShareThread,

@@ -81,6 +81,7 @@ import { SettingsAuthRouteScreen } from "./features/settings/SettingsAuthRouteSc
 import { SettingsEnvironmentDetailRouteScreen } from "./features/settings/SettingsEnvironmentDetailRouteScreen";
 import { SettingsEnvironmentsRouteScreen } from "./features/settings/SettingsEnvironmentsRouteScreen";
 import { SettingsFollowUpRouteScreen } from "./features/settings/SettingsFollowUpRouteScreen";
+import { SettingsPeerHubRouteScreen } from "./features/settings/SettingsPeerHubRouteScreen";
 import {
   SettingsEnvironmentAgentBehaviorRouteScreen,
   SettingsEnvironmentMaintenanceRouteScreen,
@@ -319,6 +320,11 @@ const SettingsContentStack = createNativeStackNavigator({
         // Leave room to center UIKit's title beside the two trailing actions.
         headerTitleStyle: { fontSize: 16, fontWeight: "800" },
       },
+    }),
+    SettingsPeerHub: createNativeStackScreen({
+      screen: SettingsPeerHubRouteScreen,
+      linking: "peer-workspaces",
+      options: { title: "Peer workspaces" },
     }),
     SettingsScheduledTaskNew: createNativeStackScreen({
       screen: SettingsScheduledTaskNewRouteScreen,

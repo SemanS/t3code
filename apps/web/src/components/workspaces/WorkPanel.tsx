@@ -5,6 +5,7 @@ import {
   type EnvironmentId,
   type EnvironmentMachineKind,
   type PeerHubStatus,
+  type PeerProjectState,
   type PeerTask,
   type ProjectId,
 } from "@t3tools/contracts";
@@ -84,6 +85,7 @@ import {
   type ProjectCheckout,
 } from "./useOpenWorkspaceProject";
 import { failureMessage, usePeerHubStatus } from "./WorkspaceAccess";
+import { StartTaskAgent } from "./StartTaskAgent";
 import {
   activeAgents,
   buildWorkTree,
@@ -794,6 +796,9 @@ function ProjectSection({
                   {area.tasks.map((task) => (
                     <TaskRow
                       key={task.id}
+                      environmentId={environmentId}
+                      projectState={state}
+                      status={status}
                       scope={scope}
                       task={task}
                       tasks={project.tasks}
@@ -977,6 +982,9 @@ function TaskPeople({ threads }: { readonly threads: ReadonlyArray<WorkThreadNod
 }
 
 function TaskRow({
+  environmentId,
+  projectState,
+  status,
   scope,
   task,
   tasks,
@@ -984,6 +992,9 @@ function TaskRow({
   activeThread,
   actions,
 }: {
+  readonly environmentId: EnvironmentId;
+  readonly projectState: PeerProjectState | undefined;
+  readonly status: PeerHubStatus;
   readonly scope: Scope;
   readonly task: WorkTaskNode;
   readonly tasks: ReadonlyArray<PeerTask>;
@@ -1082,7 +1093,17 @@ function TaskRow({
               <span className="tabular-nums">{task.threads.length}</span>
             ) : null}
           </span>
-          <span className="flex w-0 items-center overflow-hidden opacity-0 group-hover/task:ml-1 group-hover/task:w-auto group-hover/task:opacity-100 has-[:focus-visible]:ml-1 has-[:focus-visible]:w-auto has-[:focus-visible]:opacity-100">
+          <span className="ml-1 flex items-center opacity-0 group-hover/task:opacity-100 has-[:focus-visible]:opacity-100 max-md:opacity-100">
+            {!task.done && projectState !== undefined ? (
+              <StartTaskAgent
+                environmentId={environmentId}
+                workspace={scope.workspace}
+                project={projectState}
+                taskId={task.id}
+                taskLabel={label}
+                status={status}
+              />
+            ) : null}
             <Tooltip>
               <TooltipTrigger
                 render={

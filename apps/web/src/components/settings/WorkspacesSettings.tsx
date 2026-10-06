@@ -197,7 +197,7 @@ function SignedIn({
       </SettingsRow>
       <SettingsRow
         title="Agent coordination (experimental)"
-        description="Agents on the same project hear about each other only when they are about to change the same file, and settle it in a short note both read."
+        description="Agents check shared projects before tracked edits, exchange short updates, and request the context they need. Project rules come from Peer Hub."
       >
         <CoordinationControls environmentId={environmentId} status={status} />
       </SettingsRow>

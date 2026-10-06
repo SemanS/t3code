@@ -21,6 +21,7 @@ import { confirmed, reportFailure, useWorkActions } from "./WorkPanel";
 import { StatusGlyph } from "./workStatus";
 import { usePeerHubStatus } from "./WorkspaceAccess";
 import { WorkMemoryPanel } from "./WorkMemoryPanel";
+import { PeerCoordTimeline } from "./PeerCoordTimeline";
 import {
   adviceLabel,
   adviceOnWork,
@@ -143,20 +144,26 @@ export function WorkContextView({ workspace, project, scope }: Place) {
         <WorkspacePageHeader electron={isElectron} className="border-b border-border">
           <div className="flex min-w-0 flex-1 items-center gap-2">
             <FileTextIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
-            <span className="min-w-0 truncate text-sm font-medium text-foreground">{subject}</span>
-            <span className="shrink-0 truncate text-xs text-muted-foreground">
-              {[
-                memoryMode
-                  ? "Work overview"
-                  : scope === "project"
-                    ? "Shared context"
-                    : "Task context",
-                context === undefined ? null : `version ${context.version}`,
-                context === undefined || context.tokens === 0 ? null : contextSize(context.tokens),
-              ]
-                .filter(Boolean)
-                .join(" · ")}
-            </span>
+            <div className="flex min-w-0 flex-1 flex-col gap-0.5 sm:flex-row sm:items-center sm:gap-2">
+              <span className="min-w-0 truncate text-sm font-medium text-foreground">
+                {subject}
+              </span>
+              <span className="shrink-0 truncate text-xs text-muted-foreground">
+                {[
+                  memoryMode
+                    ? "Work overview"
+                    : scope === "project"
+                      ? "Shared context"
+                      : "Task context",
+                  context === undefined ? null : `version ${context.version}`,
+                  context === undefined || context.tokens === 0
+                    ? null
+                    : contextSize(context.tokens),
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </span>
+            </div>
           </div>
         </WorkspacePageHeader>
         <div className="min-h-0 flex-1 overflow-y-auto">
@@ -196,12 +203,40 @@ export function WorkContextView({ workspace, project, scope }: Place) {
                 ) : null}
               </>
             )}
-            {environmentId === null ? null : (
+            {environmentId === null || !memoryMode ? null : (
               <WorkMemoryPanel
                 environmentId={environmentId}
                 workspace={workspace}
                 project={project}
                 scope={scope}
+              />
+            )}
+            {environmentId === null ? null : (
+              <PeerCoordTimeline
+                environmentId={environmentId}
+                workspace={workspace}
+                project={project}
+                {...(scope.startsWith("task:") ? { task: scope.slice(5) } : {})}
+                revision={
+                  status?.coordination.overlaps
+                    .filter(
+                      (overlap) => overlap.workspace === workspace && overlap.project === project,
+                    )
+                    .map((overlap) => overlap.updatedAt)
+                    .join(":") +
+                  ":" +
+                  context?.version
+                }
+                sessions={
+                  status?.coordination.sessions.filter(
+                    (session) =>
+                      session.workspace === workspace &&
+                      session.project === project &&
+                      (scope === "project"
+                        ? session.task === undefined
+                        : session.task === scope.slice(5)),
+                  ) ?? []
+                }
               />
             )}
             <section aria-label="Agents on this work">

@@ -15,6 +15,7 @@ export type SettingsSheetTarget =
   | "SettingsKeyboard"
   | "SettingsFollowUp"
   | "SettingsScheduledTasks"
+  | "SettingsPeerHub"
   | "SettingsProjectGrouping"
   | "SettingsClientStorage"
   | "SettingsDiagnostics"

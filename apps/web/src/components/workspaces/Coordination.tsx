@@ -33,7 +33,7 @@ const POLICIES: ReadonlyArray<{
   {
     value: "coordinate",
     label: "Coordinate",
-    hint: "It writes the other agent a note first; they agree and close it between them, and you see every note here.",
+    hint: "An overlapping edit waits until your agent acknowledges the current overlap or writes a coordination note. You can follow the agreement here.",
   },
   {
     value: "ask",
@@ -116,6 +116,7 @@ export function CoordinationControls({
     readonly enabled?: boolean;
     readonly policy?: PeerCoordinationPolicy;
     readonly claudeHooks?: boolean;
+    readonly claudeMod?: boolean;
     readonly codexHooks?: boolean;
   }) => {
     setBusy(true);
@@ -138,9 +139,13 @@ export function CoordinationControls({
       </label>
       {coordination.enabled ? (
         <>
+          <p className="text-xs text-muted-foreground">
+            Default overlap policy on this environment. A project's policy in Peer Hub takes
+            precedence.
+          </p>
           <ToggleGroup
             className="w-full"
-            aria-label="When agents change the same file"
+            aria-label="Default overlap policy on this environment"
             variant="segmented"
             value={[coordination.policy]}
             onValueChange={(next) => {
@@ -157,6 +162,19 @@ export function CoordinationControls({
           <p className="text-xs text-muted-foreground">
             {POLICIES.find((p) => p.value === coordination.policy)?.hint}
           </p>
+          <label className="flex items-center gap-2 text-sm">
+            <Switch
+              checked={coordination.claudeMod === true}
+              disabled={busy}
+              aria-label="Use Claude Code Peer Mod"
+              onCheckedChange={(claudeMod) => void run({ claudeMod })}
+            />
+            Use Claude Code Peer Mod
+          </label>
+          <p className="text-xs text-muted-foreground">
+            Claude Code 2.1.291 or newer. The Mod replaces Peer's Claude hooks and waits for the hub
+            at tracked edits. Each running agent shows its verified coordination level.
+          </p>
           {AGENTS.map((agent) => {
             const added = coordination[agent.hooks] === true;
             // A Peer that cannot add hooks to this agent does not say whether it runs them.
@@ -168,7 +186,7 @@ export function CoordinationControls({
               >
                 <span className="min-w-0 flex-1">
                   {added
-                    ? `${agent.name} runs Peer's hooks: its agents take part, in herdr, in Peer or anywhere.`
+                    ? `Peer's hooks are installed for ${agent.name}. New sessions take part once the agent loads them.`
                     : `Add Peer's hooks to ${agent.name} so its agents take part, wherever they run.`}
                   {added && agent.hooks === "codexHooks"
                     ? ` ${codexTrustHint(coordination.codexHooksTrusted)}`

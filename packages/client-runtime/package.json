@@ -3,6 +3,14 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./coordinationTimeline": {
+      "types": "./src/coordinationTimeline.ts",
+      "default": "./src/coordinationTimeline.ts"
+    },
+    "./peer-task-agent": {
+      "types": "./src/peerTaskAgent.ts",
+      "default": "./src/peerTaskAgent.ts"
+    },
     "./peer-memory": {
       "types": "./src/peerMemory.ts",
       "default": "./src/peerMemory.ts"
