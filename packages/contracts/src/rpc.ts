@@ -1,5 +1,32 @@
 import { OrchestrationDispatchCommandError } from "./orchestrationDispatch.ts";
 import {
+  PeerHubMemoryStateInput,
+  PeerMemoryState,
+  PeerHubMemoryModeInput,
+  PeerHubMemorySetModeInput,
+  PeerHubMemoryExecuteInput,
+  PeerMemoryWriteResult,
+  PeerHubMemorySearchInput,
+  PeerMemorySearchResult,
+  PeerHubMemoryReadInput,
+  PeerMemoryRecordView,
+  PeerHubMemoryProjectInput,
+  PeerMemoryProjection,
+  PeerHubMemoryChangesInput,
+  PeerMemoryChanges,
+  PeerHubMemoryReceiptsInput,
+  PeerHubMemoryKeepInput,
+  PeerMemoryKept,
+  PeerHubMemoryImportKnowledgeInput,
+  PeerMemoryMode,
+  PeerMemoryReceipt,
+  PeerHubMemoryQueueInput,
+  PeerMemoryQueue,
+  PeerHubMemoryRetryInput,
+  PeerHubMemoryDiscardInput,
+  PeerMemoryDiscarded,
+} from "./peerMemory.ts";
+import {
   ChatGptReconnectProfileInput,
   ChatGptReconnectProfile,
   ChatGptImportProfileInput,
@@ -510,6 +537,20 @@ export const WS_METHODS = {
 
   // Peer Hub (the workspaces this environment signs in to and provisions from)
   peerHubSubscribe: "peerHub.subscribe",
+  peerHubMemoryState: "peerHub.memoryState",
+  peerHubMemoryMode: "peerHub.memoryMode",
+  peerHubMemorySetMode: "peerHub.memorySetMode",
+  peerHubMemoryExecute: "peerHub.memoryExecute",
+  peerHubMemorySearch: "peerHub.memorySearch",
+  peerHubMemoryRead: "peerHub.memoryRead",
+  peerHubMemoryProject: "peerHub.memoryProject",
+  peerHubMemoryChanges: "peerHub.memoryChanges",
+  peerHubMemoryReceipts: "peerHub.memoryReceipts",
+  peerHubMemoryKeep: "peerHub.memoryKeep",
+  peerHubMemoryImportKnowledge: "peerHub.memoryImportKnowledge",
+  peerHubMemoryQueue: "peerHub.memoryQueue",
+  peerHubMemoryRetry: "peerHub.memoryRetry",
+  peerHubMemoryDiscard: "peerHub.memoryDiscard",
   peerHubStartSignIn: "peerHub.startSignIn",
   peerHubFinishSignIn: "peerHub.finishSignIn",
   peerHubSignOut: "peerHub.signOut",
@@ -1722,6 +1763,77 @@ const WsScheduledTasksSubscribeRpc = Rpc.make(WS_METHODS.scheduledTasksSubscribe
   stream: true,
 });
 
+const WsPeerHubMemoryQueueRpc = Rpc.make(WS_METHODS.peerHubMemoryQueue, {
+  payload: PeerHubMemoryQueueInput,
+  success: PeerMemoryQueue,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+const WsPeerHubMemoryRetryRpc = Rpc.make(WS_METHODS.peerHubMemoryRetry, {
+  payload: PeerHubMemoryRetryInput,
+  success: PeerMemoryWriteResult,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+const WsPeerHubMemoryDiscardRpc = Rpc.make(WS_METHODS.peerHubMemoryDiscard, {
+  payload: PeerHubMemoryDiscardInput,
+  success: PeerMemoryDiscarded,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+const WsPeerHubMemoryStateRpc = Rpc.make(WS_METHODS.peerHubMemoryState, {
+  payload: PeerHubMemoryStateInput,
+  success: PeerMemoryState,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+const WsPeerHubMemoryModeRpc = Rpc.make(WS_METHODS.peerHubMemoryMode, {
+  payload: PeerHubMemoryModeInput,
+  success: Schema.Struct({ mode: PeerMemoryMode }),
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+const WsPeerHubMemorySetModeRpc = Rpc.make(WS_METHODS.peerHubMemorySetMode, {
+  payload: PeerHubMemorySetModeInput,
+  success: Schema.Struct({ mode: PeerMemoryMode }),
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+const WsPeerHubMemoryExecuteRpc = Rpc.make(WS_METHODS.peerHubMemoryExecute, {
+  payload: PeerHubMemoryExecuteInput,
+  success: PeerMemoryWriteResult,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+const WsPeerHubMemorySearchRpc = Rpc.make(WS_METHODS.peerHubMemorySearch, {
+  payload: PeerHubMemorySearchInput,
+  success: PeerMemorySearchResult,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+const WsPeerHubMemoryReadRpc = Rpc.make(WS_METHODS.peerHubMemoryRead, {
+  payload: PeerHubMemoryReadInput,
+  success: PeerMemoryRecordView,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+const WsPeerHubMemoryProjectRpc = Rpc.make(WS_METHODS.peerHubMemoryProject, {
+  payload: PeerHubMemoryProjectInput,
+  success: PeerMemoryProjection,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+const WsPeerHubMemoryChangesRpc = Rpc.make(WS_METHODS.peerHubMemoryChanges, {
+  payload: PeerHubMemoryChangesInput,
+  success: PeerMemoryChanges,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+const WsPeerHubMemoryReceiptsRpc = Rpc.make(WS_METHODS.peerHubMemoryReceipts, {
+  payload: PeerHubMemoryReceiptsInput,
+  success: Schema.Struct({ receipts: Schema.Array(PeerMemoryReceipt) }),
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+const WsPeerHubMemoryKeepRpc = Rpc.make(WS_METHODS.peerHubMemoryKeep, {
+  payload: PeerHubMemoryKeepInput,
+  success: PeerMemoryKept,
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+const WsPeerHubMemoryImportKnowledgeRpc = Rpc.make(WS_METHODS.peerHubMemoryImportKnowledge, {
+  payload: PeerHubMemoryImportKnowledgeInput,
+  success: Schema.Struct({ operations: Schema.Array(PeerMemoryWriteResult) }),
+  error: Schema.Union([PeerHubError, EnvironmentAuthorizationError]),
+});
+
 const WsPeerHubSubscribeRpc = Rpc.make(WS_METHODS.peerHubSubscribe, {
   payload: Schema.Struct({}),
   success: PeerHubStatus,
@@ -2028,6 +2140,23 @@ const WsSubscribeResourceTelemetryRpc = Rpc.make(WS_METHODS.subscribeResourceTel
   stream: true,
 });
 
+export const WsPeerMemoryRpcGroup = RpcGroup.make(
+  WsPeerHubMemoryQueueRpc,
+  WsPeerHubMemoryRetryRpc,
+  WsPeerHubMemoryDiscardRpc,
+  WsPeerHubMemoryStateRpc,
+  WsPeerHubMemoryModeRpc,
+  WsPeerHubMemorySetModeRpc,
+  WsPeerHubMemoryExecuteRpc,
+  WsPeerHubMemorySearchRpc,
+  WsPeerHubMemoryReadRpc,
+  WsPeerHubMemoryProjectRpc,
+  WsPeerHubMemoryChangesRpc,
+  WsPeerHubMemoryReceiptsRpc,
+  WsPeerHubMemoryKeepRpc,
+  WsPeerHubMemoryImportKnowledgeRpc,
+);
+
 export const WsRpcGroup = RpcGroup.make(
   WsServerProbeRpc,
   WsServerGetConfigRpc,
@@ -2077,6 +2206,20 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerRefreshUsageRatesRpc,
   WsServerSignalProcessRpc,
   WsPeerHubSubscribeRpc,
+  WsPeerHubMemoryQueueRpc,
+  WsPeerHubMemoryRetryRpc,
+  WsPeerHubMemoryDiscardRpc,
+  WsPeerHubMemoryStateRpc,
+  WsPeerHubMemoryModeRpc,
+  WsPeerHubMemorySetModeRpc,
+  WsPeerHubMemoryExecuteRpc,
+  WsPeerHubMemorySearchRpc,
+  WsPeerHubMemoryReadRpc,
+  WsPeerHubMemoryProjectRpc,
+  WsPeerHubMemoryChangesRpc,
+  WsPeerHubMemoryReceiptsRpc,
+  WsPeerHubMemoryKeepRpc,
+  WsPeerHubMemoryImportKnowledgeRpc,
   WsPeerHubStartSignInRpc,
   WsPeerHubFinishSignInRpc,
   WsPeerHubSignOutRpc,

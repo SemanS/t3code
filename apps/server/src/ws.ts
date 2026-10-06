@@ -96,6 +96,7 @@ import {
   type PullRequestRef,
   WS_METHODS,
   WsRpcGroup,
+  WsPeerMemoryRpcGroup,
 } from "@t3tools/contracts";
 import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
 import {
@@ -446,6 +447,22 @@ function projectFileFailureContext(
 const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
 const ServerWsRpcGroup = WsRpcGroup;
+const ServerWsNonMemoryRpcGroup = ServerWsRpcGroup.omit(
+  WS_METHODS.peerHubMemoryQueue,
+  WS_METHODS.peerHubMemoryRetry,
+  WS_METHODS.peerHubMemoryDiscard,
+  WS_METHODS.peerHubMemoryState,
+  WS_METHODS.peerHubMemoryMode,
+  WS_METHODS.peerHubMemorySetMode,
+  WS_METHODS.peerHubMemoryExecute,
+  WS_METHODS.peerHubMemorySearch,
+  WS_METHODS.peerHubMemoryRead,
+  WS_METHODS.peerHubMemoryProject,
+  WS_METHODS.peerHubMemoryChanges,
+  WS_METHODS.peerHubMemoryReceipts,
+  WS_METHODS.peerHubMemoryKeep,
+  WS_METHODS.peerHubMemoryImportKnowledge,
+);
 // When a resuming client's cursor is more than this many events behind the
 // current head, skip the per-event catch-up replay and send a fresh shell
 // snapshot instead. Replaying each intervening event costs a shell refetch;
@@ -1088,7 +1105,7 @@ const makeWsRpcLayer = (
   clientAnalyticsProps: Readonly<Record<string, unknown>>,
   previewAutomationBroker: PreviewAutomationBroker.PreviewAutomationBroker["Service"],
 ) =>
-  ServerWsRpcGroup.toLayer(
+  Layer.unwrap(
     Effect.gen(function* () {
       const currentSessionId = currentSession.sessionId;
       const sql = yield* SqlClient.SqlClient;
@@ -1752,7 +1769,67 @@ const makeWsRpcLayer = (
         return result;
       });
 
-      const handlers = ServerWsRpcGroup.of({
+      const memoryHandlers = WsPeerMemoryRpcGroup.of({
+        [WS_METHODS.peerHubMemoryQueue]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubMemoryQueue, peerHub.memoryQueue(input), {
+            "rpc.aggregate": "peerHub.memory",
+          }),
+        [WS_METHODS.peerHubMemoryRetry]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubMemoryRetry, peerHub.memoryRetry(input), {
+            "rpc.aggregate": "peerHub.memory",
+          }),
+        [WS_METHODS.peerHubMemoryDiscard]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubMemoryDiscard, peerHub.memoryDiscard(input), {
+            "rpc.aggregate": "peerHub.memory",
+          }),
+        [WS_METHODS.peerHubMemoryState]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubMemoryState, peerHub.memoryState(input), {
+            "rpc.aggregate": "peerHub.memory",
+          }),
+        [WS_METHODS.peerHubMemoryMode]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubMemoryMode, peerHub.memoryMode(input), {
+            "rpc.aggregate": "peerHub.memory",
+          }),
+        [WS_METHODS.peerHubMemorySetMode]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubMemorySetMode, peerHub.memorySetMode(input), {
+            "rpc.aggregate": "peerHub.memory",
+          }),
+        [WS_METHODS.peerHubMemoryExecute]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubMemoryExecute, peerHub.memoryExecute(input), {
+            "rpc.aggregate": "peerHub.memory",
+          }),
+        [WS_METHODS.peerHubMemorySearch]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubMemorySearch, peerHub.memorySearch(input), {
+            "rpc.aggregate": "peerHub.memory",
+          }),
+        [WS_METHODS.peerHubMemoryRead]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubMemoryRead, peerHub.memoryRead(input), {
+            "rpc.aggregate": "peerHub.memory",
+          }),
+        [WS_METHODS.peerHubMemoryProject]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubMemoryProject, peerHub.memoryProject(input), {
+            "rpc.aggregate": "peerHub.memory",
+          }),
+        [WS_METHODS.peerHubMemoryChanges]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubMemoryChanges, peerHub.memoryChanges(input), {
+            "rpc.aggregate": "peerHub.memory",
+          }),
+        [WS_METHODS.peerHubMemoryReceipts]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubMemoryReceipts, peerHub.memoryReceipts(input), {
+            "rpc.aggregate": "peerHub.memory",
+          }),
+        [WS_METHODS.peerHubMemoryKeep]: (input) =>
+          observeRpcEffect(WS_METHODS.peerHubMemoryKeep, peerHub.memoryKeep(input), {
+            "rpc.aggregate": "peerHub.memory",
+          }),
+        [WS_METHODS.peerHubMemoryImportKnowledge]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.peerHubMemoryImportKnowledge,
+            peerHub.memoryImportKnowledge(input),
+            { "rpc.aggregate": "peerHub.memory" },
+          ),
+      });
+      const handlers = ServerWsNonMemoryRpcGroup.of({
         [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command) =>
           observeRpcEffect(
             ORCHESTRATION_V2_WS_METHODS.dispatchCommand,
@@ -3884,7 +3961,10 @@ const makeWsRpcLayer = (
             { "rpc.aggregate": "server" },
           ),
       });
-      return handlers;
+      return Layer.mergeAll(
+        ServerWsNonMemoryRpcGroup.toLayer(handlers),
+        WsPeerMemoryRpcGroup.toLayer(memoryHandlers),
+      );
     }),
   );
 

@@ -349,6 +349,7 @@ export type PeerCoordinationPolicy = typeof PeerCoordinationPolicy.Type;
 export const PeerCoordSession = Schema.Struct({
   /** `claude:<session id>` */
   id: Schema.String,
+  runtimeGeneration: Schema.optional(Schema.String),
   workspace: Schema.String,
   project: Schema.String,
   email: Schema.String,

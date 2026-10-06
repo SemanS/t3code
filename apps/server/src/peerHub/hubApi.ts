@@ -93,6 +93,7 @@ export interface ReportedThread {
 
 const HubCoordSession = Schema.Struct({
   id: Schema.String,
+  runtimeGeneration: Schema.optional(Schema.String),
   project: Schema.String,
   email: Schema.String,
   environment: Schema.String,
@@ -258,6 +259,7 @@ export type HubCoordView = typeof CoordView.Type;
 /** One agent session as this environment reports it for coordination. */
 export interface ReportedSession {
   readonly id: string;
+  readonly runtimeGeneration?: string;
   readonly project: string;
   readonly label: string;
   readonly agent?: string;
@@ -294,7 +296,7 @@ export const isSessionEnded = (error: PeerHubError) => error.detail === SESSION_
  * What a workspace's event stream pings about; `observe` asks a computer to
  * send a shared thread's view, `resync` follows pings it missed.
  */
-export type HubChange = "work" | "coord" | "projects" | "observe" | "resync";
+export type HubChange = "work" | "coord" | "projects" | "observe" | "memory.changed" | "resync";
 
 export interface HubPing {
   readonly change: HubChange;
@@ -310,6 +312,7 @@ const CHANGES: ReadonlySet<string> = new Set<HubChange>([
   "coord",
   "projects",
   "observe",
+  "memory.changed",
   "resync",
 ]);
 const PingData = Schema.Struct({

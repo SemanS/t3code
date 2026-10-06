@@ -47,6 +47,9 @@ import {
 import { WorktreeToolkitHandlersLive } from "./toolkits/worktree/handlers.ts";
 import { WorktreeToolkit } from "./toolkits/worktree/tools.ts";
 import * as WorktreeMcpService from "./WorktreeMcpService.ts";
+import * as PeerMemoryMcpService from "./PeerMemoryMcpService.ts";
+import { PeerMemoryToolkit } from "./toolkits/peerMemory/tools.ts";
+import { PeerMemoryHandlersLive } from "./toolkits/peerMemory/handlers.ts";
 import { PullRequestsToolkitHandlersLive } from "./toolkits/pullRequests/handlers.ts";
 import { PullRequestsToolkit } from "./toolkits/pullRequests/tools.ts";
 import {
@@ -669,6 +672,10 @@ export const OrchestratorToolkitRegistrationLive = McpServer.toolkit(Orchestrato
 export const ThreadToolkitRegistrationLive = McpServer.toolkit(ThreadToolkit).pipe(
   Layer.provide(ThreadToolkitHandlersLive),
 );
+export const PeerMemoryToolkitRegistrationLive = McpServer.toolkit(PeerMemoryToolkit).pipe(
+  Layer.provide(PeerMemoryHandlersLive),
+  Layer.provide(PeerMemoryMcpService.layer),
+);
 
 const WorktreeToolkitRegistrationLive = McpServer.toolkit(WorktreeToolkit).pipe(
   Layer.provide(WorktreeToolkitHandlersLive),
@@ -719,6 +726,7 @@ export const layer = Layer.mergeAll(
   PreviewToolkitRegistrationLive,
   OrchestratorToolkitRegistrationLive,
   ThreadToolkitRegistrationLive,
+  PeerMemoryToolkitRegistrationLive,
   AttachmentRegistrationLive,
   ProjectRegistrationLive,
   EnvironmentRegistrationLive,

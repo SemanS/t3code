@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off globalTimers:off globalDate:off preferSchemaOverJson:off - a local socket for agents' hooks and CLI, debounced syncs, wall-clock TTLs, and a JSON-lines log for experiments.
+// @effect-diagnostics nodeBuiltinImport:off cryptoRandomUUID:off globalTimers:off globalDate:off preferSchemaOverJson:off - a local socket for agents' hooks and CLI, durable runtime generations, debounced syncs, wall-clock TTLs, and a JSON-lines log for experiments.
 /**
  * CoordinationBroker — the local end of coordination. Agents' hooks and the
  * `peer` CLI talk to it over a Unix socket only this user can open. It keeps
@@ -10,6 +10,7 @@
  * @module peerHub/coordinationBroker
  */
 import * as NodeFS from "node:fs";
+import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeHttp from "node:http";
 import * as NodePath from "node:path";
@@ -17,6 +18,29 @@ import * as NodePath from "node:path";
 import { runtimeStillPresent } from "./workLifecycle.ts";
 
 import type { PeerCoordinationPolicy, PeerWorkStatus, PeerWorkThread } from "@t3tools/contracts";
+import type { PeerMemoryMode } from "@t3tools/contracts";
+import type { MemorySession } from "./memory/MemoryService.ts";
+
+/** Domain operations; the broker only binds them to a confirmed local runtime. */
+export interface BrokerMemory {
+  readonly prepare: (
+    session: MemorySession,
+    source: string,
+  ) => Promise<{
+    readonly mode: PeerMemoryMode;
+    readonly currentPath: string;
+    readonly notice: string;
+  }>;
+  readonly notice: (session: MemorySession) => Promise<string>;
+  readonly cli: (
+    session: MemorySession,
+    command: string,
+    args: ReadonlyArray<string>,
+  ) => Promise<string>;
+  readonly checkpoint: (session: MemorySession, reason: string) => Promise<unknown>;
+  readonly end: (session: MemorySession) => Promise<void>;
+  readonly legacySnapshot: (session: MemorySession, text: string, source: string) => Promise<void>;
+}
 
 import {
   AGENT_NAMES,
@@ -131,6 +155,7 @@ export interface CheckoutPlace {
 }
 
 export interface BrokerDeps {
+  readonly memory?: BrokerMemory;
   /** Confirmed runtime state; undefined leaves hook activity as the bounded fallback lease. */
   readonly runtimeStatus?: (
     session: string,
@@ -267,6 +292,10 @@ export interface BrokerDeps {
 
 interface LocalSession {
   readonly id: string;
+  readonly runtimeGeneration: string;
+  readonly repositoryId: string | undefined;
+  memoryMode: PeerMemoryMode;
+  memoryNotice: string;
   /** The agent's harness, whose hooks report it: its id is `<agent>:<session id>`. */
   readonly agent: AgentKind;
   readonly workspace: string;
@@ -289,7 +318,8 @@ interface LocalSession {
   /** Files whose edit its person was asked about: the edit happening means they approved. */
   readonly asked: Map<string, ReadonlyArray<string>>;
   /** The file the agent keeps its own working context in. */
-  readonly ownContextPath: string;
+  ownContextPath: string;
+  readonly legacyOwnContextPath: string;
   /** The file it keeps now: its own, or its work's shared context while it keeps that. */
   contextPath: string;
   /** It keeps the shared context of its work (task, or no task). */
@@ -520,6 +550,7 @@ function sinceText(iso: string): string {
 const safePart = (part: string) => part.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 120);
 
 export class CoordinationBroker {
+  private readonly creatingSessions = new Map<string, Promise<LocalSession | null>>();
   private server: NodeHttp.Server | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly sessions = new Map<string, LocalSession>();
@@ -775,6 +806,7 @@ export class CoordinationBroker {
   private asHub(session: LocalSession): HubCoordSession {
     return {
       id: session.id,
+      runtimeGeneration: session.runtimeGeneration,
       project: session.project,
       email: this.deps.email() ?? "",
       environment: this.deps.environment,
@@ -791,6 +823,49 @@ export class CoordinationBroker {
     };
   }
 
+  private memoryDescriptor(session: LocalSession): MemorySession {
+    return {
+      workspace: session.workspace,
+      project: session.project,
+      sessionId: session.id,
+      environmentId: this.deps.environment,
+      runtimeGeneration: session.runtimeGeneration,
+      workId: session.thread ?? (session.pane === undefined ? session.id : `herdr:${session.pane}`),
+      ...(session.task === undefined ? {} : { taskId: session.task }),
+      ...(session.repositoryId === undefined ? {} : { repositoryId: session.repositoryId }),
+      adapter: session.agent,
+      root: session.root,
+    };
+  }
+  private applyMemoryMode(session: LocalSession, mode: PeerMemoryMode, currentPath: string) {
+    session.memoryMode = mode;
+    session.ownContextPath = mode === "memory" ? currentPath : session.legacyOwnContextPath;
+    session.contextPath =
+      mode === "memory" || !session.keeps
+        ? session.ownContextPath
+        : (this.mirrorOf(session)?.path ?? session.ownContextPath);
+    if (mode === "memory") {
+      session.team = [];
+      session.marked.clear();
+    }
+  }
+
+  /** MCP binds its caller to this known runtime; it cannot supply another actor. */
+  memorySession(nativeSessionId: string): MemorySession | undefined {
+    const matches = [...this.sessions.values()].filter(
+      (session) =>
+        session.id === nativeSessionId ||
+        session.id.slice(session.agent.length + 1) === nativeSessionId,
+    );
+    return matches.length === 1 ? this.memoryDescriptor(matches[0]!) : undefined;
+  }
+
+  /** Finish a coordination report before sending a runtime-authenticated memory operation. */
+  async registerMemoryRuntime(nativeSessionId: string): Promise<void> {
+    const session = this.memorySession(nativeSessionId);
+    if (session !== undefined) await this.sync(session.workspace);
+  }
+
   /** The hub's view with this computer's sessions as they are now, not as last reported. */
   private merged(workspace: string, view: HubCoordView | undefined): CoordinationView {
     const local = [...this.sessions.values()].filter((s) => s.workspace === workspace);
@@ -805,6 +880,24 @@ export class CoordinationBroker {
   }
 
   private async sessionFor(
+    agent: AgentKind,
+    body: Record<string, unknown>,
+    pane: string | undefined,
+  ): Promise<LocalSession | null> {
+    if (typeof body.session_id !== "string") return null;
+    const id = `${agent}:${body.session_id}`;
+    const existing = this.sessions.get(id);
+    if (existing !== undefined) return existing;
+    const creating = this.creatingSessions.get(id);
+    if (creating !== undefined) return creating;
+    const run = this.createSession(agent, body, pane).finally(() =>
+      this.creatingSessions.delete(id),
+    );
+    this.creatingSessions.set(id, run);
+    return run;
+  }
+
+  private async createSession(
     agent: AgentKind,
     body: Record<string, unknown>,
     pane: string | undefined,
@@ -837,6 +930,10 @@ export class CoordinationBroker {
     );
     const session: LocalSession = {
       id,
+      runtimeGeneration: NodeCrypto.randomUUID(),
+      repositoryId: place.repositoryId,
+      memoryMode: "legacy",
+      memoryNotice: "",
       agent,
       workspace: place.workspace,
       project: place.project,
@@ -855,6 +952,7 @@ export class CoordinationBroker {
       memory: emptyMemory(),
       asked: new Map(),
       ownContextPath,
+      legacyOwnContextPath: ownContextPath,
       contextPath: ownContextPath,
       keeps: false,
       sharedHeard: 0,
@@ -902,6 +1000,15 @@ export class CoordinationBroker {
     };
     // A session Peer meets again (Peer restarted, or the session outlived its TTL) keeps what
     // it shares: reporting it without its lines would take its findings back.
+    if (this.deps.memory !== undefined) {
+      try {
+        const prepared = await this.deps.memory.prepare(this.memoryDescriptor(session), "startup");
+        this.applyMemoryMode(session, prepared.mode, prepared.currentPath);
+        session.memoryNotice = prepared.notice;
+      } catch (error) {
+        this.log("memory.prepare.failed", { session: id, error: messageOf(error) });
+      }
+    }
     await this.restoreContext(session);
     this.sessions.set(id, session);
     this.log("session.started", {
@@ -979,7 +1086,11 @@ export class CoordinationBroker {
     const agent = agentNamed(headerOf(headers, "x-peer-agent"));
     const pane = this.paneOf(agent, body, headerOf(headers, "x-herdr-pane"));
     // A session Peer never saw that ends has nothing to clear.
-    if (event === "SessionEnd" && !this.sessions.has(`${agent}:${String(body.session_id)}`))
+    if (
+      event === "SessionEnd" &&
+      !this.sessions.has(`${agent}:${String(body.session_id)}`) &&
+      !this.creatingSessions.has(`${agent}:${String(body.session_id)}`)
+    )
       return null;
     const session = await this.sessionFor(agent, body, pane);
     if (session === null) return null;
@@ -1022,6 +1133,15 @@ export class CoordinationBroker {
   ): Promise<Record<string, unknown> | null> {
     const context = (hookEventName: string, text: string | null) =>
       text === null ? null : { hookSpecificOutput: { hookEventName, additionalContext: text } };
+    if (
+      session.memoryMode === "memory" &&
+      this.deps.memory !== undefined &&
+      event !== "SessionEnd"
+    ) {
+      session.memoryNotice = await this.deps.memory
+        .notice(this.memoryDescriptor(session))
+        .catch(() => "");
+    }
     // The project's reviewed knowledge is read before the steps that may tell of it.
     if (event === "UserPromptSubmit" || event === "PreToolUse" || event === "PostToolUse") {
       await this.ensureKnowledge(session).catch(() => undefined);
@@ -1055,12 +1175,10 @@ export class CoordinationBroker {
         // the news told of a work is not told again by the index, so the news comes first.
         const fullPrompt = typeof body.prompt === "string" ? body.prompt : "";
         const news = this.news(session);
-        const index = this.advise(
-          session,
-          "index",
-          () => this.askIndexFor(session, fullPrompt),
-          null,
-        );
+        const index =
+          session.memoryMode === "memory"
+            ? `Peer Memory index: ${this.cli} memory search${session.task === undefined ? "" : ` --task ${session.task}`}. Select record versions with ${this.cli} memory project --include id@version --purpose "current task".`
+            : this.advise(session, "index", () => this.askIndexFor(session, fullPrompt), null);
         return context(event, [news, index].filter((part) => part !== null).join("\n\n") || null);
       }
       case "PreToolUse":
@@ -1082,7 +1200,10 @@ export class CoordinationBroker {
             contextEdited = true;
             continue;
           }
-          if (session.keeps && this.samePath(path, session.contextPath)) {
+          if (
+            session.keeps &&
+            this.samePath(path, this.mirrorOf(session)?.path ?? session.contextPath)
+          ) {
             await this.saveShared(session);
             contextEdited = true;
             continue;
@@ -1143,13 +1264,28 @@ export class CoordinationBroker {
         await this.readShellChanges(session);
         this.markDirty();
         return null;
+      case "PreCompact":
+        if (this.deps.memory !== undefined)
+          await this.deps.memory.checkpoint(
+            this.memoryDescriptor(session),
+            "before provider compaction",
+          );
+        return context(
+          event,
+          session.memoryMode === "memory"
+            ? `Peer Memory saved a checkpoint of ${session.ownContextPath}. Read this private file and the latest immutable projection after compaction.`
+            : null,
+        );
       case "SessionEnd":
+        if (this.deps.memory !== undefined)
+          await this.deps.memory.end(this.memoryDescriptor(session));
         void this.release(session);
         this.sessions.delete(session.id);
         this.log("session.ended", {
           session: session.id,
           injected: Object.fromEntries(session.injected),
-          tokens: Math.round([...session.injected.values()].reduce((a, b) => a + b, 0) / 4),
+          tokenEstimate: Math.round([...session.injected.values()].reduce((a, b) => a + b, 0) / 4),
+          tokenEstimateMethod: "chars/4",
         });
         this.markDirty();
         return null;
@@ -1230,12 +1366,26 @@ export class CoordinationBroker {
   private keptBy(session: LocalSession, path: string): boolean {
     return (
       this.samePath(path, session.ownContextPath) ||
-      (session.keeps && this.samePath(path, session.contextPath))
+      (session.keeps && this.samePath(path, this.mirrorOf(session)?.path ?? session.contextPath))
     );
   }
 
   /** A permission Codex asks for that is Peer's own business: its command, or the agent's contexts. */
   private isPeerWork(session: LocalSession, body: Record<string, unknown>): boolean {
+    if (session.memoryMode === "memory" && body.tool_name === "Read") {
+      const input = body.tool_input as Record<string, unknown> | null;
+      const path =
+        typeof input?.file_path === "string"
+          ? NodePath.resolve(session.cwd, input.file_path)
+          : undefined;
+      if (
+        path !== undefined &&
+        (this.samePath(path, session.ownContextPath) ||
+          (NodePath.dirname(path) === NodePath.dirname(session.ownContextPath) &&
+            /^(?:projection\..+\.md|manifest\..+\.json)$/.test(NodePath.basename(path))))
+      )
+        return true;
+    }
     if (body.tool_name === "Bash") {
       const input = body.tool_input as Record<string, unknown> | null;
       const command = typeof input?.command === "string" ? input.command : "";
@@ -1271,9 +1421,12 @@ export class CoordinationBroker {
           hookSpecificOutput: {
             hookEventName: "PreToolUse",
             permissionDecision: "deny",
-            permissionDecisionReason: ownWork
-              ? `Peer: ${keeper} keeps the shared context of ${subject}; the other agents on it only read it. Put what the work should know under "## For the team" in your working context (${session.ownContextPath}); Peer passes it to the keeper.`
-              : `Peer: this is the shared context of ${subject}, another work on this project, and ${keeper} keeps it: only its keeper writes it. Read it; if your work depends on it, ask its agents: ${this.cli} ask ${this.handleOf(mirror.workspace, mirror.project, mirror.scope)} "<question>".`,
+            permissionDecisionReason:
+              ownWork && session.memoryMode === "memory"
+                ? `Peer: ${keeper} edits the shared overview of ${subject}. Share a selected finding with ${this.cli} remember; your private working context is ${session.ownContextPath}.`
+                : ownWork
+                  ? `Peer: ${keeper} keeps the shared context of ${subject}; the other agents on it only read it. Put what the work should know under "## For the team" in your working context (${session.ownContextPath}); Peer passes it to the keeper.`
+                  : `Peer: this is the shared context of ${subject}, another work on this project, and ${keeper} keeps it: only its keeper writes it. Read it; if your work depends on it, ask its agents: ${this.cli} ask ${this.handleOf(mirror.workspace, mirror.project, mirror.scope)} "<question>".`,
           },
         };
       }
@@ -1472,10 +1625,10 @@ export class CoordinationBroker {
     if (options.team !== false) {
       parts.push(
         ...session.pending.splice(0),
-        this.closeNews(session),
-        this.rosterNews(session),
-        this.sharedNews(session),
-        this.findingNews(session),
+        session.memoryMode === "memory" ? session.memoryNotice || null : this.closeNews(session),
+        session.memoryMode === "memory" ? null : this.rosterNews(session),
+        session.memoryMode === "memory" ? null : this.sharedNews(session),
+        session.memoryMode === "memory" ? null : this.findingNews(session),
         this.advise(session, "followed", () => this.followedNews(session), null),
         this.advise(session, "governs", () => this.governsNews(session), null),
         this.boardNewsFor(session),
@@ -1673,6 +1826,39 @@ export class CoordinationBroker {
   }
 
   private async startedContext(session: LocalSession, source: string): Promise<string> {
+    if (this.deps.memory !== undefined) {
+      const prepared = await this.deps.memory
+        .prepare(this.memoryDescriptor(session), source)
+        .catch(() => undefined);
+      if (prepared !== undefined) {
+        this.applyMemoryMode(session, prepared.mode, prepared.currentPath);
+        session.memoryNotice = prepared.notice;
+      }
+    }
+    if (session.memoryMode === "memory") {
+      await this.syncNow(session.workspace, 1500);
+      await this.takeUp(session);
+      const mirror = this.mirrorOf(session);
+      const text = [
+        session.memoryNotice,
+        `Peer Memory: ${this.cli} remember --claim "finding" --evidence path:line records a durable finding; ${this.cli} memory search retrieves the index. Select exact versions with memory project --include id@version --purpose "current task".`,
+        ...(mirror === undefined
+          ? []
+          : [
+              `Shared work overview: ${mirror.path} (version ${mirror.version}).${session.keeps ? " You edit this overview separately; your working context stays private." : " It is a separate overview by its keeper."}`,
+            ]),
+        "All provider adapters use companion context. Hooks alone do not prove receipt; acknowledge the exact projection after reading it.",
+      ].join("\n\n");
+      session.memoryNotice = "";
+      this.log("memory.started", {
+        session: session.id,
+        runtimeGeneration: session.runtimeGeneration,
+        mode: session.memoryMode,
+        contextPath: session.contextPath,
+        chars: text.length,
+      });
+      return text;
+    }
     await NodeFSP.mkdir(NodePath.dirname(session.ownContextPath), { recursive: true });
     let saved: string | undefined;
     try {
@@ -1782,7 +1968,7 @@ export class CoordinationBroker {
         NodeFSP.readFile(session.ownContextPath, "utf8"),
         NodeFSP.stat(session.ownContextPath),
       ]);
-      session.team = teamLines(text);
+      session.team = session.memoryMode === "memory" ? [] : teamLines(text);
       session.contextAt = stat.mtimeMs;
       session.contextKept = contextWritten(text);
     } catch {
@@ -1815,15 +2001,22 @@ export class CoordinationBroker {
     } catch {
       return;
     }
-    if (!session.keeps) {
+    if (!session.keeps || session.memoryMode === "memory") {
       session.contextAt = Date.now();
       session.contextKept = true;
     }
+    if (session.memoryMode === "memory") return;
     const team = teamLines(text);
     const changed = team.join("\n") !== session.team.join("\n");
     session.team = team;
     this.log("context.updated", { session: session.id, bytes: text.length, team, changed });
     if (changed) this.markDirty();
+    if (changed && session.memoryMode === "shadow" && this.deps.memory !== undefined)
+      await this.deps.memory
+        .legacySnapshot(this.memoryDescriptor(session), team.join("\n"), "for_the_team")
+        .catch((error) =>
+          this.log("memory.legacy.failed", { session: session.id, error: messageOf(error) }),
+        );
   }
 
   /**
@@ -1831,6 +2024,7 @@ export class CoordinationBroker {
    * is still empty, and when it has gone stale while the agent works.
    */
   private nudge(session: LocalSession, changed: string | null): string | null {
+    if (session.memoryMode === "memory") return null;
     const now = Date.now();
     if (changed !== null && !session.contextKept && !session.remindedAtStart) {
       session.remindedAtStart = true;
@@ -2042,10 +2236,10 @@ export class CoordinationBroker {
 
   private keep(session: LocalSession, mirror: SharedMirror) {
     session.keeps = true;
-    session.contextPath = mirror.path;
+    session.contextPath = session.memoryMode === "memory" ? session.ownContextPath : mirror.path;
     session.sharedHeard = mirror.version;
     session.sharedHeardText = mirror.text;
-    session.contextKept = contextWritten(mirror.text);
+    if (session.memoryMode !== "memory") session.contextKept = contextWritten(mirror.text);
     session.remindedAtStart = false;
     session.contextAt = Date.now();
     mirror.keeper = {
@@ -2097,8 +2291,10 @@ export class CoordinationBroker {
     session.contextKept = contextWritten(text);
     const before = new Set(projectLines(mirror.text));
     const after = projectLines(text);
-    for (const line of after) if (!before.has(line)) session.marked.add(line);
-    for (const line of before) if (!after.includes(line)) session.marked.delete(line);
+    if (session.memoryMode !== "memory") {
+      for (const line of after) if (!before.has(line)) session.marked.add(line);
+      for (const line of before) if (!after.includes(line)) session.marked.delete(line);
+    }
     mirror.text = text;
     if (Buffer.byteLength(text) > SHARED_MAX_BYTES) {
       // The hub would refuse it: the team keeps the last version until the keeper shortens it.
@@ -2114,6 +2310,12 @@ export class CoordinationBroker {
     }
     mirror.unsent = true;
     await this.pushShared(session, mirror);
+    if (session.memoryMode === "shadow" && this.deps.memory !== undefined)
+      await this.deps.memory
+        .legacySnapshot(this.memoryDescriptor(session), after.join("\n"), "project_marked")
+        .catch((error) =>
+          this.log("memory.legacy.failed", { session: session.id, error: messageOf(error) }),
+        );
   }
 
   /**
@@ -2376,7 +2578,9 @@ export class CoordinationBroker {
       const fresh = findings.filter((finding) => Date.parse(finding.at) > since).slice(0, 10);
       next.pending.push(
         [
-          `Peer: you (${this.me(next)}) keep the shared context of ${subject} now${before === undefined ? "" : `; ${this.deps.nameOf(workspace, before.email)}'s agent kept it before${keeperSession === undefined ? "" : ` and has been idle for ${Math.round(idleFor / 60_000)} minutes`}`}. It is your working context from now on: carry over what matters from ${next.ownContextPath}, then keep it current.`,
+          next.memoryMode === "memory"
+            ? `Peer: you (${this.me(next)}) edit the shared overview of ${subject} now: ${kept.path}. Keep this overview separate; your private working context stays ${next.ownContextPath}. Record selected findings with ${this.cli} remember.`
+            : `Peer: you (${this.me(next)}) keep the shared context of ${subject} now${before === undefined ? "" : `; ${this.deps.nameOf(workspace, before.email)}'s agent kept it before${keeperSession === undefined ? "" : ` and has been idle for ${Math.round(idleFor / 60_000)} minutes`}`}. It is your working context from now on: carry over what matters from ${next.ownContextPath}, then keep it current.`,
           keeperSkill(kept.path, subject),
           ...(guidance === null ? [] : [projectGuidanceText(guidance)]),
           contextWritten(kept.text)
@@ -3301,6 +3505,21 @@ export class CoordinationBroker {
     if (session === null) {
       return "peer: no agent session of yours is known here. Peer coordinates Claude Code and Codex sessions in workspace projects.";
     }
+    if (
+      command === "memory" ||
+      command === "remember" ||
+      (session.memoryMode === "memory" && (command === "index" || command === "find"))
+    ) {
+      if (this.deps.memory === undefined) return "peer: memory is unavailable in this host.";
+      await this.sync(session.workspace);
+      return await this.deps.memory.cli(
+        this.memoryDescriptor(session),
+        command === "index" || command === "find" ? "memory" : command,
+        command === "index" || command === "find"
+          ? [command === "find" ? "search" : "index", ...args]
+          : args,
+      );
+    }
     // Not a sign the agent is at work: its own commands come in a tool call its hooks already
     // reported, and anyone else's (a person's, say) must not cancel its wait for a note.
     const flag = (name: string) => {
@@ -3650,6 +3869,7 @@ export class CoordinationBroker {
       .filter((s) => s.workspace === workspace)
       .map((s) => ({
         id: s.id,
+        runtimeGeneration: s.runtimeGeneration,
         project: s.project,
         label: s.label,
         agent: s.agent,
@@ -3661,7 +3881,7 @@ export class CoordinationBroker {
         claims: s.claims,
         // Its own lines, and those it marked [project] in a shared context it kept: a keeper that
         // takes over does not say again what its predecessor marked.
-        findings: [...new Set([...s.team, ...s.marked])],
+        findings: s.memoryMode === "memory" ? [] : [...new Set([...s.team, ...s.marked])],
         // When it was last at work: an idle keeper gives way to an agent that works.
         activeAt: new Date(s.lastActivity).toISOString(),
         // What it has heard is no independent discovery when it says the same.
@@ -3736,6 +3956,8 @@ export class CoordinationBroker {
           })
         ) {
           void this.release(session);
+          if (this.deps.memory !== undefined)
+            void this.deps.memory.end(this.memoryDescriptor(session));
           this.sessions.delete(id);
           this.log("session.expired", { session: id });
           continue;
@@ -3787,6 +4009,22 @@ export class CoordinationBroker {
           else this.reported.delete(workspace);
           this.views.set(workspace, view);
           this.viewAt.set(workspace, Date.now());
+          if (this.deps.memory !== undefined)
+            for (const session of this.sessions.values()) {
+              if (session.workspace !== workspace) continue;
+              const before = session.memoryMode;
+              const prepared = await this.deps.memory
+                .prepare(this.memoryDescriptor(session), "mode")
+                .catch(() => undefined);
+              if (prepared === undefined) continue;
+              this.applyMemoryMode(session, prepared.mode, prepared.currentPath);
+              if (before !== prepared.mode) {
+                await this.restoreContext(session);
+                session.pending.push(
+                  `Peer Memory mode is ${prepared.mode}; your working context is ${session.contextPath}. New memory records and pending local writes are preserved.`,
+                );
+              }
+            }
           this.log("sync", {
             workspace,
             reported: sessions.map((s) => ({
