@@ -2,6 +2,7 @@ import type {
   EnvironmentId,
   PeerCoordinationPolicy,
   PeerHubStatus,
+  PeerHubSetCoordinationInput,
   PeerOverlap,
 } from "@t3tools/contracts";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
@@ -94,13 +95,6 @@ const AGENTS = [
   { hooks: "codexHooks", name: "Codex" },
 ] as const;
 
-/** Codex runs a hook only once its person trusts it, in Codex: Peer says whether they did. */
-function codexTrustHint(trusted: boolean | undefined): string {
-  return trusted === true
-    ? "Codex trusts them."
-    : "Codex runs them once you trust them: start codex and choose Trust all when it asks to review hooks (or trust them in /hooks).";
-}
-
 /** Settings → Workspaces: agents coordinating with the team's (experimental). */
 export function CoordinationControls({
   environmentId,
@@ -112,13 +106,7 @@ export function CoordinationControls({
   const set = useAtomCommand(serverEnvironment.peerHubSetCoordination, { reportFailure: false });
   const [busy, setBusy] = useState(false);
   const coordination = status.coordination;
-  const run = async (input: {
-    readonly enabled?: boolean;
-    readonly policy?: PeerCoordinationPolicy;
-    readonly claudeHooks?: boolean;
-    readonly claudeMod?: boolean;
-    readonly codexHooks?: boolean;
-  }) => {
+  const run = async (input: PeerHubSetCoordinationInput) => {
     setBusy(true);
     try {
       report("Could not change agent coordination", await set({ environmentId, input }));
@@ -186,10 +174,16 @@ export function CoordinationControls({
               >
                 <span className="min-w-0 flex-1">
                   {added
-                    ? `Peer's hooks are installed for ${agent.name}. New sessions take part once the agent loads them.`
+                    ? agent.hooks === "codexHooks"
+                      ? "Peer's hooks are installed in all configured Codex homes."
+                      : `Peer's hooks are installed for ${agent.name}. New sessions take part once the agent loads them.`
                     : `Add Peer's hooks to ${agent.name} so its agents take part, wherever they run.`}
                   {added && agent.hooks === "codexHooks"
-                    ? ` ${codexTrustHint(coordination.codexHooksTrusted)}`
+                    ? coordination.codexHooksTrusted === true
+                      ? " Codex trusts them in every configured home."
+                      : coordination.codexHookHomes === undefined
+                        ? " Review and trust each Peer command in Codex's /hooks screen."
+                        : " Review the Peer commands for each home below before new sessions can coordinate."
                     : null}
                 </span>
                 <Button
@@ -200,9 +194,82 @@ export function CoordinationControls({
                 >
                   {added ? `Remove from ${agent.name}` : `Add to ${agent.name}`}
                 </Button>
+                {agent.hooks === "codexHooks" &&
+                !added &&
+                coordination.codexHookHomes?.some((home) => home.present) ? (
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    disabled={busy}
+                    onClick={() => void run({ codexHooks: false })}
+                  >
+                    Remove from Codex
+                  </Button>
+                ) : null}
               </div>
             );
           })}
+          {coordination.codexHookHomes?.map((home) => (
+            <details key={home.home} className="text-xs text-muted-foreground">
+              <summary className="cursor-pointer">
+                Codex: {home.home} —{" "}
+                {home.trusted
+                  ? "ready for new sessions"
+                  : home.installed
+                    ? "needs review"
+                    : "hooks missing or changed"}
+              </summary>
+              <div className="flex flex-col gap-2 pt-2">
+                <p>
+                  Hook settings: <code className="select-all">{home.hooksPath}</code>
+                </p>
+                {home.error === undefined ? null : <p>{home.error}</p>}
+                {!home.installed ? (
+                  <p>
+                    Choose Add to Codex to install the current Peer hooks in all configured homes on
+                    this environment.
+                  </p>
+                ) : (
+                  <>
+                    <p>
+                      These commands run on this environment outside Codex's sandbox. They report
+                      agent activity to Peer and coordinate overlapping edits.
+                    </p>
+                    <ul className="flex flex-col gap-1">
+                      {home.hooks.map((hook) => (
+                        <li key={hook.key}>
+                          {hook.event}
+                          {hook.matcher === undefined ? "" : ` (${hook.matcher})`}:{" "}
+                          <code className="select-all">{hook.command}</code>
+                          {hook.enabled ? "" : " — disabled in Codex"}
+                        </li>
+                      ))}
+                    </ul>
+                    {home.hooks.some((hook) => !hook.enabled) ? (
+                      <p>
+                        Some Peer hooks are disabled in Codex. Enable them there before new sessions
+                        can coordinate.
+                      </p>
+                    ) : null}
+                    {!home.trusted ? (
+                      <Button
+                        size="xs"
+                        variant="outline"
+                        disabled={busy || home.hooks.some((hook) => !hook.enabled)}
+                        onClick={() =>
+                          void run({
+                            codexHookApproval: { home: home.home, reviewId: home.reviewId },
+                          })
+                        }
+                      >
+                        Trust these Peer hooks
+                      </Button>
+                    ) : null}
+                  </>
+                )}
+              </div>
+            </details>
+          ))}
           <p className="text-xs text-muted-foreground">
             Every coordination event is logged to{" "}
             <code className="rounded bg-muted px-1 py-px text-2xs select-all">

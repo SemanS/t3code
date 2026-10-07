@@ -21,7 +21,10 @@ an uncertain launch cannot discard work. Stopping an agent does not close its ta
 handoff context.
 
 Enable coordination in **Settings → Workspaces**. For Claude Code 2.1.291 or newer, enable **Peer
-Mod**; it replaces Peer's Claude hooks. Codex uses Peer hooks and asks you to trust them. Changing the
+Mod**; it replaces Peer's Claude hooks. For Codex, choose **Add to Codex**, review the Peer commands
+for each listed Codex home, then choose **Trust these Peer hooks**. Custom and managed profiles may
+use separate homes; a new profile needs installation and review before its sessions coordinate.
+The same review controls are in **Peer workspaces** on mobile. Changing the
 adapter takes effect for newly started sessions; existing sessions keep their adapter. Turn the Mod
 off to remove it from new sessions. On mobile, the same Mod control is in **Peer workspaces**.
 

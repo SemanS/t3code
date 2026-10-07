@@ -103,6 +103,26 @@ function testLayer(input: {
 }
 
 describe("ProviderContinuationService", () => {
+  it.effect("reports admission failure to producers awaiting a delivery receipt", () =>
+    Effect.gen(function* () {
+      const failed = yield* Deferred.make<void>();
+      const dispatched = yield* Queue.unbounded<unknown>();
+      yield* Effect.gen(function* () {
+        const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
+        yield* requests.offer({
+          ...request(),
+          onDispatchFailure: () => Deferred.succeed(failed, undefined).pipe(Effect.asVoid),
+        });
+        yield* Deferred.await(failed);
+        assert.equal(yield* Queue.size(dispatched), 0);
+      }).pipe(
+        Effect.provide(
+          testLayer({ dispatched, getThreadRecords: () => Effect.die("projection unavailable") }),
+        ),
+        Effect.scoped,
+      );
+    }),
+  );
   it.effect("recovers an unaccepted persisted steer using the same delivery identity", () =>
     Effect.gen(function* () {
       const dispatched = yield* Queue.unbounded<unknown>();

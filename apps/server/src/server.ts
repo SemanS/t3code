@@ -22,6 +22,7 @@ import { FetchHttpClient, HttpRouter, HttpServer } from "effect/unstable/http";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
+import * as ProviderContinuationRequests from "./orchestration-v2/ProviderContinuationRequests.ts";
 import * as HostPowerMonitor from "./background/HostPowerMonitor.ts";
 import * as ServerConfig from "./config.ts";
 import {
@@ -509,7 +510,9 @@ const ProviderInstallationRefreshLive = Layer.effectDiscard(
 const RuntimeCoreDependenciesBaseLive = Layer.mergeAll(
   AgentAwarenessRelay.layer,
   // Peer workspaces: provisions their projects, tools and shared capacity locally.
-  PeerHub.layer.pipe(Layer.provide(ProjectionStoreV2.layer)),
+  PeerHub.layer.pipe(
+    Layer.provide(Layer.merge(ProjectionStoreV2.layer, ProviderContinuationRequests.layer)),
+  ),
   ThreadSettlementWorkerLive,
   Layer.effectDiscard(StorageCleanup.make.pipe(Effect.flatMap((service) => service.start()))).pipe(
     Layer.provide(ProjectionStoreV2.layer),

@@ -27,6 +27,7 @@ import type * as MemoryContract from "@t3tools/contracts";
 
 import {
   CommandId,
+  PEER_MEMORY_AVAILABLE,
   PeerCoordinationPolicy,
   PeerHubError,
   PeerHubStatus,
@@ -110,14 +111,22 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as ProviderContinuationRequests from "../orchestration-v2/ProviderContinuationRequests.ts";
+import { queueCoordinationWake } from "./coordinationWake.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as Settings from "../serverSettings.ts";
+import * as Path from "effect/Path";
+import * as FileSystem from "effect/FileSystem";
+import { expandHomePath } from "../pathExpansion.ts";
+import { resolveCodexPeerHookHomes, prepareCodexPeerHookHomes } from "./codexHookHomes.ts";
+import {
+  installCodexPeerHooks,
+  readCodexPeerHookReview,
+  trustConfiguredCodexPeerHooks,
+} from "./codexHooks.ts";
 import { explainCloneFailure, explainGitHubCloneFailure } from "./cloneFailure.ts";
 import {
   claudeHookGroups,
-  codexHookGroups,
-  codexRules,
-  codexTrustsPeerHooks,
   hasPeerHooks,
   settingsDiffer,
   taskNamed,
@@ -730,10 +739,13 @@ function markLeft(persisted: PersistedState, email: string | null, slug: string,
 
 const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
+  const hostPath = yield* Path.Path;
+  const hostFileSystem = yield* FileSystem.FileSystem;
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const settings = yield* Settings.ServerSettingsService;
   const projects = yield* ProjectService.ProjectService;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
+  const continuationRequests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
   const hubApi = yield* HubApi.make;
   const environmentId = yield* serverEnvironment.getEnvironmentId;
@@ -797,52 +809,31 @@ const make = Effect.gen(function* () {
   );
   /** Agents' working contexts, one file per session (experimental). */
   const coordinationContexts = NodePath.join(coordinationDir, "contexts");
-  /** Codex's home: its hooks.json (Claude Code's shape), its config.toml and its rules. */
-  const codexHome = process.env.CODEX_HOME?.trim() || NodePath.join(NodeOS.homedir(), ".codex");
-  const codexHooksPath = NodePath.join(codexHome, "hooks.json");
-  const codexRulesPath = NodePath.join(codexHome, "rules", "peer.rules");
+  /** Native CLI home; configured profiles may use separate direct or shadow homes. */
+  const codexHome = NodePath.resolve(
+    expandHomePath(process.env.CODEX_HOME?.trim() || NodePath.join(NodeOS.homedir(), ".codex")),
+  );
   const peerCommand = NodePath.join(coordinationDir, "bin", "peer");
-  /** Peer's rule for its own command in Codex: added with its hooks, taken out with them. */
-  const writeCodexRules = (install: boolean) =>
-    install
-      ? NodeFSP.mkdir(NodePath.dirname(codexRulesPath), { recursive: true }).then(() =>
-          NodeFSP.writeFile(codexRulesPath, codexRules(peerCommand)),
-        )
-      : NodeFSP.rm(codexRulesPath, { force: true });
-  /** Whether Codex runs Peer's hooks yet: its person trusts them in Codex. Read when its files change. */
-  let codexTrust = { stamp: "", trusted: false };
-  const codexTrusts = () => {
-    const read = (path: string) => {
-      try {
-        return NodeFS.readFileSync(path, "utf8");
-      } catch {
-        return "";
-      }
-    };
-    const configPath = NodePath.join(codexHome, "config.toml");
-    const stamp = [codexHooksPath, configPath]
-      .map((path) => {
-        try {
-          return String(NodeFS.statSync(path).mtimeMs);
-        } catch {
-          return "-";
-        }
-      })
-      .join(":");
-    if (stamp !== codexTrust.stamp) {
-      let hooks: Record<string, unknown> = {};
-      try {
-        hooks = JSON.parse(read(codexHooksPath) || "{}") as Record<string, unknown>;
-      } catch {
-        hooks = {};
-      }
-      codexTrust = {
-        stamp,
-        trusted: codexTrustsPeerHooks(hooks, codexHooksPath, read(configPath), coordinationDir),
-      };
-    }
-    return codexTrust.trusted;
-  };
+  const configuredCodexHomes = Effect.gen(function* () {
+    const current = yield* settings.getSettings.pipe(Effect.orDie);
+    return yield* resolveCodexPeerHookHomes(
+      config.stateDir,
+      current.providerInstances,
+      codexHome,
+    ).pipe(Effect.provideService(Path.Path, hostPath));
+  });
+  const prepareConfiguredCodexHomes = Effect.gen(function* () {
+    const current = yield* settings.getSettings.pipe(Effect.orDie);
+    return yield* prepareCodexPeerHookHomes(
+      config.stateDir,
+      current.providerInstances,
+      codexHome,
+    ).pipe(
+      Effect.provideService(Path.Path, hostPath),
+      Effect.provideService(FileSystem.FileSystem, hostFileSystem),
+      Effect.mapError((failure) => hubError(failure.message)),
+    );
+  });
   const peerScripts = {
     hook: NodePath.join(coordinationDir, "hook"),
     wait: NodePath.join(coordinationDir, "wait"),
@@ -901,25 +892,29 @@ const make = Effect.gen(function* () {
     );
   }
   if (claudeModInstalled) claudeHooksInstalled = false;
-  const codexHooks = yield* Effect.promise(() => readJsonSettings(codexHooksPath));
-  let codexHooksInstalled = hasPeerHooks(codexHooks ?? {}, coordinationDir);
-  // The same for Codex; a hook that changes asks its person to trust it again.
-  const currentCodexHooks =
-    codexHooks === null || !codexHooksInstalled
-      ? null
-      : withPeerHooks(codexHooks, codexHookGroups(peerScripts), coordinationDir, true);
-  if (
-    currentCodexHooks !== null &&
-    codexHooks !== null &&
-    settingsDiffer(currentCodexHooks, codexHooks)
-  ) {
-    yield* Effect.promise(() =>
-      writeJsonSettings(codexHooksPath, currentCodexHooks).catch(() => undefined),
+  const codexHookReviews = Effect.gen(function* () {
+    const homes = yield* configuredCodexHomes;
+    return yield* Effect.promise(() =>
+      Promise.all(
+        homes.map(async (home) => {
+          try {
+            return await readCodexPeerHookReview(home, peerScripts);
+          } catch (failure) {
+            return {
+              home,
+              hooksPath: NodePath.join(home, "hooks.json"),
+              present: false,
+              installed: false,
+              trusted: false,
+              reviewId: "",
+              hooks: [],
+              error: failure instanceof Error ? failure.message : String(failure),
+            };
+          }
+        }),
+      ),
     );
-  }
-  if (codexHooksInstalled) {
-    yield* Effect.promise(() => writeCodexRules(true).catch(() => undefined));
-  }
+  });
 
   const persist = (persisted: PersistedState) =>
     Effect.tryPromise(async () => {
@@ -1417,7 +1412,10 @@ const make = Effect.gen(function* () {
 
   /** Rebuilds the status, publishes it when it changed, and hands the policy its new state. */
   /** Coordination as people see it: the settings, and what the broker last heard. */
-  const coordinationStatus = (s: RuntimeState): PeerHubStatus["coordination"] => {
+  const coordinationStatus = (
+    s: RuntimeState,
+    codexHookHomes: NonNullable<PeerHubStatus["coordination"]["codexHookHomes"]>,
+  ): PeerHubStatus["coordination"] => {
     const snapshot = broker?.snapshot() ?? {
       sessions: [],
       overlaps: [],
@@ -1431,8 +1429,9 @@ const make = Effect.gen(function* () {
       policy: s.persisted.coordination?.policy ?? "coordinate",
       claudeHooks: claudeHooksInstalled,
       claudeMod: claudeModInstalled,
-      codexHooks: codexHooksInstalled,
-      ...(codexHooksInstalled ? { codexHooksTrusted: codexTrusts() } : {}),
+      codexHooks: codexHookHomes.every((home) => home.installed),
+      codexHooksTrusted: codexHookHomes.every((home) => home.trusted),
+      codexHookHomes,
       logPath: coordinationLog,
       sessions: snapshot.sessions.map((session) => ({
         id: session.id,
@@ -1517,6 +1516,7 @@ const make = Effect.gen(function* () {
   };
 
   const publish = Effect.gen(function* () {
+    const codexHookHomes = yield* codexHookReviews;
     const s = yield* Ref.get(stateRef);
     const session = yield* readSession;
     const signedIn = Option.isSome(session) && s.persisted.email !== null;
@@ -1605,7 +1605,7 @@ const make = Effect.gen(function* () {
         signIn: s.github.signIn,
         error: s.github.error,
       },
-      coordination: coordinationStatus(s),
+      coordination: coordinationStatus(s, codexHookHomes),
       sharedThreads: s.persisted.sharedThreads ?? [],
       syncing: s.syncing,
       lastSyncAt: s.persisted.lastSyncAt,
@@ -2844,15 +2844,22 @@ const make = Effect.gen(function* () {
         scriptsDir: coordinationDir,
         logPath: coordinationLog,
         environment: environmentId,
-        memory: {
-          prepare: (session, source) => Effect.runPromise(memory.prepareSession(session, source)),
-          notice: (session) => Effect.runPromise(memory.sessionNotice(session)),
-          cli: (session, command, args) => Effect.runPromise(memoryCli.run(session, command, args)),
-          checkpoint: (session, reason) => Effect.runPromise(memory.checkpoint(session, reason)),
-          end: (session) => Effect.runPromise(memory.endSession(session)),
-          legacySnapshot: (session, text, source) =>
-            Effect.runPromise(memory.legacySnapshot(session, text, source)),
-        },
+        ...(PEER_MEMORY_AVAILABLE
+          ? {
+              memory: {
+                prepare: (session, source) =>
+                  Effect.runPromise(memory.prepareSession(session, source)),
+                notice: (session) => Effect.runPromise(memory.sessionNotice(session)),
+                cli: (session, command, args) =>
+                  Effect.runPromise(memoryCli.run(session, command, args)),
+                checkpoint: (session, reason) =>
+                  Effect.runPromise(memory.checkpoint(session, reason)),
+                end: (session) => Effect.runPromise(memory.endSession(session)),
+                legacySnapshot: (session, text, source) =>
+                  Effect.runPromise(memory.legacySnapshot(session, text, source)),
+              },
+            }
+          : {}),
         placeOf,
         branchOf: async (root) => {
           const name = await run("git", ["-C", root, "rev-parse", "--abbrev-ref", "HEAD"]).catch(
@@ -2888,9 +2895,20 @@ const make = Effect.gen(function* () {
           }
           return panes.length === 1 ? panes[0]?.paneId : undefined;
         },
-        queueCodex: async (session, text) => {
+        queueCodex: async (session, text, thread) => {
           // The coordination lab's made-up sessions are no threads of this person's Codex.
           if (process.env.PEER_CODEX_QUEUE === "off") return false;
+          const admitted = await Effect.runPromise(
+            queueCoordinationWake(session, text, thread).pipe(
+              Effect.provideService(ProjectionStore.ProjectionStoreV2, projections),
+              Effect.provideService(
+                ProviderContinuationRequests.ProviderContinuationRequests,
+                continuationRequests,
+              ),
+              Effect.orElseSucceed(() => "unavailable" as const),
+            ),
+          );
+          if (admitted !== "unbound") return admitted === "queued";
           return run("codex", ["queue", "--thread", session, "--message", text], {
             timeoutMs: 20_000,
           }).then(
@@ -3176,24 +3194,28 @@ const make = Effect.gen(function* () {
       });
     }
     if (input.codexHooks !== undefined) {
-      const install = input.codexHooks;
+      const homes = yield* input.codexHooks ? prepareConfiguredCodexHomes : configuredCodexHomes;
       yield* Effect.tryPromise({
-        try: async () => {
-          const hooks = await readJsonSettings(codexHooksPath);
-          if (hooks === null) {
-            throw new Error(`${codexHooksPath} is not valid JSON; fix it first`);
-          }
-          await writeJsonSettings(
-            codexHooksPath,
-            withPeerHooks(hooks, codexHookGroups(peerScripts), coordinationDir, install),
-          );
-          await writeCodexRules(install);
-          codexHooksInstalled = install;
-          codexTrust = { stamp: "", trusted: false };
-        },
+        try: () =>
+          Promise.all(
+            homes.map((home) =>
+              installCodexPeerHooks(home, peerScripts, input.codexHooks === true),
+            ),
+          ),
         catch: (failure) =>
           hubError(
             `Codex's hooks could not change: ${failure instanceof Error ? failure.message : String(failure)}`,
+          ),
+      });
+    }
+    if (input.codexHookApproval !== undefined) {
+      const approval = input.codexHookApproval;
+      const homes = yield* configuredCodexHomes;
+      yield* Effect.tryPromise({
+        try: () => trustConfiguredCodexPeerHooks(homes, approval, peerScripts),
+        catch: (failure) =>
+          hubError(
+            `Codex's Peer hooks could not be trusted: ${failure instanceof Error ? failure.message : String(failure)}`,
           ),
       });
     }
@@ -4304,6 +4326,7 @@ const make = Effect.gen(function* () {
    */
   const importedKnowledge = new Set<string>();
   const refreshMemory = Effect.fn("PeerHub.refreshMemory")(function* (only?: string) {
+    if (!PEER_MEMORY_AVAILABLE) return;
     if (Option.isNone(yield* requireSession.pipe(Effect.option))) return;
     for (const [id, runtime] of appMemorySessions) {
       const caller = yield* projections.getThreadShell(runtime.threadId).pipe(Effect.option);

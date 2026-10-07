@@ -845,6 +845,14 @@ describe("Claude Code settings", () => {
     assert.deepStrictEqual(removed, theirs);
   });
 
+  it("preserves foreign commands that merely mention Peer's script directory", () => {
+    const foreign = {
+      hooks: { Stop: [{ hooks: [{ command: "echo /peer/coord/hook && notify" }] }] },
+    };
+    assert.isFalse(hasPeerHooks(foreign, "/peer/coord"));
+    assert.deepStrictEqual(withPeerHooks(foreign, groups, "/peer/coord", false), foreign);
+  });
+
   it("changes Peer's hooks where they are, so hooks after them keep their place", () => {
     // Codex trusts each hook by its position: a hook another tool added after Peer's stays trusted.
     const theirsAfter = { hooks: [{ type: "command", command: "/other/notify.sh" }] };

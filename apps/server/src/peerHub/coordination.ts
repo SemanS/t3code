@@ -961,27 +961,39 @@ cmd="\${1:-status}"
 # \`find\` waits for a model, the others for Peer only.
 max=15
 [ "$cmd" = find ] && max=150
-for arg in "$@"; do printf '%s\\0' "$arg"; done | curl -sS --max-time "$max" --unix-socket ${quoted} ${headers} -H "X-Peer-Cwd: $PWD" --data-binary @- "http://peer/cli/$cmd" || { echo "peer: Peer is not running." >&2; exit 1; }
+response=$(mktemp "\${TMPDIR:-/tmp}/peer-response.XXXXXX") || { echo "peer: Could not prepare the response." >&2; exit 1; }
+trap 'rm -f "$response"' 0
+status=$(for arg in "$@"; do printf '%s\\0' "$arg"; done | curl -sS --max-time "$max" --unix-socket ${quoted} ${headers} -H "X-Peer-Cwd: $PWD" --data-binary @- -o "$response" -w '%{http_code}' "http://peer/cli/$cmd") || { echo "peer: Peer is not running." >&2; exit 1; }
+case "$status" in
+  2??) cat "$response" ;;
+  *) cat "$response" >&2; echo "peer: Request failed (HTTP $status)." >&2; exit 1 ;;
+esac
 `,
   };
 }
 
-interface HookEntry {
+export interface HookEntry {
   readonly [field: string]: unknown;
   readonly command?: unknown;
 }
-interface HookGroup {
+export interface HookGroup {
   readonly matcher?: unknown;
   readonly hooks?: ReadonlyArray<HookEntry>;
 }
-type Settings = Record<string, unknown> & { hooks?: Record<string, ReadonlyArray<HookGroup>> };
+export type Settings = Record<string, unknown> & {
+  hooks?: Record<string, ReadonlyArray<HookGroup>>;
+};
+
+function hookCommand(path: string): string {
+  return /^[A-Za-z0-9_./-]+$/.test(path) ? path : `'${path.replaceAll("'", "'\\''")}'`;
+}
 
 /** The hook groups Claude Code needs for coordination, pointing at Peer's scripts. */
 export function claudeHookGroups(scripts: {
   readonly hook: string;
   readonly wait: string;
 }): Record<string, ReadonlyArray<HookGroup>> {
-  const hook = { type: "command", command: scripts.hook, timeout: 5 };
+  const hook = { type: "command", command: hookCommand(scripts.hook), timeout: 5 };
   return {
     SessionStart: [{ hooks: [hook] }],
     UserPromptSubmit: [{ hooks: [hook] }],
@@ -997,7 +1009,7 @@ export function claudeHookGroups(scripts: {
           hook,
           {
             type: "command",
-            command: scripts.wait,
+            command: hookCommand(scripts.wait),
             async: true,
             asyncRewake: true,
             timeout: 1800,
@@ -1017,7 +1029,7 @@ export function codexHookGroups(scripts: {
   readonly hook: string;
   readonly wait: string;
 }): Record<string, ReadonlyArray<HookGroup>> {
-  const hook = { type: "command", command: `${scripts.hook} codex`, timeout: 5 };
+  const hook = { type: "command", command: `${hookCommand(scripts.hook)} codex`, timeout: 5 };
   return {
     // Also after a compaction (source "compact"): its working context goes back then.
     SessionStart: [{ hooks: [hook] }],
@@ -1163,8 +1175,18 @@ export function codexTrustsPeerHooks(
   return ours > 0;
 }
 
-const isPeerEntry = (entry: HookEntry, marker: string) =>
-  typeof entry.command === "string" && entry.command.includes(marker);
+const isPeerEntry = (entry: HookEntry, marker: string) => {
+  const hook = `${marker}/hook`;
+  const wait = `${marker}/wait`;
+  return [
+    hook,
+    wait,
+    `${hook} codex`,
+    hookCommand(hook),
+    hookCommand(wait),
+    `${hookCommand(hook)} codex`,
+  ].includes(String(entry.command));
+};
 
 /**
  * An agent's hook settings (Claude Code's settings.json, Codex's hooks.json:

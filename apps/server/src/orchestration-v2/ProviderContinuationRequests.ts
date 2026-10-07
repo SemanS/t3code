@@ -46,6 +46,8 @@ export interface ProviderContinuationRequest {
   ) => Effect.Effect<Option.Option<A>, E, R>;
   /** Clears a pending offer that the continuation worker intentionally drops. */
   readonly clearIfCurrent?: () => Effect.Effect<void>;
+  /** Notifies an external producer that admission failed so it can retain its pending update. */
+  readonly onDispatchFailure?: () => Effect.Effect<void>;
 }
 
 /**

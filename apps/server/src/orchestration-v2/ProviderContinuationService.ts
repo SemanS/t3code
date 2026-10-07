@@ -190,6 +190,7 @@ export const workerLive = Layer.effectDiscard(
                 providerThreadId: request.providerThreadId,
                 cause,
               });
+              if (request.onDispatchFailure !== undefined) yield* request.onDispatchFailure();
               if (request.delegatedCompletion !== undefined) {
                 const completion = request.delegatedCompletion;
                 const retryKey = delegatedCompletionRetryKey(request, completion);

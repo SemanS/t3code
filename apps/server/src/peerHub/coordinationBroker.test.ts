@@ -92,6 +92,89 @@ async function brokerFixture(overrides?: (deps: BrokerDeps) => Partial<BrokerDep
 }
 
 describe("peer find reservations", () => {
+  it("returns a failure status when a CLI caller has no registered session", async () => {
+    const fixture = await brokerFixture();
+    try {
+      await fixture.register("another-agent");
+      await fixture.broker.start();
+      for (const command of ["status", "claim", "context", "note"]) {
+        const answer = await new Promise<{ status: number; text: string }>((resolve, reject) => {
+          const request = NodeHttp.request(
+            {
+              socketPath: NodePath.join(fixture.root, "peer.sock"),
+              path: `/cli/${command}`,
+              method: "POST",
+              headers: { "x-peer-session": "codex:unknown", "x-peer-cwd": fixture.root },
+            },
+            (response) => {
+              let text = "";
+              response.setEncoding("utf8");
+              response.on("data", (chunk) => {
+                text += chunk;
+              });
+              response.on("error", reject);
+              response.on("end", () => resolve({ status: response.statusCode!, text }));
+            },
+          );
+          request.on("error", reject);
+          request.end();
+        });
+        expect(answer.status).toBe(409);
+        expect(answer.text).toContain("no agent session");
+      }
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("delivers startup guidance before a slow hub finishes, then queues the complete context", async () => {
+    const fixture = await brokerFixture();
+    const completed = Promise.withResolvers<Record<string, unknown>>();
+    const entered = Promise.withResolvers<void>();
+    const queued = Promise.withResolvers<void>();
+    try {
+      await fixture.register("slow");
+      const originalLog = fixture.broker["log"].bind(fixture.broker);
+      fixture.broker["log"] = (event, data) => {
+        originalLog(event, data);
+        if (event === "hook.late") queued.resolve();
+      };
+      fixture.broker["answerHook"] = async () => {
+        entered.resolve();
+        return completed.promise;
+      };
+      vi.useFakeTimers();
+      const response = fixture.broker["hookInTime"](
+        {
+          session_id: "slow",
+          cwd: fixture.root,
+          hook_event_name: "SessionStart",
+        },
+        {},
+      );
+      await entered.promise;
+      await vi.advanceTimersByTimeAsync(3300);
+      const answer = await response;
+      expect(answer?.hookSpecificOutput).toMatchObject({ hookEventName: "SessionStart" });
+      expect(JSON.stringify(answer)).toContain("still connecting");
+      expect(JSON.stringify(answer)).toContain(fixture.broker["scripts"].peer);
+      completed.resolve({
+        hookSpecificOutput: {
+          hookEventName: "SessionStart",
+          additionalContext: "Fresh shared context",
+        },
+      });
+      await queued.promise;
+      expect(fixture.broker["sessions"].get("claude:slow")?.pending).toContain(
+        "Fresh shared context",
+      );
+    } finally {
+      vi.useRealTimers();
+      completed.resolve({});
+      await fixture.dispose();
+    }
+  });
+
   it("counts Mod delivery only after exact evidence and rejects receipts from a ended generation", async () => {
     const fixture = await brokerFixture();
     const post = (path: string, body: Record<string, unknown>, mod = true) =>

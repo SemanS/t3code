@@ -204,7 +204,7 @@ export interface BrokerDeps {
    * Gives an idle Codex session a message, which starts its turn (Codex has no
    * hook that wakes it). False when Codex could not take it.
    */
-  readonly queueCodex: (session: string, text: string) => Promise<boolean>;
+  readonly queueCodex: (session: string, text: string, thread?: string) => Promise<boolean>;
   readonly wakeRuntime?: (
     session: string,
     pane: string | undefined,
@@ -1221,7 +1221,16 @@ export class CoordinationBroker {
           body.tool_name === "Bash" &&
           typeof input?.command === "string" &&
           publishesWork(input.command);
-        if (body.hook_event_name !== "PreToolUse") {
+        if (body.hook_event_name === "SessionStart") {
+          // Startup may still be fetching shared context. Always deliver the local entry
+          // point while the full context is queued for the next step by hook().
+          resolve({
+            hookSpecificOutput: {
+              hookEventName: "SessionStart",
+              additionalContext: `Peer is still connecting to the team's shared context. Use ${this.scripts.peer} status to check coordination and ${this.scripts.peer} context to read the current handoff. If your session is not registered yet, retry after the next step. Shared context will arrive when ready.`,
+            },
+          });
+        } else if (body.hook_event_name !== "PreToolUse") {
           resolve(null);
         } else if (publication) {
           resolve({
@@ -4048,7 +4057,7 @@ export class CoordinationBroker {
       const session =
         this.sessions.get(explicit) ??
         [...this.sessions.values()].find((s) => s.id === `${s.agent}:${explicit}`);
-      if (session !== undefined) return session;
+      return session ?? null;
     }
     const pane = headerOf(headers, "x-herdr-pane");
     const recent = [...this.sessions.values()].toSorted((a, b) => b.lastActivity - a.lastActivity);
@@ -4073,7 +4082,10 @@ export class CoordinationBroker {
     if (command === "help") return this.help();
     const session = await this.callerOf(headers);
     if (session === null) {
-      return "peer: no agent session of yours is known here. Peer coordinates Claude Code and Codex sessions in workspace projects.";
+      throw new CliError(
+        409,
+        "peer: no agent session of yours is known here. Check that Peer's hooks are installed and trusted for this Codex profile, then start a new session in the workspace project.",
+      );
     }
     if (
       command === "memory" ||
@@ -4617,9 +4629,13 @@ export class CoordinationBroker {
       const text = this.news(session, { team: false, waking: true });
       if (text === null) continue;
       this.queueing.add(session.id);
-      this.log("wake", { session: session.id, text, via: "codex queue" });
+      this.log("wake", {
+        session: session.id,
+        text,
+        via: session.thread?.startsWith("peer:") ? "peer admission" : "codex queue",
+      });
       void this.deps
-        .queueCodex(session.id.slice(`${session.agent}:`.length), text)
+        .queueCodex(session.id.slice(`${session.agent}:`.length), text, session.thread)
         .then((taken) => {
           this.queueing.delete(session.id);
           if (taken) return;
@@ -4905,8 +4921,22 @@ export class CoordinationBroker {
       respond(response, 404, "");
     } catch (error) {
       this.log("broker.error", { error: error instanceof Error ? error.message : String(error) });
-      respond(response, 500, "");
+      respond(
+        response,
+        error instanceof CliError ? error.status : 500,
+        error instanceof CliError
+          ? `${error.message}\n`
+          : "peer: the request failed; check Peer's coordination status and retry.\n",
+      );
     }
+  }
+}
+
+class CliError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
   }
 }
 

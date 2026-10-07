@@ -1,4 +1,4 @@
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId, PeerHubSetCoordinationInput } from "@t3tools/contracts";
 import {
   peerCoordinationLabel,
   peerCoordinationDetail,
@@ -72,6 +72,7 @@ function PeerEnvironment({
     projectId: string;
     taskId: string;
   } | null>(null);
+  const [codexReviewHome, setCodexReviewHome] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const status = query.data;
@@ -79,6 +80,18 @@ function PeerEnvironment({
     .find((workspace) => workspace.slug === selection?.workspace)
     ?.projects.find((project) => project.project.id === selection?.projectId);
   const task = project?.work.tasks.find((task) => task.id === selection?.taskId);
+  const runCoordination = (input: PeerHubSetCoordinationInput) => {
+    setBusy(true);
+    setMessage(null);
+    void coordinate({ environmentId, input })
+      .then((result) => {
+        if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          setMessage(error instanceof Error ? error.message : String(error));
+        }
+      })
+      .finally(() => setBusy(false));
+  };
   return (
     <View className="gap-4">
       <Text className="text-lg font-t3-semibold text-foreground">{label}</Text>
@@ -180,21 +193,9 @@ function PeerEnvironment({
                 accessibilityState={{ disabled: busy }}
                 disabled={busy}
                 className="py-2"
-                onPress={() => {
-                  setBusy(true);
-                  setMessage(null);
-                  void coordinate({
-                    environmentId,
-                    input: { claudeMod: status.coordination.claudeMod !== true },
-                  })
-                    .then((result) => {
-                      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-                        const error = squashAtomCommandFailure(result);
-                        setMessage(error instanceof Error ? error.message : String(error));
-                      }
-                    })
-                    .finally(() => setBusy(false));
-                }}
+                onPress={() =>
+                  runCoordination({ claudeMod: status.coordination.claudeMod !== true })
+                }
               >
                 <Text className="font-t3-medium text-primary-text">
                   {status.coordination.claudeMod ? "Disable Peer Mod" : "Enable Peer Mod"}
@@ -207,6 +208,134 @@ function PeerEnvironment({
               )}
             </View>
           </SettingsSection>
+          {status.coordination.codexHooks === undefined ? null : (
+            <SettingsSection title="Codex coordination">
+              <View className="gap-2 p-4">
+                <Text className="text-foreground-muted">
+                  Peer hooks run on {label}. Each configured Codex home needs its own review before
+                  new sessions can coordinate.
+                </Text>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityState={{ disabled: busy }}
+                  disabled={busy}
+                  className="py-2"
+                  onPress={() => runCoordination({ enabled: !status.coordination.enabled })}
+                >
+                  <Text className="font-t3-medium text-primary-text">
+                    {status.coordination.enabled ? "Pause coordination" : "Enable coordination"}
+                  </Text>
+                </Pressable>
+                {!status.coordination.codexHooks ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityState={{ disabled: busy }}
+                    disabled={busy}
+                    className="py-2"
+                    onPress={() => runCoordination({ codexHooks: true })}
+                  >
+                    <Text className="font-t3-medium text-primary-text">
+                      Add Peer hooks to Codex
+                    </Text>
+                  </Pressable>
+                ) : null}
+                {status.coordination.codexHooks ||
+                status.coordination.codexHookHomes?.some((home) => home.present) ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityState={{ disabled: busy }}
+                    disabled={busy}
+                    className="py-2"
+                    onPress={() => runCoordination({ codexHooks: false })}
+                  >
+                    <Text className="font-t3-medium text-primary-text">
+                      Remove Peer hooks from Codex
+                    </Text>
+                  </Pressable>
+                ) : null}
+                {status.coordination.codexHookHomes?.map((home) => (
+                  <View key={home.home} className="gap-2">
+                    <Pressable
+                      accessibilityRole="button"
+                      onPress={() =>
+                        setCodexReviewHome(codexReviewHome === home.home ? null : home.home)
+                      }
+                      className="py-2"
+                    >
+                      <Text className="font-t3-medium text-primary-text">
+                        {home.home}:{" "}
+                        {!status.coordination.enabled
+                          ? "coordination paused"
+                          : home.trusted
+                            ? "ready for new sessions"
+                            : home.installed
+                              ? "review Peer hooks"
+                              : "hooks missing or changed"}
+                      </Text>
+                    </Pressable>
+                    {codexReviewHome !== home.home ? null : (
+                      <>
+                        <Text selectable className="text-foreground-muted">
+                          {home.hooksPath}
+                        </Text>
+                        {home.error === undefined ? null : (
+                          <Text className="text-destructive">{home.error}</Text>
+                        )}
+                        {!home.installed ? (
+                          <Text className="text-foreground-muted">
+                            Add the current Peer hooks to Codex before reviewing them.
+                          </Text>
+                        ) : (
+                          <>
+                            <Text className="text-foreground-muted">
+                              These commands run on {label} outside Codex's sandbox. They report
+                              agent activity to Peer and coordinate overlapping edits.
+                            </Text>
+                            {home.hooks.map((hook) => (
+                              <Text key={hook.key} selectable className="text-foreground">
+                                {hook.event}: {hook.command}
+                                {hook.enabled ? "" : " — disabled in Codex"}
+                              </Text>
+                            ))}
+                            {home.hooks.some((hook) => !hook.enabled) ? (
+                              <Text className="text-foreground-muted">
+                                Enable disabled Peer hooks in Codex before new sessions can
+                                coordinate.
+                              </Text>
+                            ) : null}
+                            {home.trusted ? null : (
+                              <Pressable
+                                accessibilityRole="button"
+                                accessibilityState={{
+                                  disabled: busy || home.hooks.some((hook) => !hook.enabled),
+                                }}
+                                disabled={busy || home.hooks.some((hook) => !hook.enabled)}
+                                className="py-2"
+                                onPress={() =>
+                                  runCoordination({
+                                    codexHookApproval: { home: home.home, reviewId: home.reviewId },
+                                  })
+                                }
+                              >
+                                <Text className="font-t3-medium text-primary-text">
+                                  Trust these Peer hooks
+                                </Text>
+                              </Pressable>
+                            )}
+                          </>
+                        )}
+                      </>
+                    )}
+                  </View>
+                ))}
+                {message === null ? null : (
+                  <Text accessibilityRole="alert" className="text-foreground">
+                    {message}
+                  </Text>
+                )}
+              </View>
+            </SettingsSection>
+          )}
           <SettingsSection title="Agents on this environment">
             {(status.agents.postHocSkipped ?? 0) > 0 ? (
               <Text className="p-4 text-foreground-muted">

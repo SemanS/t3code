@@ -686,6 +686,30 @@ export const PeerAdvice = Schema.Struct({
 });
 export type PeerAdvice = typeof PeerAdvice.Type;
 
+export const PeerCodexHookHome = Schema.Struct({
+  home: Schema.String,
+  hooksPath: Schema.String,
+  /** At least one Peer hook is present, even if an incomplete set cannot coordinate. */
+  present: Schema.Boolean,
+  installed: Schema.Boolean,
+  trusted: Schema.Boolean,
+  reviewId: Schema.String,
+  error: Schema.optional(Schema.String),
+  hooks: Schema.Array(
+    Schema.Struct({
+      event: Schema.String,
+      key: Schema.String,
+      command: Schema.String,
+      hash: Schema.String,
+      matcher: Schema.optional(Schema.String),
+      timeout: Schema.Number,
+      enabled: Schema.Boolean,
+      trusted: Schema.Boolean,
+    }),
+  ),
+});
+export type PeerCodexHookHome = typeof PeerCodexHookHome.Type;
+
 export const PeerCoordinationState = Schema.Struct({
   enabled: Schema.Boolean,
   policy: PeerCoordinationPolicy,
@@ -694,8 +718,9 @@ export const PeerCoordinationState = Schema.Struct({
   claudeMod: Schema.optional(Schema.Boolean),
   /** Codex runs Peer's coordination hooks; absent from a Peer that cannot add them. */
   codexHooks: Schema.optional(Schema.Boolean),
-  /** Codex trusts Peer's hooks (its person approved them in Codex); only while they are added. */
+  /** All configured Codex runtime homes have the complete, enabled, trusted Peer hook set. */
   codexHooksTrusted: Schema.optional(Schema.Boolean),
+  codexHookHomes: Schema.optional(Schema.Array(PeerCodexHookHome)),
   /** Every coordination event, one JSON object per line. */
   logPath: Schema.String,
   sessions: Schema.Array(PeerCoordSession),
@@ -865,8 +890,15 @@ export const PeerHubSetCoordinationInput = Schema.Struct({
   policy: Schema.optional(PeerCoordinationPolicy),
   /** Add Peer's hooks to Claude Code's user settings, or take them out. */
   claudeHooks: Schema.optional(Schema.Boolean),
-  /** Add Peer's hooks to Codex's user config (config.toml), or take them out. */
+  /** Add Peer's hooks to configured Codex runtime homes, or take them out. */
   codexHooks: Schema.optional(Schema.Boolean),
+  /** A person's approval of the exact Peer commands displayed for one configured home. */
+  codexHookApproval: Schema.optional(
+    Schema.Struct({
+      home: TrimmedNonEmptyString,
+      reviewId: TrimmedNonEmptyString,
+    }),
+  ),
 });
 export type PeerHubSetCoordinationInput = typeof PeerHubSetCoordinationInput.Type;
 
