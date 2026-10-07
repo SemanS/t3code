@@ -1,4 +1,9 @@
-import type { EnvironmentId, PeerContextVersion, PeerProjectState } from "@t3tools/contracts";
+import {
+  PEER_MEMORY_AVAILABLE,
+  type EnvironmentId,
+  type PeerContextVersion,
+  type PeerProjectState,
+} from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { ChevronRightIcon, FileTextIcon } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -90,11 +95,12 @@ export function WorkContextView({ workspace, project, scope }: Place) {
         }),
   );
   const memoryState = useEnvironmentQuery(
-    environmentId === null
+    environmentId === null || !PEER_MEMORY_AVAILABLE
       ? null
       : serverEnvironment.peerHubMemoryState({ environmentId, input: { workspace, project } }),
   );
-  const memoryMode = memoryState.error === null && memoryState.data?.mode === "memory";
+  const memoryMode =
+    PEER_MEMORY_AVAILABLE && memoryState.error === null && memoryState.data?.mode === "memory";
   const text = read.data?.text ?? "";
   const subject =
     task !== undefined

@@ -15,6 +15,8 @@ import { McpProtocol, McpSchema, McpServer } from "effect/unstable/ai";
 import { HttpBody, HttpClient, HttpRouter, HttpServerResponse } from "effect/unstable/http";
 
 import * as ProjectService from "../project/ProjectService.ts";
+import * as PeerHub from "../peerHub/PeerHub.ts";
+import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ServerConfig from "../config.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
@@ -59,6 +61,33 @@ const PullRequestsTestLayer = McpHttpServer.PullRequestsToolkitRegistrationLive.
       Layer.mock(Orchestrator.OrchestratorV2)({}),
       Layer.mock(ProjectionStore.ProjectionStoreV2)({}),
       NodeServices.layer,
+    ),
+  ),
+);
+
+it.effect("withholds frozen Memory tools and refuses cached calls", () =>
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    expect(server.tools.some(({ tool }) => tool.name.startsWith("peer_memory_"))).toBe(false);
+    const error = yield* server
+      .callTool({ name: "peer_memory_search", arguments: { search: { contextIds: [] } } })
+      .pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+        Effect.provideService(McpSchema.McpServerClient, client),
+        Effect.flip,
+      );
+    expect(error.message).toContain("not found");
+  }).pipe(
+    Effect.provide(
+      McpHttpServer.PeerMemoryToolkitRegistrationLive.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.mock(PeerHub.PeerHub)({}),
+            Layer.mock(ThreadManagement.ThreadManagementService)({}),
+          ),
+        ),
+      ),
     ),
   ),
 );

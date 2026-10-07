@@ -12,6 +12,7 @@ import {
   PeerMemoryChanges,
   PeerMemoryReceiptInput,
   PeerMemoryReceipt,
+  PeerMemoryScope,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/unstable/ai";
@@ -28,9 +29,13 @@ const common = {
     ThreadManagement.ThreadManagementService,
   ],
 };
+const runtimeScope = {
+  workspace: Schema.optional(PeerMemoryScope.fields.workspace),
+  project: Schema.optional(PeerMemoryScope.fields.project),
+};
 const Search = Tool.make("peer_memory_search", {
   ...common,
-  parameters: PeerHubMemorySearchInput,
+  parameters: Schema.Struct({ ...PeerHubMemorySearchInput.fields, ...runtimeScope }),
   success: PeerMemorySearchResult,
   description:
     "Search durable Peer findings and contexts in the calling project, or explicit company scope. Choose records by provenance and applicability; conflicts remain visible.",
@@ -39,7 +44,7 @@ const Search = Tool.make("peer_memory_search", {
   .annotate(Tool.Destructive, false);
 const Read = Tool.make("peer_memory_read", {
   ...common,
-  parameters: PeerHubMemoryReadInput,
+  parameters: Schema.Struct({ ...PeerHubMemoryReadInput.fields, ...runtimeScope }),
   success: PeerMemoryRecordView,
   description:
     "Read an exact Peer record version or knownAt history, with evidence and conflicts. Current project permissions are rechecked.",
@@ -48,7 +53,7 @@ const Read = Tool.make("peer_memory_read", {
   .annotate(Tool.Destructive, false);
 const Changes = Tool.make("peer_memory_changes", {
   ...common,
-  parameters: PeerHubMemoryChangesInput,
+  parameters: Schema.Struct({ ...PeerHubMemoryChangesInput.fields, ...runtimeScope }),
   success: PeerMemoryChanges,
   description:
     "Read the authorized memory changes after a cursor; resyncRequired means obtain a fresh index.",
@@ -57,21 +62,21 @@ const Changes = Tool.make("peer_memory_changes", {
   .annotate(Tool.Destructive, false);
 const Project = Tool.make("peer_memory_project", {
   ...common,
-  parameters: PeerHubMemoryProjectInput,
+  parameters: Schema.Struct({ ...PeerHubMemoryProjectInput.fields, ...runtimeScope }),
   success: PeerMemoryProjection,
   description:
     "Build a bounded immutable projection from selected record versions. Mandatory conflict and evidence dependencies may expand selected. Existing private current notes are preserved; the receipt stays requested until this runtime acknowledges the exact bundle.",
 }).annotate(Tool.Destructive, false);
 const Remember = Tool.make("peer_memory_remember", {
   ...common,
-  parameters: PeerHubMemoryExecuteInput,
+  parameters: Schema.Struct({ ...PeerHubMemoryExecuteInput.fields, ...runtimeScope }),
   success: PeerMemoryWriteResult,
   description:
     "Persist an assertion.record command with a stable operationId and explicit evidence. The host binds actor fields to this runtime. pending_local means saved on this computer until the hub accepts it. Never claim independence after reading another finding.",
 }).annotate(Tool.Destructive, false);
 const Command = Tool.make("peer_memory_command", {
   ...common,
-  parameters: PeerHubMemoryExecuteInput,
+  parameters: Schema.Struct({ ...PeerHubMemoryExecuteInput.fields, ...runtimeScope }),
   success: PeerMemoryWriteResult,
   description:
     "Apply a versioned Peer memory command for evidence, dispute, correction, retraction, supersession, questions or context structure. Preserve operationId on retries; mutations require expectedVersion. Human review, publication, erasure and knowledge approval are unavailable to agents.",

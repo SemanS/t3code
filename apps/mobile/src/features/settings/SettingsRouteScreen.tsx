@@ -1,4 +1,5 @@
 import { ScreenScrollView as ScrollView } from "../../components/ScreenScrollView";
+import { PEER_MEMORY_AVAILABLE } from "@t3tools/contracts";
 import { useAuth, useUser } from "@clerk/expo";
 import { useNavigation } from "@react-navigation/native";
 import { Platform, View } from "react-native";
@@ -160,11 +161,13 @@ function SettingsIndexSections() {
 
       <SettingsSection title="Projects & threads">
         <SettingsRow icon="person.2" label="Peer workspaces" target="SettingsPeerHub" />
-        <SettingsRow
-          icon="brain"
-          label="Memory"
-          onPress={() => navigation.navigate("MemoryProjects")}
-        />
+        {PEER_MEMORY_AVAILABLE ? (
+          <SettingsRow
+            icon="brain"
+            label="Memory"
+            onPress={() => navigation.navigate("MemoryProjects")}
+          />
+        ) : null}
         {selectedProjectKey !== null ? (
           <SettingsRow
             icon="folder"

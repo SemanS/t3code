@@ -1,4 +1,4 @@
-import { EnvironmentId, type PeerMemoryRecordRef } from "@t3tools/contracts";
+import { PEER_MEMORY_AVAILABLE, EnvironmentId, type PeerMemoryRecordRef } from "@t3tools/contracts";
 import { memoryDeliveryStates, memoryKnowledgeLabel } from "@t3tools/client-runtime/peer-memory";
 import { useNavigation, type StaticScreenProps } from "@react-navigation/native";
 import { Pressable, View } from "react-native";
@@ -10,7 +10,17 @@ import { MemoryScreen } from "./MemoryScreen";
 import { MemoryRecordSources } from "./MemoryRecordSources";
 import { MemoryRecordSemantics } from "./MemoryRecordSemantics";
 
-export function MemoryRecordRouteScreen({
+export function MemoryRecordRouteScreen(props: Parameters<typeof MemoryRecordContent>[0]) {
+  return PEER_MEMORY_AVAILABLE ? (
+    <MemoryRecordContent {...props} />
+  ) : (
+    <MemoryScreen title="Memory">
+      <AppText>Peer Memory is currently unavailable.</AppText>
+    </MemoryScreen>
+  );
+}
+
+function MemoryRecordContent({
   route,
 }: StaticScreenProps<{
   environmentId: string;

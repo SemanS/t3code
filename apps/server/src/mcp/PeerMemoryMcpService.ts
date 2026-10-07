@@ -6,6 +6,7 @@ import {
   type PeerHubMemoryProjectInput,
   type PeerHubMemoryChangesInput,
   type PeerMemoryReceiptInput,
+  type PeerMemoryScope,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -17,6 +18,16 @@ import { readMutationCaller } from "./threadAccess.ts";
 
 const failure = (error: { readonly detail: string }) =>
   new OrchestratorMcpFailure({ code: "invalid_request", message: error.detail });
+type RuntimeScope = {
+  readonly workspace?: string | undefined;
+  readonly project?: string | undefined;
+};
+type RuntimeScoped<A extends PeerMemoryScope> = Omit<A, keyof PeerMemoryScope> & RuntimeScope;
+const scoped = <A extends RuntimeScope>(input: A, session: PeerMemoryScope) => ({
+  ...input,
+  workspace: input.workspace ?? session.workspace,
+  project: input.project ?? session.project,
+});
 const make = Effect.gen(function* () {
   const peer = yield* PeerHub.PeerHub;
   const threads = yield* ThreadManagement.ThreadManagementService;
@@ -35,6 +46,12 @@ const make = Effect.gen(function* () {
     const session = yield* peer
       .memoryRuntime(scope.threadId, scope.providerSessionId, scope.providerInstanceId)
       .pipe(Effect.mapError(failure));
+    const { mode } = yield* peer.memoryMode(session).pipe(Effect.mapError(failure));
+    if (mode === "legacy")
+      return yield* new OrchestratorMcpFailure({
+        code: "capability_denied",
+        message: "Peer Memory is unavailable in legacy mode.",
+      });
     if (
       input !== undefined &&
       ((input.workspace !== undefined && input.workspace !== session.workspace) ||
@@ -49,30 +66,34 @@ const make = Effect.gen(function* () {
     return session;
   });
   return {
-    search: Effect.fn("PeerMemoryMcpService.search")(function* (input: PeerHubMemorySearchInput) {
-      yield* bind(input, true);
-      return yield* peer.memorySearch(input).pipe(Effect.mapError(failure));
+    search: Effect.fn("PeerMemoryMcpService.search")(function* (
+      input: RuntimeScoped<PeerHubMemorySearchInput>,
+    ) {
+      const session = yield* bind(input, true);
+      return yield* peer.memorySearch(scoped(input, session)).pipe(Effect.mapError(failure));
     }),
-    read: Effect.fn("PeerMemoryMcpService.read")(function* (input: PeerHubMemoryReadInput) {
-      yield* bind(input, true);
-      return yield* peer.memoryRead(input).pipe(Effect.mapError(failure));
+    read: Effect.fn("PeerMemoryMcpService.read")(function* (
+      input: RuntimeScoped<PeerHubMemoryReadInput>,
+    ) {
+      const session = yield* bind(input, true);
+      return yield* peer.memoryRead(scoped(input, session)).pipe(Effect.mapError(failure));
     }),
     changes: Effect.fn("PeerMemoryMcpService.changes")(function* (
-      input: PeerHubMemoryChangesInput,
+      input: RuntimeScoped<PeerHubMemoryChangesInput>,
     ) {
-      yield* bind(input, true);
-      return yield* peer.memoryChanges(input).pipe(Effect.mapError(failure));
+      const session = yield* bind(input, true);
+      return yield* peer.memoryChanges(scoped(input, session)).pipe(Effect.mapError(failure));
     }),
     project: Effect.fn("PeerMemoryMcpService.project")(function* (
-      input: PeerHubMemoryProjectInput,
+      input: RuntimeScoped<PeerHubMemoryProjectInput>,
     ) {
       const session = yield* bind(input, true);
       return yield* peer
-        .memoryAgentProject(session.sessionId, input)
+        .memoryAgentProject(session.sessionId, scoped(input, session))
         .pipe(Effect.mapError(failure));
     }),
     execute: Effect.fn("PeerMemoryMcpService.execute")(function* (
-      input: PeerHubMemoryExecuteInput,
+      input: RuntimeScoped<PeerHubMemoryExecuteInput>,
       rememberOnly = false,
     ) {
       if (rememberOnly && input.command.type !== "assertion.record")
@@ -82,7 +103,7 @@ const make = Effect.gen(function* () {
         });
       const session = yield* bind(input);
       return yield* peer
-        .memoryAgentExecute(session.sessionId, input)
+        .memoryAgentExecute(session.sessionId, scoped(input, session))
         .pipe(Effect.mapError(failure));
     }),
     receipt: Effect.fn("PeerMemoryMcpService.receipt")(function* (

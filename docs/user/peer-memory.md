@@ -1,5 +1,9 @@
 # Shared memory
 
+Peer Memory is currently unavailable. Projects continue using their existing shared work context
+and knowledge. The Memory interface and agent tools stay hidden while this feature is paused.
+The workflow below applies when Memory is available.
+
 Open **Memory** under a workspace project in Work, or search for **Open Memory** in the command
 palette. On mobile, open **Settings → Memory** and choose the workspace project. Company knowledge
 uses an explicit workspace scope; similar topics in other projects do not grant access.

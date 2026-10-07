@@ -1,4 +1,4 @@
-import type { EnvironmentId } from "@t3tools/contracts";
+import { PEER_MEMORY_AVAILABLE, type EnvironmentId } from "@t3tools/contracts";
 import { useNavigation } from "@react-navigation/native";
 import { View } from "react-native";
 import { AppText } from "../../components/AppText";
@@ -9,6 +9,16 @@ import { useWorkspaceEnvironments } from "../../state/workspace";
 import { MemoryScreen } from "./MemoryScreen";
 
 export function MemoryProjectsRouteScreen() {
+  return PEER_MEMORY_AVAILABLE ? (
+    <MemoryProjectsContent />
+  ) : (
+    <MemoryScreen title="Memory">
+      <AppText>Peer Memory is currently unavailable.</AppText>
+    </MemoryScreen>
+  );
+}
+
+function MemoryProjectsContent() {
   const environments = useWorkspaceEnvironments().filter(
     (environment) => environment.connectionState === "connected",
   );

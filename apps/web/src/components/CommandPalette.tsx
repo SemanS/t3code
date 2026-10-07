@@ -39,6 +39,7 @@ import {
   type SourceControlProviderKind,
   type SourceControlRepositoryInfo,
   PRIMARY_LOCAL_ENVIRONMENT_ID,
+  PEER_MEMORY_AVAILABLE,
   resolveEnvironmentMachineKind,
 } from "@t3tools/contracts";
 import { useLocation, useNavigate, useParams } from "@tanstack/react-router";
@@ -2278,7 +2279,7 @@ function OpenCommandPaletteDialog(props: {
     });
   }
 
-  for (const workspace of peerHub?.signedIn ? peerHub.workspaces : []) {
+  for (const workspace of PEER_MEMORY_AVAILABLE && peerHub?.signedIn ? peerHub.workspaces : []) {
     actionItems.push({
       kind: "action",
       value: `action:memory:${workspace.slug}:company`,

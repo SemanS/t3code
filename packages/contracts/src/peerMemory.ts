@@ -2,6 +2,9 @@ import * as Schema from "effect/Schema";
 
 import { IsoDateTime, NonNegativeInt, PositiveInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
+// Memory remains frozen during the coordination pilot; entry points must not advertise it.
+export const PEER_MEMORY_AVAILABLE = false;
+
 export const PeerMemoryMode = Schema.Literals(["legacy", "shadow", "memory"]);
 export type PeerMemoryMode = typeof PeerMemoryMode.Type;
 export const PeerMemoryScope = Schema.Struct({

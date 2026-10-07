@@ -58,7 +58,10 @@ const write: PeerHubMemoryExecuteInput = {
     evidence: [],
   },
 };
-const harness = (overrides: Partial<OrchestrationV2ThreadShell> = {}) => {
+const harness = (
+  overrides: Partial<OrchestrationV2ThreadShell> = {},
+  mode: "legacy" | "shadow" | "memory" = "memory",
+) => {
   const memoryRuntime = vi.fn(() => Effect.succeed(session));
   const memoryAgentExecute = vi.fn(() =>
     Effect.succeed({ status: "pending_local" as const, operationId: write.command.operationId }),
@@ -116,6 +119,7 @@ const harness = (overrides: Partial<OrchestrationV2ThreadShell> = {}) => {
         } satisfies Partial<Threads.ThreadManagementService["Service"]>),
         Layer.mock(Peer.PeerHub)({
           memoryRuntime,
+          memoryMode: () => Effect.succeed({ mode }),
           memoryAgentExecute,
           memorySearch,
           memoryAgentProject,
@@ -145,6 +149,56 @@ const harness = (overrides: Partial<OrchestrationV2ThreadShell> = {}) => {
 };
 
 describe("provider-scoped Peer Memory MCP", () => {
+  it.effect("denies legacy Memory calls even when a runtime session already exists", () => {
+    const test = harness({}, "legacy");
+    return Effect.gen(function* () {
+      for (const call of [
+        (memory: Memory.PeerMemoryMcpService["Service"]) =>
+          memory.search({ search: { contextIds: [] } }).pipe(Effect.asVoid),
+        (memory: Memory.PeerMemoryMcpService["Service"]) =>
+          memory.execute(write).pipe(Effect.asVoid),
+        (memory: Memory.PeerMemoryMcpService["Service"]) =>
+          memory
+            .project({ projection: { include: [], purpose: "read convention" } })
+            .pipe(Effect.asVoid),
+      ]) {
+        const denied = yield* test.run(call).pipe(Effect.flip);
+        expect(denied.code).toBe("capability_denied");
+      }
+      expect(test.memorySearch).not.toHaveBeenCalled();
+      expect(test.memoryAgentExecute).not.toHaveBeenCalled();
+      expect(test.memoryAgentProject).not.toHaveBeenCalled();
+    });
+  });
+
+  it.effect("derives omitted read and write scopes from the calling runtime", () => {
+    const test = harness();
+    return Effect.gen(function* () {
+      yield* test.run((memory) => memory.search({ search: { contextIds: [] } }));
+      expect(test.memorySearch).toHaveBeenCalledWith({
+        workspace: session.workspace,
+        project: session.project,
+        search: { contextIds: [] },
+      });
+      yield* test.run((memory) => memory.execute({ command: write.command }));
+      expect(test.memoryAgentExecute).toHaveBeenCalledWith(session.sessionId, write);
+    });
+  });
+
+  it.effect("keeps an explicit company read within the calling workspace", () => {
+    const test = harness();
+    return Effect.gen(function* () {
+      yield* test.run((memory) =>
+        memory.search({ project: "company", search: { contextIds: [] } }),
+      );
+      expect(test.memorySearch).toHaveBeenCalledWith({
+        workspace: session.workspace,
+        project: "company",
+        search: { contextIds: [] },
+      });
+    });
+  });
+
   it.effect(
     "permits company projection and receipt tracking while company writes remain denied",
     () => {

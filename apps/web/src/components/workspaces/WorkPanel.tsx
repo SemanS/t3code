@@ -1,4 +1,5 @@
 import {
+  PEER_MEMORY_AVAILABLE,
   isProviderDriverKind,
   ProviderDriverKind,
   type ContextMenuItem,
@@ -766,7 +767,9 @@ function ProjectSection({
               onDone={() => setAdding(false)}
             />
           ) : null}
-          <MemoryRow workspace={project.workspace} project={project.projectId} />
+          {PEER_MEMORY_AVAILABLE ? (
+            <MemoryRow workspace={project.workspace} project={project.projectId} />
+          ) : null}
           {project.candidates > 0 ? (
             <KnowledgeRow
               workspace={project.workspace}

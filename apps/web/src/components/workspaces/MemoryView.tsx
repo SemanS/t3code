@@ -1,4 +1,4 @@
-import type { PeerMemoryRecordRef } from "@t3tools/contracts";
+import { PEER_MEMORY_AVAILABLE, type PeerMemoryRecordRef } from "@t3tools/contracts";
 import { memorySelectionChanges, setMemorySelection } from "@t3tools/client-runtime/peer-memory";
 import { useState } from "react";
 import { DatabaseIcon } from "lucide-react";
@@ -57,7 +57,7 @@ export function MemoryView(props: {
         </WorkspacePageHeader>
         <div className="min-h-0 flex-1 overflow-y-auto">
           <div className="mx-auto flex w-full max-w-5xl flex-col gap-5 px-4 py-5 sm:px-6">
-            {environmentId !== null && accessible ? (
+            {PEER_MEMORY_AVAILABLE && environmentId !== null && accessible ? (
               <MemoryContent
                 key={`${environmentId}:${status.email}:${props.workspace}:${props.project}`}
                 {...props}
@@ -65,11 +65,13 @@ export function MemoryView(props: {
               />
             ) : (
               <p role="status" className="text-sm text-muted-foreground">
-                {environmentId === null
-                  ? "Connect to an environment to read shared memory."
-                  : status === null
-                    ? "Checking workspace access…"
-                    : "Sign in to a workspace with access to this project."}
+                {!PEER_MEMORY_AVAILABLE
+                  ? "Peer Memory is currently unavailable."
+                  : environmentId === null
+                    ? "Connect to an environment to read shared memory."
+                    : status === null
+                      ? "Checking workspace access…"
+                      : "Sign in to a workspace with access to this project."}
               </p>
             )}
           </div>

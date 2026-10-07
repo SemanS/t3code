@@ -1,4 +1,4 @@
-import { EnvironmentId, type PeerMemoryRecord } from "@t3tools/contracts";
+import { PEER_MEMORY_AVAILABLE, EnvironmentId, type PeerMemoryRecord } from "@t3tools/contracts";
 import { memoryKnowledgeLabel, memoryReviewReasons } from "@t3tools/client-runtime/peer-memory";
 import { useNavigation, type StaticScreenProps } from "@react-navigation/native";
 import { useState } from "react";
@@ -23,7 +23,17 @@ const includes = (
   (tab === "questions" && record.kind === "question" && !record.question?.closed) ||
   (tab === "review" && memoryReviewReasons(record, conflicts).length > 0);
 
-export function MemoryRouteScreen({
+export function MemoryRouteScreen(props: Parameters<typeof MemoryRouteContent>[0]) {
+  return PEER_MEMORY_AVAILABLE ? (
+    <MemoryRouteContent {...props} />
+  ) : (
+    <MemoryScreen title="Memory">
+      <AppText>Peer Memory is currently unavailable.</AppText>
+    </MemoryScreen>
+  );
+}
+
+function MemoryRouteContent({
   route,
 }: StaticScreenProps<{ environmentId: string; workspace: string; project: string }>) {
   const navigation = useNavigation();
