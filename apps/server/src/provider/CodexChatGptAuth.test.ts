@@ -1435,7 +1435,11 @@ it.effect.each([
       yield* h.phase("succeeded");
       yield* h.seedExpired;
       h.setRefreshError(code);
-      yield* Effect.flip(h.auth.access);
+      const renewalError = yield* Effect.flip(h.auth.access);
+      if (code !== "invalid_client") {
+        assert.include(renewalError.detail, "Reconnect this ChatGPT profile");
+        assert.include(renewalError.detail, "Settings → Providers");
+      }
       assert.strictEqual(
         Option.isNone(yield* h.auth.read),
         !["invalid_client", "invalid_token"].includes(code),

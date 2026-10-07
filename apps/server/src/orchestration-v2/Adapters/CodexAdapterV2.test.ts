@@ -1620,6 +1620,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     onEvent: (event: ProviderAdapterV2Event) => Effect.Effect<unknown> = () => Effect.void,
     onRequest: (method: string, params: unknown) => Effect.Effect<void> = () => Effect.void,
     readChildMetadata?: (threadId: string) => Effect.Effect<unknown>,
+    afterNotification: (method: string) => Effect.Effect<void> = () => Effect.void,
+    runtimeHooks: Pick<
+      CodexAdapterV2.CodexAdapterV2Options,
+      "resolveRuntime" | "getRuntimeRevision"
+    > = {},
+    replayHooks: Pick<CodexReplay.CodexAppServerReplayDriver, "beforeEmitInbound"> = {},
   ) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -1628,7 +1634,8 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       const continuationRequests: Array<ProviderContinuationRequest> = [];
       const clientFactory: CodexAdapterV2.CodexAppServerClientFactoryShape = {
         open: (openInput) =>
-          Layer.build(CodexReplay.layerReplay(transcript)).pipe(
+          CodexReplay.makeReplayDriver(transcript, replayHooks).pipe(
+            Effect.flatMap((driver) => Layer.build(CodexReplay.layerReplayWithDriver(driver))),
             Effect.mapError(
               (cause) =>
                 new ProviderAdapterOpenSessionError({
@@ -1646,6 +1653,10 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                   (client) =>
                     ({
                       ...client,
+                      handleServerNotification: (method, handler) =>
+                        client.handleServerNotification(method, (params) =>
+                          handler(params).pipe(Effect.tap(() => afterNotification(method))),
+                        ),
                       request: (method, params) =>
                         onRequest(method, params).pipe(
                           Effect.andThen(client.request(method, params)),
@@ -1665,6 +1676,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         fileSystem,
         idAllocator,
         serverConfig,
+        ...runtimeHooks,
         continuationRequests: {
           offer: (request) =>
             Effect.sync(() => {
@@ -3189,6 +3201,382 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       ],
     });
   };
+
+  it.effect("managed Codex detects renewed credentials without changing a local session", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const revision = yield* Ref.make("initial-token");
+        const transcript = makeCodexReplayTranscript({
+          scenario: "codex-managed-runtime-revision",
+          entries: codexReplayPreamble({
+            nativeThreadId: "native-managed-runtime-revision",
+            nativeTurnId: "unused-turn",
+            prompt: "unused",
+          }).slice(0, 5),
+        });
+        const managed = yield* makeCodexReplayHarness(
+          transcript,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          {
+            resolveRuntime: Effect.succeed({
+              config: DEFAULT_CODEX_SETTINGS,
+              environment: { ACCESS_TOKEN: "initial-token" },
+              revision: "initial-token",
+            }),
+            getRuntimeRevision: Ref.get(revision),
+          },
+        );
+        assert.isDefined(managed.runtime.canReuseSession);
+        assert.isTrue(yield* managed.runtime.canReuseSession!);
+        yield* Ref.set(revision, "renewed-token");
+        assert.isFalse(yield* managed.runtime.canReuseSession!);
+        const local = yield* makeCodexReplayHarness(transcript);
+        assert.isUndefined(local.runtime.canReuseSession);
+      }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect("keeps an admitted coordination continuation in its own run and native turn", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const nativeThreadId = "native-admitted-coordination-thread";
+        const firstTurnId = "native-implementation-turn";
+        const nextTurnId = "native-coordination-turn";
+        const prompt = "Implement the board helpers.";
+        const continuationText = "Read Agent B’s question and reply through Peer.";
+        const secondTerminal = yield* Deferred.make<void>();
+        const completionEntries = (turnId: string, id: string, text: string) => [
+          {
+            type: "emit_inbound" as const,
+            label: `item/completed/${id}`,
+            frame: {
+              method: "item/completed",
+              params: {
+                threadId: nativeThreadId,
+                turnId,
+                completedAtMs: 1782622441000,
+                item: {
+                  type: "agentMessage",
+                  id,
+                  text,
+                  phase: "final_answer",
+                  memoryCitation: null,
+                },
+              },
+            },
+          },
+          {
+            type: "emit_inbound" as const,
+            label: `turn/completed/${turnId}`,
+            frame: {
+              method: "turn/completed",
+              params: {
+                threadId: nativeThreadId,
+                turn: makeCodexReplayTurn({ id: turnId, status: "completed" }),
+              },
+            },
+          },
+        ];
+        const secondStart = codexReplayPreamble({
+          nativeThreadId,
+          nativeTurnId: nextTurnId,
+          prompt: continuationText,
+        })
+          .slice(-3)
+          .map((entry) =>
+            entry.type === "expect_outbound" || entry.type === "emit_inbound"
+              ? {
+                  ...entry,
+                  frame:
+                    Predicate.isObject(entry.frame) && "id" in entry.frame
+                      ? { ...entry.frame, id: 4 }
+                      : entry.frame,
+                }
+              : entry,
+          );
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: "codex-admitted-coordination",
+            entries: [
+              ...codexReplayPreamble({ nativeThreadId, nativeTurnId: firstTurnId, prompt }),
+              ...completionEntries(
+                firstTurnId,
+                "implementation-answer",
+                "Implemented and pushed. All 14 tests pass.",
+              ),
+              ...secondStart,
+              ...completionEntries(
+                nextTurnId,
+                "coordination-answer",
+                "Replied through Peer. Code stays unchanged.",
+              ),
+            ],
+          }),
+          (event) =>
+            event.type === "turn.terminal" && event.runOrdinal === 2
+              ? Deferred.succeed(secondTerminal, undefined)
+              : Effect.void,
+        );
+        const now = yield* DateTime.now;
+        yield* harness.runtime.startTurn(
+          makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-implementation"),
+            text: prompt,
+          }),
+        );
+        yield* harness.firstTerminal;
+        const continuation = makeCodexTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now,
+          attemptId: RunAttemptId.make("attempt-coordination"),
+          text: continuationText,
+        });
+        yield* harness.runtime.startTurn({
+          ...continuation,
+          runOrdinal: 2,
+          providerTurnOrdinal: 2,
+          message: { ...continuation.message, createdBy: "agent", creationSource: "server" },
+        });
+        yield* Deferred.await(secondTerminal);
+        assert.deepEqual(
+          assistantMessages(harness.events).map((event) => ({
+            text: event.message.text,
+            runId: event.message.runId,
+          })),
+          [
+            {
+              text: "Implemented and pushed. All 14 tests pass.",
+              runId: RunId.make("run-attempt-implementation"),
+            },
+            {
+              text: "Replied through Peer. Code stays unchanged.",
+              runId: RunId.make("run-attempt-coordination"),
+            },
+          ],
+        );
+        assert.deepEqual(
+          harness.terminalEvents().map((event) => event.runOrdinal),
+          [1, 2],
+        );
+        const turns = harness.events.filter((event) => event.type === "provider_turn.updated");
+        assert.deepEqual(
+          turns
+            .filter((event) => event.providerTurn.status === "completed")
+            .map((event) => ({
+              nativeTurnId: event.providerTurn.nativeTurnRef?.nativeId,
+              attemptId: event.providerTurn.runAttemptId,
+            })),
+          [
+            { nativeTurnId: firstTurnId, attemptId: RunAttemptId.make("attempt-implementation") },
+            { nativeTurnId: nextTurnId, attemptId: RunAttemptId.make("attempt-coordination") },
+          ],
+        );
+      }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect("streams an admitted early notification before the turn/start response", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const nativeThreadId = "native-early-notification-thread";
+        const nativeTurnId = "native-early-notification-turn";
+        const prompt = "Implement the helpers.";
+        const text = "Implementation progress.";
+        const preamble = codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt });
+        const deltaProcessed = yield* Deferred.make<void>();
+        const streamed = yield* Deferred.make<void>();
+        const releaseResponse = yield* Deferred.make<void>();
+        const responseEmitted = yield* Ref.make(false);
+        const notification = (method: string, params: unknown) => ({
+          type: "emit_inbound" as const,
+          label: method,
+          frame: { method, params },
+        });
+        const item = {
+          type: "agentMessage",
+          id: "early-notification-message",
+          text,
+          phase: "commentary",
+          memoryCitation: null,
+        };
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: "codex-early-notification-admission",
+            entries: [
+              ...preamble.slice(0, 6),
+              // The notification admits the pending request before its response.
+              preamble[7]!,
+              notification("item/started", {
+                threadId: nativeThreadId,
+                turnId: nativeTurnId,
+                startedAtMs: 1782622440500,
+                item: { ...item, text: "" },
+              }),
+              notification("item/agentMessage/delta", {
+                threadId: nativeThreadId,
+                turnId: nativeTurnId,
+                itemId: item.id,
+                delta: text,
+              }),
+              preamble[6]!,
+              notification("item/completed", {
+                threadId: nativeThreadId,
+                turnId: nativeTurnId,
+                completedAtMs: 1782622441000,
+                item,
+              }),
+              notification("turn/completed", {
+                threadId: nativeThreadId,
+                turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+              }),
+            ],
+          }),
+          (event) =>
+            event.type === "message.updated" &&
+            event.message.streaming &&
+            event.message.text === text
+              ? Deferred.succeed(streamed, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+          undefined,
+          undefined,
+          (method) =>
+            method === "item/agentMessage/delta"
+              ? Deferred.succeed(deltaProcessed, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+          {},
+          {
+            beforeEmitInbound: (entry) =>
+              entry === preamble[6]
+                ? Deferred.await(releaseResponse).pipe(
+                    Effect.andThen(Ref.set(responseEmitted, true)),
+                  )
+                : Effect.void,
+          },
+        );
+        const start = yield* harness.runtime
+          .startTurn(
+            makeCodexTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now: yield* DateTime.now,
+              attemptId: RunAttemptId.make("attempt-early-notification"),
+              text: prompt,
+            }),
+          )
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(deltaProcessed);
+        yield* TestClock.adjust("50 millis");
+        yield* Deferred.await(streamed);
+        assert.isFalse(yield* Ref.get(responseEmitted));
+        yield* Deferred.succeed(releaseResponse, undefined);
+        yield* Fiber.join(start);
+        yield* harness.firstTerminal;
+        assert.deepEqual(
+          assistantMessages(harness.events)
+            .filter((event) => !event.message.streaming)
+            .map((event) => event.message.text),
+          [text],
+        );
+      }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect("does not append an unadmitted coordination reply after the implementation final", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const nativeThreadId = "native-coordination-admission-thread";
+        const nativeTurnId = "native-coordination-admission-turn";
+        const prompt = "Implement the board helpers.";
+        const preamble = codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt });
+        const coordinationRead = yield* Deferred.make<void>();
+        const notification = (method: string, params: unknown) => ({
+          type: "emit_inbound" as const,
+          label: method,
+          frame: { method, params },
+        });
+        const transcript = makeCodexReplayTranscript({
+          scenario: "codex-coordination-admission",
+          entries: [
+            ...preamble.slice(0, 5),
+            // `codex queue` started this native turn outside orchestration. The
+            // next user request joins it, as in the two-Mac pilot.
+            notification("turn/started", {
+              threadId: nativeThreadId,
+              turn: makeCodexReplayTurn({ id: nativeTurnId, status: "inProgress" }),
+            }),
+            notification("item/agentMessage/delta", {
+              threadId: nativeThreadId,
+              turnId: nativeTurnId,
+              itemId: "coordination-commentary",
+              delta:
+                "I’ll read Agent B’s question and reply through Peer. Code will stay unchanged.",
+            }),
+            notification("item/completed", {
+              threadId: nativeThreadId,
+              turnId: nativeTurnId,
+              completedAtMs: 1782622440500,
+              item: {
+                type: "agentMessage",
+                id: "coordination-commentary",
+                text: "I’ll read Agent B’s question and reply through Peer. Code will stay unchanged.",
+                phase: "commentary",
+                memoryCitation: null,
+              },
+            }),
+            ...preamble.slice(5),
+            notification("item/completed", {
+              threadId: nativeThreadId,
+              turnId: nativeTurnId,
+              completedAtMs: 1782622441000,
+              item: {
+                type: "agentMessage",
+                id: "implementation-final",
+                text: "Implemented and pushed. All 14 tests pass.",
+                phase: "final_answer",
+                memoryCitation: null,
+              },
+            }),
+            notification("turn/completed", {
+              threadId: nativeThreadId,
+              turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+            }),
+          ],
+        });
+        const harness = yield* makeCodexReplayHarness(
+          transcript,
+          undefined,
+          undefined,
+          undefined,
+          (method) =>
+            method === "item/completed"
+              ? Deferred.succeed(coordinationRead, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+        );
+        yield* Deferred.await(coordinationRead);
+        yield* harness.runtime.startTurn(
+          makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("attempt-coordination-admission"),
+            text: prompt,
+          }),
+        );
+        yield* harness.firstTerminal;
+        assert.deepEqual(
+          assistantMessages(harness.events).map((event) => event.message.text),
+          ["Implemented and pushed. All 14 tests pass."],
+        );
+      }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+    ),
+  );
 
   it.effect("suppresses a trailing empty final answer after a non-empty final answer", () =>
     Effect.scoped(

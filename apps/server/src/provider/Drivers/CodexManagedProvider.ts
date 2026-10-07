@@ -220,6 +220,7 @@ export const makeManagedCodexProvider = Effect.fn("makeManagedCodexProvider")(fu
   const orchestrationAdapter = yield* createCodexAdapterV2(input, {
     onUsageLimits: (update) => snapshot.applyUsageLimits(update),
     resolveRuntime: runtime.resolve,
+    getRuntimeRevision: runtime.getRevision,
   }).pipe(
     Effect.mapError(
       (cause) =>

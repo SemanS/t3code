@@ -499,6 +499,8 @@ export interface ProviderAdapterV2SessionRuntime {
    * here so the session manager defers idle release while it is pending.
    */
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
+  /** False requires an idle process replacement before admitting another turn. */
+  readonly canReuseSession?: Effect.Effect<boolean, ProviderAdapterV2Error>;
   /**
    * Per-provider-thread pending work for root-run ingestion stop gates. When
    * present, RunExecutionService uses only this probe (never the session-wide

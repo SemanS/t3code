@@ -1688,7 +1688,51 @@ export const layerWithOptions = (
                 }
               }
               const key = sessionKey(input.providerSessionId);
-              const existing = (yield* Ref.get(sessions)).get(key);
+              let existing = (yield* Ref.get(sessions)).get(key);
+              if (
+                existing?.runtime.canReuseSession !== undefined &&
+                !(yield* existing.runtime.canReuseSession.pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderSessionOpenError({
+                        instanceId: input.modelSelection.instanceId,
+                        providerSessionId: input.providerSessionId,
+                        cause,
+                      }),
+                  ),
+                ))
+              ) {
+                const latest = (yield* Ref.get(sessions)).get(key);
+                if (
+                  latest !== existing ||
+                  latest.busyCount > 0 ||
+                  (yield* latest.runtime.hasPendingBackgroundWork ?? Effect.succeed(false))
+                )
+                  return yield* new ProviderSessionOpenError({
+                    instanceId: input.modelSelection.instanceId,
+                    providerSessionId: input.providerSessionId,
+                    cause:
+                      "This provider's credentials changed while other work is active. Retry after it finishes.",
+                  });
+                // The idle generation is checked atomically with busyCount when
+                // removing the process, so a sibling admitted during validation
+                // cannot be interrupted by this credential replacement.
+                yield* releaseEntry({
+                  providerSessionId: input.providerSessionId,
+                  reason: "manual_shutdown",
+                  detail: "Provider credentials renewed.",
+                  onlyIfIdleGeneration: latest.idleGeneration,
+                  gracefulSubscribers: true,
+                });
+                existing = (yield* Ref.get(sessions)).get(key);
+                if (existing !== undefined)
+                  return yield* new ProviderSessionOpenError({
+                    instanceId: input.modelSelection.instanceId,
+                    providerSessionId: input.providerSessionId,
+                    cause:
+                      "This provider became active while its credentials were renewed. Retry after it finishes.",
+                  });
+              }
               if (existing !== undefined) {
                 if (
                   !existing.attachedThreadIds.has(input.threadId) &&

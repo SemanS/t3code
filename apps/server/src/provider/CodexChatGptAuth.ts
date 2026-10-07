@@ -402,7 +402,7 @@ export const makeCodexChatGptAuth = Effect.fn("makeCodexChatGptAuth")(function* 
         yield* remove;
         return yield* failure(
           "refresh",
-          "Your ChatGPT connection expired or was disconnected. Sign in again.",
+          "Your ChatGPT connection expired or was disconnected. Open Settings → Providers and Reconnect this ChatGPT profile.",
         );
       }
       if (error === "invalid_client")
@@ -754,7 +754,7 @@ export const makeCodexChatGptAuth = Effect.fn("makeCodexChatGptAuth")(function* 
                 ? error
                 : failure(
                     "refresh",
-                    "Could not renew the ChatGPT connection. Retry, or sign in again.",
+                    "Could not renew the ChatGPT connection. Retry, or open Settings → Providers and Reconnect this ChatGPT profile.",
                   ),
             ),
           );

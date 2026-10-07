@@ -108,5 +108,6 @@ export const makeCodexManagedRuntime = Effect.fn("makeCodexManagedRuntime")(func
       revision: credentials.accessToken,
     } satisfies CodexEffectiveRuntime;
   });
-  return { auth, resolve, installation, homePath, homeLayout };
+  const getRevision = auth.access.pipe(Effect.map((credentials) => credentials.accessToken));
+  return { auth, resolve, getRevision, installation, homePath, homeLayout };
 });

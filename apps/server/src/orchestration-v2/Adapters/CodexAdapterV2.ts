@@ -1448,7 +1448,10 @@ export type CodexAdapterV2DriverEnv =
 
 export const createCodexAdapterV2 = (
   { instanceId, environment, enabled, config }: ProviderAdapterDriverCreateInput<CodexSettings>,
-  hooks: Pick<CodexAdapterV2Options, "onUsageLimits" | "resolveRuntime"> = {},
+  hooks: Pick<
+    CodexAdapterV2Options,
+    "onUsageLimits" | "resolveRuntime" | "getRuntimeRevision"
+  > = {},
 ) =>
   Effect.gen(function* () {
     const clientFactory = yield* CodexAppServerClientFactory;
@@ -1537,6 +1540,7 @@ export interface CodexAdapterV2Options {
    * Codex with a current access token.
    */
   readonly resolveRuntime?: Effect.Effect<CodexEffectiveRuntime, ProviderSetupError, Scope.Scope>;
+  readonly getRuntimeRevision?: Effect.Effect<string, ProviderSetupError>;
   readonly fileSystem: FileSystem.FileSystem;
   readonly idAllocator: IdAllocatorV2Shape;
   readonly serverConfig: ServerConfig["Service"];
@@ -3716,9 +3720,11 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
         yield* client.handleServerNotification("item/agentMessage/delta", (payload) =>
           Effect.gen(function* () {
             const context = (yield* Ref.get(activeTurns)).get(payload.turnId);
-            if (context !== undefined) {
-              yield* completeProviderRetry(context, yield* DateTime.now);
-            }
+            // Native queue turns have no admitted run. Keeping their deltas
+            // would replay old commentary if a later turn/start joins that
+            // same native turn, placing it after the user's final answer.
+            if (context === undefined) return;
+            yield* completeProviderRetry(context, yield* DateTime.now);
             yield* agentMessageDeltas.append({
               turnId: payload.turnId,
               itemId: payload.itemId,
@@ -5356,6 +5362,21 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
           providerSessionId: input.providerSessionId,
           providerSession: session,
           events: Stream.fromEffectRepeat(Queue.take(events)),
+          ...(resolvedRuntime === undefined || adapterOptions.getRuntimeRevision === undefined
+            ? {}
+            : {
+                canReuseSession: adapterOptions.getRuntimeRevision.pipe(
+                  Effect.map((revision) => revision === resolvedRuntime.revision),
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderAdapterProtocolError({
+                        driver: CODEX_PROVIDER,
+                        detail: cause.detail,
+                        cause,
+                      }),
+                  ),
+                ),
+              }),
           canReuseContextUsage: canReuseCodexContextUsage,
           // Known gap: a subagent that Codex resumes later reads as completed
           // (not pending) between turns, so idle release can win the race

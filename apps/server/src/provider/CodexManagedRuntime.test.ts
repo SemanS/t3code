@@ -171,6 +171,23 @@ it.effect.each(
           assert.strictEqual(ambient.CODEX_HOME, "/user/.codex");
         }).pipe(Effect.scoped);
         assert.strictEqual(leases, 0);
+        assert.equal(yield* runtime.getRevision, "dummy-owned-access");
+        yield* store.set(
+          new TextEncoder().encode(
+            yield* encodeJson({
+              clientId: "oaiapp_test",
+              accessToken: "dummy-owned-access",
+              refreshToken: "dummy-refresh",
+              expiresAt: (yield* Clock.currentTimeMillis) - 1,
+              earliestRefreshAt: null,
+              scopes: ["chatgpt.tokens.use.direct"],
+              subject: "test-user",
+              email: null,
+            }),
+          ),
+        );
+        assert.equal(yield* runtime.getRevision, "dummy-renewed-access");
+        assert.equal(leases, 0);
         yield* runtime.auth.controller.logout(Effect.void);
         assert.equal(
           yield* fs.readFileString(path.join(sharedHome, "auth.json")),
@@ -192,19 +209,28 @@ it.effect.each(
                 [
                   "https://auth.openai.com/.well-known/openid-configuration",
                   "https://auth.openai.com/revoke",
+                  "https://auth.openai.com/api/accounts/oauth/token",
                 ].includes(request.url),
               );
               return HttpClientResponse.fromWeb(
                 request,
                 request.url.endsWith("/revoke")
                   ? new Response(null, { status: 200 })
-                  : Response.json({
-                      issuer: "https://auth.openai.com",
-                      authorization_endpoint: "https://auth.openai.com/api/accounts/authorize",
-                      token_endpoint: "https://auth.openai.com/api/accounts/oauth/token",
-                      jwks_uri: "https://auth.openai.com/jwks",
-                      revocation_endpoint: "https://auth.openai.com/revoke",
-                    }),
+                  : request.url.endsWith("/token")
+                    ? Response.json({
+                        access_token: "dummy-renewed-access",
+                        refresh_token: "dummy-renewed-refresh",
+                        expires_in: 3600,
+                        token_type: "Bearer",
+                        scope: "chatgpt.tokens.use.direct",
+                      })
+                    : Response.json({
+                        issuer: "https://auth.openai.com",
+                        authorization_endpoint: "https://auth.openai.com/api/accounts/authorize",
+                        token_endpoint: "https://auth.openai.com/api/accounts/oauth/token",
+                        jwks_uri: "https://auth.openai.com/jwks",
+                        revocation_endpoint: "https://auth.openai.com/revoke",
+                      }),
               );
             }),
           ),

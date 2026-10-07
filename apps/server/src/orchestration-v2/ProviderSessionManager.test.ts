@@ -292,6 +292,7 @@ function makeProviderAdapter(
       readonly initialProviderItemIdentityVersion?: 2;
     }) => Effect.Effect<void>;
     readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
+    readonly sessionRevision?: Ref.Ref<string>;
     readonly hangSessionScopeClose?: boolean;
     readonly beforeUnload?: Effect.Effect<void>;
   } = {},
@@ -313,6 +314,10 @@ function makeProviderAdapter(
           ]);
         }
         const now = yield* DateTime.now;
+        const revision =
+          options.sessionRevision === undefined
+            ? undefined
+            : yield* Ref.get(options.sessionRevision);
         const events = yield* Queue.unbounded<ProviderAdapterV2Event, Cause.Done>();
         const session = makeProviderSession({
           providerSessionId: input.providerSessionId,
@@ -358,6 +363,13 @@ function makeProviderAdapter(
           ...(options.hasPendingBackgroundWork === undefined
             ? {}
             : { hasPendingBackgroundWork: options.hasPendingBackgroundWork }),
+          ...(options.sessionRevision === undefined
+            ? {}
+            : {
+                canReuseSession: Ref.get(options.sessionRevision).pipe(
+                  Effect.map((current) => current === revision),
+                ),
+              }),
           ensureThread: () => unimplemented("ensureThread unused in test"),
           resumeThread: (threadInput) =>
             Ref.update(state, (current) => ({
@@ -408,6 +420,7 @@ function makeTestLayer(input: {
   readonly failReleaseEventWrites?: boolean;
   readonly flakyReleaseWrites?: FlakyReleaseWrites;
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
+  readonly sessionRevision?: Ref.Ref<string>;
   readonly hangSessionScopeClose?: boolean;
   readonly beforeUnload?: Effect.Effect<void>;
   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
@@ -425,6 +438,7 @@ function makeTestLayer(input: {
       ...(input.capabilities === undefined ? {} : { capabilities: input.capabilities }),
       ...(input.mcpConfigs === undefined ? {} : { mcpConfigs: input.mcpConfigs }),
       ...(input.beforeOpen === undefined ? {} : { beforeOpen: input.beforeOpen }),
+      ...(input.sessionRevision === undefined ? {} : { sessionRevision: input.sessionRevision }),
       ...(input.hasPendingBackgroundWork === undefined
         ? {}
         : { hasPendingBackgroundWork: input.hasPendingBackgroundWork }),
@@ -698,6 +712,148 @@ function makePendingRuntimeRequestEvents(input: {
     return { events, providerEvents, requestId, nodeId };
   });
 }
+
+it.effect.each(["changed", "unchanged", "external"] as const)(
+  "ProviderSessionManagerV2 checks $0 credentials before reusing an idle session",
+  (mode) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const revision = yield* Ref.make("initial");
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("thread-runtime-revision");
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        const input = { threadId, providerSessionId, modelSelection, runtimePolicy };
+        const first = yield* manager.open(input);
+        const providerThread = makeProviderThread({
+          idAllocator,
+          threadId,
+          providerSessionId,
+          now,
+        });
+        yield* first.resumeThread({ providerThread });
+        if (mode !== "unchanged") yield* Ref.set(revision, "renewed");
+        const next = yield* manager.open(input);
+        yield* next.resumeThread({ providerThread });
+        const current = yield* Ref.get(state);
+        assert.equal(current.openCount, mode === "changed" ? 2 : 1);
+        assert.equal(current.closeCount, mode === "changed" ? 1 : 0);
+        assert.equal(current.resumeCount, mode === "changed" ? 2 : 1);
+        assert.equal(current.interruptCount, 0);
+        if (mode === "changed") assert.notStrictEqual(first, next);
+        else assert.strictEqual(first, next);
+      }).pipe(
+        Effect.provide(
+          makeTestLayer({
+            state,
+            idleTimeoutMs: 60_000,
+            ...(mode === "external" ? {} : { sessionRevision: revision }),
+          }),
+        ),
+      );
+    }),
+);
+
+it.effect.each(["active sibling", "background", "racing sibling"] as const)(
+  "ProviderSessionManagerV2 preserves $0 work when credentials change",
+  (work) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const revision = yield* Ref.make("initial");
+      const background = yield* Ref.make(false);
+      const probeEntered = yield* Deferred.make<void>();
+      const releaseProbe = yield* Deferred.make<void>();
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("thread-runtime-revision-busy");
+        const sibling = ThreadId.make("thread-runtime-revision-sibling");
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* eventSink.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator, threadId, now }),
+            yield* makeThreadCreatedEvent({ idAllocator, threadId: sibling, now }),
+          ],
+        });
+        const input = { threadId, providerSessionId, modelSelection, runtimePolicy };
+        yield* manager.open(input);
+        const siblingRuntime = yield* manager.open({ ...input, threadId: sibling });
+        const startSibling = Effect.gen(function* () {
+          const store = yield* ProjectionStore.ProjectionStoreV2;
+          const runId = idAllocator.derive.run({ threadId: sibling, ordinal: 1 });
+          yield* siblingRuntime.startTurn({
+            appThread: (yield* store.getThreadProjection(sibling)).thread,
+            threadId: sibling,
+            runId,
+            runOrdinal: 1,
+            providerTurnOrdinal: 1,
+            attemptId: idAllocator.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+            rootNodeId: idAllocator.derive.rootNode({ runId }),
+            providerThread: makeProviderThread({
+              idAllocator,
+              threadId: sibling,
+              providerSessionId,
+              now,
+            }),
+            message: {
+              createdBy: "user",
+              creationSource: "web",
+              messageId: yield* idAllocator.allocate.message({ threadId: sibling, ordinal: 1 }),
+              text: "Keep working",
+              attachments: [],
+            },
+            modelSelection,
+            runtimePolicy,
+          });
+        });
+        if (work === "active sibling") yield* startSibling;
+        else if (work === "background") yield* Ref.set(background, true);
+        yield* Ref.set(revision, "renewed");
+        const admission = yield* manager.open(input).pipe(Effect.result, Effect.forkScoped);
+        if (work === "racing sibling") {
+          yield* Deferred.await(probeEntered);
+          yield* startSibling;
+          yield* Deferred.succeed(releaseProbe, undefined);
+        }
+        const result = yield* Fiber.join(admission);
+        assert.equal(result._tag, "Failure");
+        const current = yield* Ref.get(state);
+        assert.equal(current.openCount, 1);
+        assert.equal(current.closeCount, 0);
+        assert.equal(current.interruptCount, 0);
+        assert.isTrue(Option.isSome(yield* manager.get(providerSessionId)));
+      }).pipe(
+        Effect.provide(
+          makeTestLayer({
+            state,
+            idleTimeoutMs: 60_000,
+            sessionRevision: revision,
+            hasPendingBackgroundWork:
+              work === "racing sibling"
+                ? Deferred.succeed(probeEntered, undefined).pipe(
+                    Effect.andThen(Deferred.await(releaseProbe)),
+                    Effect.as(false),
+                  )
+                : Ref.get(background),
+          }),
+        ),
+      );
+    }),
+);
 
 it.effect("ProviderSessionManagerV2 opens independent sessions concurrently", () =>
   Effect.gen(function* () {
