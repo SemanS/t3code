@@ -3,9 +3,53 @@ import {
   coordinationEventLabel,
   coordinationTimeline,
   staleInputSummary,
+  inputReadiness,
+  coordinationScopeLabel,
 } from "./coordinationTimeline.ts";
 
 describe("coordination history", () => {
+  it("does not present missing or empty receipts as current inputs", () => {
+    expect(inputReadiness({ fresh: true, stale: [] })).toBe("unknown");
+    expect(inputReadiness({ fresh: true, reads: [], stale: [] })).toBe("empty");
+    expect(
+      inputReadiness({
+        fresh: true,
+        reads: [
+          {
+            project: "app",
+            scope: "project",
+            session: "b",
+            environment: "mac",
+            version: 2,
+            at: "",
+          },
+        ],
+        stale: [],
+      }),
+    ).toBe("current");
+  });
+  it("keeps a deleted context visibly stale and names the task", () => {
+    const inputs = {
+      fresh: false,
+      reads: [],
+      stale: [
+        {
+          project: "app",
+          scope: "task:123",
+          readVersion: 2,
+          currentVersion: null,
+          at: "",
+          updatedAt: null,
+        },
+      ],
+    };
+    expect(inputReadiness(inputs)).toBe("stale");
+    expect(staleInputSummary(inputs)).toBe("123 v2 → removed");
+    expect(
+      coordinationScopeLabel("task:123", [{ id: "123", title: "Board filters", key: "LP-1" }]),
+    ).toBe("LP-1 · Board filters");
+    expect(coordinationScopeLabel("project", [])).toBe("Project context");
+  });
   it("preserves one event and its participants when updates arrive out of order", () => {
     const one = {
       id: "a",

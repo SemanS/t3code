@@ -1,12 +1,21 @@
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId, PeerCoordSession } from "@t3tools/contracts";
 import {
   coordinationEventLabel,
+  coordinationActorLabel,
+  coordinationScopeLabel,
+  inputReadiness,
+  inputReadinessLabels,
+  type CoordinationTaskName,
   coordinationTimeline,
 } from "@t3tools/client-runtime/coordinationTimeline";
+import { useState } from "react";
 import { Pressable, View } from "react-native";
 import { AppText as Text } from "../../components/AppText";
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
+
+const NO_SESSIONS: readonly PeerCoordSession[] = [];
+const NO_TASKS: readonly CoordinationTaskName[] = [];
 
 export function PeerCoordTimeline({
   environmentId,
@@ -14,36 +23,66 @@ export function PeerCoordTimeline({
   project,
   task,
   revision,
+  sessions = NO_SESSIONS,
+  tasks = NO_TASKS,
 }: {
   environmentId: EnvironmentId;
   workspace: string;
   project: string;
   task?: string;
   revision?: string;
+  sessions?: readonly PeerCoordSession[];
+  tasks?: readonly CoordinationTaskName[];
 }) {
+  const [open, setOpen] = useState(false);
   const history = useEnvironmentQuery(
-    serverEnvironment.peerHubCoordEvents({
-      environmentId,
-      input: { workspace, project, ...(task === undefined ? {} : { task }), limit: 30, revision },
-    }),
+    open
+      ? serverEnvironment.peerHubCoordEvents({
+          environmentId,
+          input: {
+            workspace,
+            project,
+            ...(task === undefined ? {} : { task }),
+            limit: 30,
+            revision,
+          },
+        })
+      : null,
   );
   return (
     <View className="gap-3 p-4">
+      {sessions
+        .filter((session) => session.environment !== undefined)
+        .map((session) => (
+          <AgentInputs
+            key={`${session.environment}:${session.id}`}
+            {...{ environmentId, workspace, project, session, revision, tasks }}
+          />
+        ))}
       <View className="flex-row items-center justify-between gap-3">
-        <Text accessibilityRole="header" className="font-t3-semibold text-foreground">
-          Coordination history
-        </Text>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Refresh coordination history"
-          disabled={history.isPending}
-          onPress={() => history.refresh()}
-          className="p-2"
+          accessibilityState={{ expanded: open }}
+          onPress={() => setOpen(!open)}
+          className="py-2"
         >
-          <Text className="text-foreground">Refresh</Text>
+          <Text className="font-t3-semibold text-foreground">
+            {open ? "Hide activity" : "Coordination history"}
+          </Text>
         </Pressable>
+        {open ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Refresh coordination history"
+            disabled={history.isPending}
+            onPress={() => history.refresh()}
+            className="p-2"
+          >
+            <Text className="text-foreground">Refresh</Text>
+          </Pressable>
+        ) : null}
       </View>
-      {history.error !== null ? (
+      {!open ? null : history.error !== null ? (
         <Text accessibilityRole="alert" className="text-destructive">
           {history.error}
         </Text>
@@ -56,7 +95,11 @@ export function PeerCoordTimeline({
           <View key={event.id} className="gap-1 border-l border-border pl-3">
             <Text className="font-t3-medium text-foreground">{coordinationEventLabel(event)}</Text>
             <Text className="text-sm text-foreground-muted">
-              {[event.session ?? event.email, event.scope, event.paths.join(", ")]
+              {[
+                coordinationActorLabel(event, sessions),
+                event.scope === undefined ? undefined : coordinationScopeLabel(event.scope, tasks),
+                event.paths.join(", "),
+              ]
                 .filter(Boolean)
                 .join(" · ")}
             </Text>
@@ -66,10 +109,77 @@ export function PeerCoordTimeline({
           </View>
         ))
       )}
-      <Text className="text-xs text-foreground-muted">
-        Private working notes stay with each agent. History records shared versions and
-        coordination.
+    </View>
+  );
+}
+
+function AgentInputs({
+  environmentId,
+  workspace,
+  project,
+  session,
+  revision,
+  tasks,
+}: {
+  environmentId: EnvironmentId;
+  workspace: string;
+  project: string;
+  session: PeerCoordSession;
+  revision?: string | undefined;
+  tasks: readonly CoordinationTaskName[];
+}) {
+  const query = useEnvironmentQuery(
+    serverEnvironment.peerHubStaleReads({
+      environmentId,
+      input: {
+        workspace,
+        project,
+        session: session.id,
+        environment: session.environment!,
+        revision,
+      },
+    }),
+  );
+  const data = query.error === null ? query.data : null;
+  return (
+    <View className="gap-2 rounded-lg border border-border p-3">
+      <Text className="font-t3-semibold text-foreground">{session.label}</Text>
+      <Text className="text-sm text-foreground-muted">
+        {session.id.startsWith("codex:")
+          ? "Codex"
+          : session.id.startsWith("claude:")
+            ? "Claude"
+            : "Agent"}{" "}
+        · {session.local ? "This computer" : "Other computer"}
       </Text>
+      <Text accessibilityLiveRegion="polite" className="font-t3-medium text-foreground">
+        {data === null
+          ? query.error === null
+            ? "Checking inputs…"
+            : "Input check unavailable"
+          : inputReadinessLabels[inputReadiness(data)]}
+      </Text>
+      {data?.stale.length ? (
+        <Text className="text-sm text-foreground-muted">
+          Agent must update these inputs before handoff.
+        </Text>
+      ) : null}
+      {data?.stale.map((read) => (
+        <View key={read.scope} className="gap-1">
+          <Text className="text-foreground">{coordinationScopeLabel(read.scope, tasks)}</Text>
+          <Text className="text-sm text-foreground-muted">
+            Read v{read.readVersion} →{" "}
+            {read.currentVersion === null ? "Context removed" : `Latest v${read.currentVersion}`}
+          </Text>
+        </View>
+      ))}
+      {data?.stale.length === 0
+        ? data.reads?.map((read) => (
+            <Text key={read.scope} className="text-sm text-foreground-muted">
+              {coordinationScopeLabel(read.scope, tasks)} · v{read.version}
+            </Text>
+          ))
+        : null}
     </View>
   );
 }

@@ -1,13 +1,16 @@
 import type { EnvironmentId, PeerCoordSession } from "@t3tools/contracts";
 import {
+  coordinationActorLabel,
   coordinationEventLabel,
+  coordinationScopeLabel,
   coordinationTimeline,
-  staleInputSummary,
+  type CoordinationTaskName,
 } from "@t3tools/client-runtime/coordinationTimeline";
 import { useState } from "react";
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
 import { Button } from "../ui/button";
+import { useCoordinationRefresh } from "./SharedInputs";
 
 interface Props {
   environmentId: EnvironmentId;
@@ -16,9 +19,11 @@ interface Props {
   task?: string;
   revision?: string | undefined;
   sessions?: readonly PeerCoordSession[];
+  tasks?: readonly CoordinationTaskName[];
 }
 
 const NO_SESSIONS: readonly PeerCoordSession[] = [];
+const NO_TASKS: readonly CoordinationTaskName[] = [];
 
 export function PeerCoordTimeline({
   environmentId,
@@ -27,51 +32,74 @@ export function PeerCoordTimeline({
   task,
   revision,
   sessions = NO_SESSIONS,
+  tasks = NO_TASKS,
 }: Props) {
+  const [open, setOpen] = useState(false);
   const history = useEnvironmentQuery(
-    serverEnvironment.peerHubCoordEvents({
-      environmentId,
-      input: { workspace, project, ...(task === undefined ? {} : { task }), limit: 50, revision },
-    }),
+    open
+      ? serverEnvironment.peerHubCoordEvents({
+          environmentId,
+          input: {
+            workspace,
+            project,
+            ...(task === undefined ? {} : { task }),
+            limit: 50,
+            revision,
+          },
+        })
+      : null,
   );
+  useCoordinationRefresh(history.refresh);
   return (
-    <section aria-label="Coordination history" className="min-w-0">
-      <div className="mb-3 flex items-center justify-between gap-3">
-        <h2 className="text-sm font-medium">Coordination history</h2>
-        <Button
-          variant="ghost"
-          size="xs"
-          disabled={history.isPending}
-          onClick={() => history.refresh()}
+    <section aria-label="Coordination history" className="min-w-0 border-t border-border pt-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <button
+          type="button"
+          aria-expanded={open}
+          onClick={() => setOpen(!open)}
+          className="text-sm font-medium hover:underline"
         >
-          Refresh
-        </Button>
+          {open ? "Hide activity" : "Coordination history"}
+        </button>
+        {open ? (
+          <Button variant="ghost" size="xs" disabled={history.isPending} onClick={history.refresh}>
+            Refresh
+          </Button>
+        ) : null}
       </div>
-      <p className="mb-3 text-xs text-muted-foreground">
-        Shared decisions and exact input versions. Private working notes stay with each agent.
-      </p>
-      {history.error !== null ? (
-        <p role="alert" className="text-xs text-muted-foreground">
+      {!open ? null : history.error !== null ? (
+        <p role="alert" className="mt-3 text-sm text-muted-foreground">
           {history.error}
         </p>
       ) : history.data === null ? (
-        <p role="status" className="text-xs text-muted-foreground">
+        <p role="status" className="mt-3 text-sm text-muted-foreground">
           Loading history…
         </p>
       ) : history.data.length === 0 ? (
-        <p className="text-xs text-muted-foreground">No coordination events yet.</p>
+        <p className="mt-3 text-sm text-muted-foreground">No activity yet.</p>
       ) : (
-        <ol className="flex flex-col gap-3">
+        <ol className="mt-4 flex flex-col gap-4">
           {coordinationTimeline(history.data).map((event) => (
             <li key={event.id} className="min-w-0 border-l border-border pl-3">
               <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-                <span className="text-xs font-medium">{coordinationEventLabel(event)}</span>
+                <span className="text-sm font-medium">{coordinationEventLabel(event)}</span>
                 <time dateTime={event.at} className="text-xs text-muted-foreground">
-                  {new Date(event.at).toLocaleString()}
+                  {new Date(event.at).toLocaleString([], {
+                    month: "short",
+                    day: "numeric",
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}
                 </time>
               </div>
-              <p className="break-words text-xs text-muted-foreground">
-                {[event.session ?? event.email, event.scope, event.paths.join(", ")]
+              <p className="mt-1 break-words text-xs text-muted-foreground">
+                {[
+                  coordinationActorLabel(event, sessions),
+                  event.scope === undefined
+                    ? undefined
+                    : coordinationScopeLabel(event.scope, tasks),
+                  event.paths.join(", "),
+                ]
                   .filter(Boolean)
                   .join(" · ")}
               </p>
@@ -79,58 +107,6 @@ export function PeerCoordTimeline({
           ))}
         </ol>
       )}
-      {sessions
-        .filter((session) => session.environment !== undefined)
-        .map((session) => (
-          <InputVersions
-            key={`${session.environment}:${session.id}`}
-            {...{ environmentId, workspace, project, revision, session }}
-          />
-        ))}
     </section>
-  );
-}
-
-function InputVersions({
-  environmentId,
-  workspace,
-  project,
-  revision,
-  session,
-}: Omit<Props, "task" | "sessions"> & { session: PeerCoordSession }) {
-  const [checking, setChecking] = useState(false);
-  const reads = useEnvironmentQuery(
-    checking && session.environment !== undefined
-      ? serverEnvironment.peerHubStaleReads({
-          environmentId,
-          input: {
-            workspace,
-            project,
-            session: session.id,
-            environment: session.environment,
-            revision,
-          },
-        })
-      : null,
-  );
-  return (
-    <div className="mt-3 text-xs">
-      <Button
-        variant="ghost"
-        size="xs"
-        onClick={() => {
-          setChecking(true);
-          reads.refresh();
-        }}
-      >
-        Check {session.label}’s shared inputs
-      </Button>
-      {checking ? (
-        <p role="status" className="mt-1 break-words text-muted-foreground">
-          {reads.error ??
-            (reads.data === null ? "Checking versions…" : staleInputSummary(reads.data))}
-        </p>
-      ) : null}
-    </div>
   );
 }

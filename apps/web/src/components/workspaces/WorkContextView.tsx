@@ -19,6 +19,8 @@ import { formatRelativeTimeLabel } from "../../timestampFormat";
 import ChatMarkdown from "../ChatMarkdown";
 import { useRelativeTimeTick } from "../settings/settingsLayout";
 import { Button } from "../ui/button";
+import { Badge } from "../ui/badge";
+import { SharedInputs } from "./SharedInputs";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { SidebarInset } from "../ui/sidebar";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
@@ -106,6 +108,13 @@ export function WorkContextView({ workspace, project, scope }: Place) {
     task !== undefined
       ? taskLabel(task)
       : `${node?.name ?? project}${scope === "project" ? " · work outside tasks" : ""}`;
+  const projectSessions =
+    status?.coordination.sessions.filter(
+      (session) => session.workspace === workspace && session.project === project,
+    ) ?? [];
+  const workSessions = projectSessions.filter((session) =>
+    scope === "project" ? session.task === undefined : session.task === scope.slice(5),
+  );
   const agents = (scope === "project" ? node?.unsorted : task?.threads) ?? [];
   const advice = useMemo(
     () => (status === null ? [] : adviceOnWork({ status, workspace, project, scope })),
@@ -161,7 +170,7 @@ export function WorkContextView({ workspace, project, scope }: Place) {
                     : scope === "project"
                       ? "Shared context"
                       : "Task context",
-                  context === undefined ? null : `version ${context.version}`,
+
                   context === undefined || context.tokens === 0
                     ? null
                     : contextSize(context.tokens),
@@ -170,20 +179,39 @@ export function WorkContextView({ workspace, project, scope }: Place) {
                   .join(" · ")}
               </span>
             </div>
+            {context === undefined ? null : (
+              <Badge variant="outline">Latest v{context.version}</Badge>
+            )}
           </div>
         </WorkspacePageHeader>
         <div className="min-h-0 flex-1 overflow-y-auto">
-          <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-6 py-6">
+          <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 py-5 sm:px-6 sm:py-6">
+            {environmentId === null ? null : (
+              <SharedInputs
+                environmentId={environmentId}
+                workspace={workspace}
+                project={project}
+                sessions={workSessions}
+                tasks={state?.work.tasks ?? []}
+              />
+            )}
             {context === undefined ? (
               <p className="text-sm text-muted-foreground">
                 {memoryMode
                   ? "No shared work overview yet. Findings and questions are available below in Relevant memory."
-                  : "No shared context yet. The first agent that starts on this work, with agent coordination on, starts it and keeps it."}
+                  : "No shared context yet."}
               </p>
             ) : (
               <>
-                <p className="text-xs text-muted-foreground">{keeperLine(context)}</p>
-                {read.data == null && read.error !== null ? (
+                <div className="border-t border-border pt-4">
+                  <h2 className="text-sm font-medium">Current agreement · v{context.version}</h2>
+                  <p className="mt-1 text-xs text-muted-foreground">{keeperLine(context)}</p>
+                </div>
+                {read.data === null && read.error === null ? (
+                  <p role="status" className="text-sm text-muted-foreground">
+                    Loading context…
+                  </p>
+                ) : read.data == null && read.error !== null ? (
                   <p className="text-sm text-muted-foreground">{read.error}</p>
                 ) : text.trim() === "" ? (
                   <p className="text-sm text-muted-foreground">Nobody has written it yet.</p>
@@ -233,30 +261,20 @@ export function WorkContextView({ workspace, project, scope }: Place) {
                   ":" +
                   context?.version
                 }
-                sessions={
-                  status?.coordination.sessions.filter(
-                    (session) =>
-                      session.workspace === workspace &&
-                      session.project === project &&
-                      (scope === "project"
-                        ? session.task === undefined
-                        : session.task === scope.slice(5)),
-                  ) ?? []
-                }
+                sessions={projectSessions}
+                tasks={state?.work.tasks ?? []}
               />
             )}
-            <section aria-label="Agents on this work">
-              <SectionTitle>Agents on this work · {agents.length}</SectionTitle>
-              {agents.length === 0 ? (
-                <p className="text-sm text-muted-foreground">None right now.</p>
-              ) : (
+            {agents.length === 0 ? null : (
+              <section aria-label="Conversations">
+                <SectionTitle>Conversations · {agents.length}</SectionTitle>
                 <ul className="flex flex-col">
                   {agents.map((thread) => (
                     <AgentRow key={thread.key} thread={thread} onOpen={actions.open} />
                   ))}
                 </ul>
-              )}
-            </section>
+              </section>
+            )}
             {advice.length === 0 ? null : (
               <Advice
                 rows={advice}
@@ -277,11 +295,6 @@ export function WorkContextView({ workspace, project, scope }: Place) {
                 onRestore={(version) => void restore(version)}
               />
             )}
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              {memoryMode
-                ? "This text is a work overview. Findings and evidence remain in Memory; each agent's working context is private to its session."
-                : "One agent keeps this context at a time: the first on the work, then the next when its session ends or it stays idle while another agent works. The others read it and send it what they find, and get it as reference from their team, never as instructions."}
-            </p>
           </div>
         </div>
       </div>
@@ -298,19 +311,14 @@ function SectionTitle({ children }: { readonly children: React.ReactNode }) {
 }
 
 function keeperLine(context: WorkContextNode): string {
-  const keeper =
-    context.keeper === undefined
-      ? "Nobody keeps it right now; the next agent on this work does."
-      : `Kept by ${context.keeper.mine ? "your agent" : `${context.keeper.person}’s agent`}${context.keeper.label === undefined ? "" : ` (“${context.keeper.label}”)`}.`;
-  if (context.version === 0) return keeper;
-  const when = formatRelativeTimeLabel(context.updatedAt);
-  const written =
-    context.restoredFrom !== undefined
-      ? `${context.updatedBy ?? "Someone"} brought version ${context.restoredFrom} back`
-      : context.updatedBy === undefined
-        ? "written"
-        : `by ${context.updatedBy}’s agent`;
-  return `${keeper} Version ${context.version}${context.restoredFrom !== undefined ? ": " : " "}${written}, ${when}.`;
+  const keeper = context.keeper?.label ?? context.keeper?.person;
+  return [
+    keeper === undefined ? "No active keeper" : `Kept by ${keeper}`,
+    context.version === 0 ? undefined : `updated ${formatRelativeTimeLabel(context.updatedAt)}`,
+    context.restoredFrom === undefined ? undefined : `restored from v${context.restoredFrom}`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 /** What the work's agents found since the context last changed, waiting for its keeper. */
@@ -452,7 +460,7 @@ function History({
       ? `${name(version.by)} brought version ${version.restoredFrom} back`
       : `${name(version.by)}’s agent`;
   return (
-    <section aria-label="History">
+    <section aria-label="Version history">
       <button
         type="button"
         aria-expanded={open}
@@ -460,7 +468,7 @@ function History({
         onClick={() => setOpen((value) => !value)}
       >
         <ChevronRightIcon aria-hidden className={cn("size-3", open && "rotate-90")} />
-        History
+        Version history
       </button>
       {!open ? null : versions.data == null ? (
         <p className="pt-1 text-sm text-muted-foreground">{versions.error ?? "Loading…"}</p>
@@ -527,7 +535,7 @@ function VersionChanges({
   );
   const data = read.data;
   return (
-    <div className="mb-2 ml-11 flex flex-col gap-2 border-l border-border pl-3">
+    <div className="mb-2 ml-2 flex flex-col gap-2 border-l border-border pl-3">
       {data == null ? (
         <p className="text-xs text-muted-foreground">{read.error ?? "Loading…"}</p>
       ) : (
@@ -549,7 +557,7 @@ function VersionChanges({
           {version === current ? null : (
             <div>
               <Button size="xs" variant="outline" onClick={() => onRestore(version)}>
-                Bring this version back
+                Restore this version
               </Button>
             </div>
           )}

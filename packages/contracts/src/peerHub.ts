@@ -987,14 +987,15 @@ export type PeerContextRead = typeof PeerContextRead.Type;
 
 export const PeerStaleReads = Schema.Struct({
   fresh: Schema.Boolean,
+  reads: Schema.optional(Schema.Array(PeerContextRead)),
   stale: Schema.Array(
     Schema.Struct({
       project: Schema.String,
       scope: Schema.String,
       readVersion: Schema.Number,
-      currentVersion: Schema.Number,
+      currentVersion: Schema.NullOr(Schema.Number),
       at: Schema.String,
-      updatedAt: Schema.String,
+      updatedAt: Schema.NullOr(Schema.String),
     }),
   ),
 });

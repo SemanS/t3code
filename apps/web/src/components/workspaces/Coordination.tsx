@@ -14,6 +14,7 @@ import { cn } from "../../lib/utils";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Button } from "../ui/button";
+import { Badge } from "../ui/badge";
 import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
@@ -402,7 +403,9 @@ function OverlapCard({
   const nameOf = (email: string) => personName(status, overlap.workspace, email);
   const tasks = projectTasks(status, overlap);
   const agentOf = (id: string) => {
-    const session = status.coordination.sessions.find((s) => s.id === id);
+    const session = status.coordination.sessions.find(
+      (s) => s.id === id && s.workspace === overlap.workspace && s.project === overlap.project,
+    );
     if (session === undefined) return undefined;
     const task = tasks.find((candidate) => candidate.id === session.task);
     return {
@@ -414,7 +417,6 @@ function OverlapCard({
     const agent = agentOf(id);
     return agent === undefined ? "an agent no longer at work" : `${agent.name} (${agent.on})`;
   });
-  const closer = overlap.closer === undefined ? undefined : agentOf(overlap.closer);
   const lastAgentNote = overlap.notes.findLast((entry) => entry.session !== undefined);
   const askedAt = overlap.askedAt === undefined ? undefined : Date.parse(overlap.askedAt);
   const askedLong = askedAt !== undefined && now - askedAt >= ASKED_LONG_MS;
@@ -453,22 +455,37 @@ function OverlapCard({
         />
         <span className="min-w-0 truncate">{overlapTopic(status, overlap)}</span>
       </p>
-      <p className="text-muted-foreground">{sides.join(" and ")}</p>
-      {overlap.notes.slice(-3).map((entry) => (
-        <p key={entry.id} className="text-muted-foreground">
-          <span className="text-sidebar-foreground">
-            {entry.session === undefined ? nameOf(entry.email) : `${nameOf(entry.email)}'s agent`}
-          </span>
-          : {entry.text}
-        </p>
-      ))}
-      <p className="text-muted-foreground">
-        {askedAt !== undefined
-          ? `Asked: they agree, then ${closer?.name ?? "one of them"} closes it.`
-          : talking
-            ? "The agents are talking it through."
-            : `Resolve: the agents agree between them${closer === undefined ? "" : ` and ${closer.name} closes it`}.`}
-      </p>
+      <div>
+        <Badge variant="warning">
+          {askedAt !== undefined
+            ? "Agreement requested"
+            : talking
+              ? "Discussing overlap"
+              : "Needs coordination"}
+        </Badge>
+      </div>
+      <p className="text-muted-foreground">{sides.join(" + ")}</p>
+      {overlap.notes.length === 0 ? null : (
+        <details className="text-muted-foreground">
+          <summary className="cursor-pointer">
+            {overlap.notes.length} coordination{" "}
+            {overlap.notes.length === 1 ? "message" : "messages"}
+          </summary>
+          <div className="mt-2 max-h-60 space-y-2 overflow-y-auto">
+            {overlap.notes.map((entry) => (
+              <p key={entry.id} className="break-words">
+                <span className="font-medium text-sidebar-foreground">
+                  {entry.session === undefined
+                    ? nameOf(entry.email)
+                    : `${nameOf(entry.email)}’s agent`}
+                  :{" "}
+                </span>
+                {entry.text}
+              </p>
+            ))}
+          </div>
+        </details>
+      )}
       {writing ? (
         <Input
           className="min-w-0"
@@ -500,7 +517,11 @@ function OverlapCard({
             disabled={busy || (askedAt !== undefined && !askedLong)}
             onClick={() => void ask()}
           >
-            {askedAt === undefined ? "Resolve" : askedLong ? "Ask again" : "Resolving…"}
+            {askedAt === undefined
+              ? "Request agreement"
+              : askedLong
+                ? "Ask again"
+                : "Waiting for agents"}
           </Button>
         </span>
         <Button

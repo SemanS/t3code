@@ -1216,6 +1216,7 @@ function ContextRow({
         >
           <FileTextIcon aria-hidden className="size-3.5 shrink-0" />
           <span className="shrink-0 font-medium text-sidebar-foreground">{label}</span>
+          <span className="shrink-0 text-muted-foreground tabular-nums">v{context.version}</span>
           <span className="min-w-0 flex-1 truncate">
             {context.gist ?? (context.version === 0 ? "nothing written yet" : "")}
           </span>

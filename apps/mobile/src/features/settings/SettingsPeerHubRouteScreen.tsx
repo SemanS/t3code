@@ -180,6 +180,13 @@ function PeerEnvironment({
               project={selection.projectId}
               task={selection.taskId}
               revision={status.lastSyncAt ?? undefined}
+              sessions={status.coordination.sessions.filter(
+                (session) =>
+                  session.workspace === selection.workspace &&
+                  session.project === selection.projectId &&
+                  session.task === selection.taskId,
+              )}
+              tasks={project?.work.tasks ?? []}
             />
           )}
           <SettingsSection title="Claude Code coordination">
