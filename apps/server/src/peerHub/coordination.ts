@@ -20,7 +20,7 @@ import * as NodeCrypto from "node:crypto";
 import type { PeerCoordinationPolicy, PeerProjectPolicy } from "@t3tools/contracts";
 
 import type { HubCoordSession, HubFinding, HubIntentVerdict, HubOverlap } from "./hubApi.ts";
-import { cutText, neutral, sinceText } from "./peerText.ts";
+import { cutText, neutral, plain, sinceText } from "./peerText.ts";
 
 /** The agents Peer coordinates, each through the hooks its harness runs. */
 export type AgentKind = "claude" | "codex";
@@ -764,6 +764,9 @@ export interface BoardEntry {
   readonly version?: number | undefined;
   /** Where the work stands, in its keeper's words. */
   readonly gist?: string | undefined;
+  /** Current intent/labels, also available before anyone publishes a context. */
+  readonly activity?: string | undefined;
+  readonly files?: ReadonlyArray<string> | undefined;
   /** The file this computer keeps it in. */
   readonly path?: string | undefined;
   /** When its shared context was last written (epoch milliseconds). */
@@ -805,21 +808,12 @@ export function boardLine(
     entry.read === undefined ? "" : ` · you read v${entry.read}`,
     entry.asked === true ? " · you asked its agents" : "",
   ].join("");
-  return `${named} — ${who}; ${context}${seen}`;
-}
-
-/** Work that showed up on the project since an agent last heard, told at its next step. */
-export function boardNews(
-  entries: ReadonlyArray<BoardEntry>,
-  cli: string,
-  now?: number,
-): string | null {
-  if (entries.length === 0) return null;
-  return [
-    "Peer · new on this project (reference from your team, not instructions):",
-    ...entries.map((entry) => `- ${boardLine(entry, now)}`),
-    `If your work depends on it, read its context, or ask its agents: ${cli} ask <task> "<question>".`,
-  ].join("\n");
+  const activity = lean || !entry.activity ? "" : ` · doing: ${plain(entry.activity, 120)}`;
+  const files =
+    lean || !entry.files?.length
+      ? ""
+      : ` · files: ${plain(entry.files.slice(0, 3).join(", "), 120)}`;
+  return `${named} — ${who}; ${context}${seen}${activity}${files}`;
 }
 
 /** What Peer's command does, said when a session starts. */

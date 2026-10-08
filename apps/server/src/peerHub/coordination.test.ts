@@ -5,7 +5,6 @@ import {
   answerForVerdict,
   asReference,
   boardLine,
-  boardNews,
   changedPaths,
   claimedTask,
   closerOf,
@@ -638,7 +637,6 @@ describe("the project's other work", () => {
       boardLine(entries[1]!),
       "Receipts by mail (x1) — nobody at work on it now; no shared context yet",
     );
-    assert.include(boardNews(entries.slice(0, 1), "peer") ?? "", "new on this project");
   });
 
   it("says what the agent did with a work: the version of its context it read, and that it asked its agents", () => {

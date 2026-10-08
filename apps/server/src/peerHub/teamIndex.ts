@@ -15,7 +15,8 @@
  *
  * What Peer adds to an agent's context stays in it and is read again in every turn, so Peer says
  * each thing once. A start names what exists (a table of contents); the first ask carries what
- * each work builds and what to do about it; after that only what changed, a line after a pause,
+ * each work builds and what to do about it; tool steps also carry newly joined work and changed
+ * versions, even before a shared context exists. After that only what changed, a line after a pause,
  * and nothing when there is nothing. What the agent wants more of, it pulls.
  *
  * @module peerHub/teamIndex
@@ -93,17 +94,24 @@ export function indexText(input: {
 
 /** How many works the block with an ask gives the gist of, and how much of a gist: what a work builds is usually said after its first clause. */
 export const ASK_GIST_SHOWN = 5;
-const ASK_GIST_CHARS = 220;
+const ASK_GIST_CHARS = 160;
 
 /**
- * What an agent is not told twice: the key that says what it was told of a work. A work whose
- * keeper changes the gist is news; one whose context only changed in other ways is not.
+ * Fingerprint exactly the bounded card the agent sees. A new version matters even when the
+ * first paragraph is unchanged; clock/status churn alone does not need another model input.
  */
-export const gistKey = (entry: BoardEntry): string => entry.gist ?? "";
+export const discoveryKey = (entry: BoardEntry): string => {
+  const details = [
+    entry.gist === undefined ? "" : plain(entry.gist, ASK_GIST_CHARS),
+    entry.activity === undefined ? "" : plain(entry.activity, 120),
+    entry.files?.length ? `files: ${plain(entry.files.slice(0, 3).join(", "), 120)}` : "",
+  ].filter(Boolean);
+  return `${plain(compactName(entry), 130)}${entry.version ? ` [v${entry.version}]` : " [no context yet]"}${details.length ? ` — ${details.join(" · ")}` : ""}`;
+};
 
 /**
  * What goes with an ask of the agent's person when there is something it was not told yet: the
- * works (new to it, or whose gist changed since) by name, those at work first, with what each says
+ * works (new to it, or whose version/visible activity changed) by name, those at work first, with what each says
  * it builds, and what to do about it. It is the index at the moment the agent decides whether
  * somebody else does what it was asked, in the context it already runs. Peer does not say which of
  * them relate to the ask: it does not know. Null when there is no such work.
@@ -119,11 +127,8 @@ export function askIndexText(input: {
   const { works, changed, knowledge, cli } = input;
   if (works.length === 0) return null;
   const shown = works.slice(0, ASK_INDEX_SHOWN);
-  const lines = shown.slice(0, ASK_GIST_SHOWN).map((entry) => {
-    const gist = entry.gist === undefined ? "" : plain(entry.gist, ASK_GIST_CHARS);
-    return `- ${compactName(entry)}${gist === "" ? "" : ` — ${gist}`}`;
-  });
-  const rest = shown.slice(ASK_GIST_SHOWN).map((entry) => compactName(entry));
+  const lines = shown.slice(0, ASK_GIST_SHOWN).map((entry) => `- ${discoveryKey(entry)}`);
+  const rest = shown.slice(ASK_GIST_SHOWN).map((entry) => plain(compactName(entry), 130));
   const more = works.length - shown.length;
   const others =
     rest.length === 0 && more === 0
@@ -138,7 +143,7 @@ export function askIndexText(input: {
     ...lines,
     ...others,
     changed
-      ? `Check this ask against it too, even loosely, before you build (\`${cli} context <task>\`, \`${cli} ask <task> "<question>"\`).`
+      ? `Check whether this work affects your task before continuing (\`${cli} context <task>\`, \`${cli} ask <task> "<question>"\`).`
       : `Before you build for this ask, check whether any of these shares a topic, data or a function with it, even loosely${knowledge ? ", or an `.ai` entry named above governs what you will touch" : ""}. If one does, read it first (\`${cli} context <task>\`, \`${cli} knowledge <id or words>\`; \`${cli} ask <task> "<question>"\` reaches its agents): a read costs one command, work done twice costs far more. If you cannot tell, \`${cli} find "<what you will do>"\`.`,
   ].join("\n");
 }

@@ -59,7 +59,6 @@ import {
   agentNamed,
   announcementKey,
   answerForVerdict,
-  boardNews,
   changedPaths,
   claimedTask,
   closerOf,
@@ -143,7 +142,7 @@ import {
   askIndexText,
   askReminderText,
   followedChange,
-  gistKey,
+  discoveryKey,
   indexText,
 } from "./teamIndex.ts";
 import type {
@@ -446,8 +445,6 @@ interface LocalSession {
   threadTries: number;
   /** Tasks it asked the agents of (`task:<id>` claims), and when. */
   readonly asks: Map<string, number>;
-  /** The other works whose shared context it has been told of, as they were written then. */
-  readonly boardHeard: Set<string>;
   /** Overlaps it closes that it was asked to settle once they went quiet: how often, and at which note. */
   readonly settleNudges: Map<string, number>;
   readonly settleHeard: Set<string>;
@@ -463,7 +460,7 @@ interface LocalSession {
   /** The entries of the project's `.ai` it was told of or read (ids). */
   readonly knowledgeTold: Set<string>;
   /**
-   * What the agent was told of each other work (`gistKey`), since its session started or its
+   * What the agent was told of each other work (`discoveryKey`), since its session started or its
    * context was compacted: it is not told twice, only what changed. And when an ask last carried
    * something, so a pause can be told from a flow of asks.
    */
@@ -1128,8 +1125,6 @@ export class CoordinationBroker {
       thread,
       threadTries: 1,
       asks: new Map(),
-      // What the project already had is no news to it; its start tells it, or Peer restarted.
-      boardHeard: new Set(this.writtenScopes(place.workspace, place.project)),
       settleNudges: new Map(),
       settleHeard: new Set(),
       heard: new Set(),
@@ -1462,15 +1457,19 @@ export class CoordinationBroker {
         session.branch =
           (await this.deps.branchOf(session.root).catch(() => undefined)) ?? session.branch;
         this.markDirty();
-        // The index goes with what the person asked: the agent decides, as it starts on the ask,
-        // whether somebody else does a part of it. No ranking of the works against the ask. What
-        // the news told of a work is not told again by the index, so the news comes first.
+        // One discovery batch per boundary. Tool steps use the same delta state, so late arrivals
+        // do not depend on another human prompt and the news cannot duplicate this batch.
         const fullPrompt = typeof body.prompt === "string" ? body.prompt : "";
-        const news = this.news(session);
+        const news = this.news(session, { discovery: false });
         const index =
           session.memoryMode === "memory"
             ? `Peer Memory index: ${this.cli} memory search${session.task === undefined ? "" : ` --task ${session.task}`}. Select record versions with ${this.cli} memory project --include id@version --purpose "current task".`
-            : this.advise(session, "index", () => this.askIndexFor(session, fullPrompt), null);
+            : this.advise(
+                session,
+                "index",
+                () => this.discoveryFor(session, askedByPerson(fullPrompt)),
+                null,
+              );
         return context(event, [news, index].filter((part) => part !== null).join("\n\n") || null);
       }
       case "PreToolUse":
@@ -2145,7 +2144,11 @@ export class CoordinationBroker {
    */
   private news(
     session: LocalSession,
-    options: { readonly team?: boolean; readonly waking?: boolean } = {},
+    options: {
+      readonly team?: boolean;
+      readonly waking?: boolean;
+      readonly discovery?: boolean;
+    } = {},
   ): string | null {
     const view = this.merged(session.workspace, this.views.get(session.workspace));
     const news = newsFor({
@@ -2180,7 +2183,9 @@ export class CoordinationBroker {
         session.memoryMode === "memory" ? null : this.findingNews(session),
         this.advise(session, "followed", () => this.followedNews(session), null),
         this.advise(session, "governs", () => this.governsNews(session), null),
-        this.boardNewsFor(session),
+        options.discovery === false || session.memoryMode === "memory"
+          ? null
+          : this.advise(session, "index", () => this.discoveryFor(session), null),
       );
     }
     const said = parts.filter((part) => part !== null);
@@ -2468,9 +2473,6 @@ export class CoordinationBroker {
     await Promise.race([this.mirrorBoard(session.workspace), sleepMs(BOARD_START_WAIT_MS)]);
     await this.ensureKnowledge(session).catch(() => undefined);
     const works = this.indexWorks(session, INDEX_ALL);
-    for (const scope of this.writtenScopes(session.workspace, session.project)) {
-      session.boardHeard.add(scope);
-    }
     // A new conversation, or one that was compacted, knows nothing of the others' work yet: what
     // each builds comes with its next ask.
     session.told.clear();
@@ -3246,13 +3248,6 @@ export class CoordinationBroker {
     return `${this.deps.nameOf(workspace, other.email)}'s agent (${agent}${doing}${where}${at})`;
   }
 
-  /** The written shared contexts of a project the hub lists, by scope. */
-  private writtenScopes(workspace: string, project: string): string[] {
-    return (this.views.get(workspace)?.contexts ?? [])
-      .filter((c) => c.project === project && c.version > 0)
-      .map((c) => c.scope);
-  }
-
   /**
    * The project's other works as an agent on `session`'s could hear of them: each task (or the
    * work outside tasks) with agents at work on it or a recent shared context, and what each says
@@ -3281,7 +3276,9 @@ export class CoordinationBroker {
       ...others.map((s) => scopeOf(s.task)),
       ...unfinished.map((thread) => scopeOf(thread.task)),
     ]);
-    scopes.delete(own);
+    // Two ordinary threads need not have explicit task assignments to discover each other.
+    // Their shared project scope still has a single keeper; never invent tasks from prompt text.
+    if (!others.some((other) => scopeOf(other.task) === own)) scopes.delete(own);
     return [...scopes].flatMap((scope) => {
       const context = contexts.find((c) => c.scope === scope);
       const agents = others.filter((s) => scopeOf(s.task) === scope);
@@ -3316,6 +3313,20 @@ export class CoordinationBroker {
                 : `${this.deps.nameOf(workspace, context.keeper.email)}'s agent`,
             version: context?.version,
             gist: context?.gist,
+            activity:
+              agents.length === 0
+                ? undefined
+                : `${plural(agents.length, "agent")}: ${agents
+                    .slice(0, 2)
+                    .map((s) => s.intent || s.label)
+                    .join("; ")}`,
+            files: [
+              ...new Set(
+                agents.flatMap((s) =>
+                  [...s.files, ...s.claims].filter((path) => !path.startsWith("task:")),
+                ),
+              ),
+            ].slice(-3),
             // A copy that is behind the hub's version is no copy of the context the line names.
             path:
               mirror !== undefined && mirror.version > 0 && mirror.version === context?.version
@@ -3367,26 +3378,6 @@ export class CoordinationBroker {
     });
   }
 
-  /** Work that showed up on the project since the session last heard: told once, at its next step. */
-  private boardNewsFor(session: LocalSession): string | null {
-    const fresh = this.board(session, BOARD_ALL)
-      .filter((entry) => (entry.version ?? 0) > 0 && !session.boardHeard.has(entry.scope))
-      .slice(0, 3);
-    if (fresh.length === 0) return null;
-    for (const entry of fresh) {
-      session.boardHeard.add(entry.scope);
-      // The news carries the line with its gist: the next ask need not say it again.
-      session.told.set(entry.scope, gistKey(entry));
-    }
-    const text = boardNews(fresh, this.cli, Date.now());
-    this.log("board.told", {
-      session: session.id,
-      scopes: fresh.map((entry) => entry.scope),
-      text,
-    });
-    return text;
-  }
-
   // ---- the index: what the agent chooses its context from ----
 
   /**
@@ -3424,13 +3415,12 @@ export class CoordinationBroker {
       version,
       text: text.slice(0, SHARED_MAX_BYTES),
       notifiedVersion: version,
-      toldAt: Date.now(),
+      toldAt: 0,
     });
     if (session.read.size > READ_KEPT) {
       const oldest = session.read.keys().next().value;
       if (oldest !== undefined) session.read.delete(oldest);
     }
-    session.boardHeard.add(scope);
     const row = this.works(session).find((work) => work.entry.scope === scope);
     this.noteAdvice(session, {
       about: "work",
@@ -3444,7 +3434,6 @@ export class CoordinationBroker {
 
   /** The agent asked a work's agents. */
   private markAsked(session: LocalSession, scope: string) {
-    session.boardHeard.add(scope);
     const row = this.works(session).find((work) => work.entry.scope === scope);
     this.noteAdvice(session, {
       about: "work",
@@ -3457,29 +3446,20 @@ export class CoordinationBroker {
   }
 
   /**
-   * What goes with an ask of the agent's person: the other works it was not told of yet, or whose
-   * gist changed since, by name and with what each says it builds. Peer does not say which of them
-   * relate to the ask: the agent reads the block, in the inference it runs anyway, and decides.
-   *
-   * It is said once. The agent was told what it was told; a block that repeated it would stay in
-   * its context and be read in every turn after. So an ask with nothing new gets nothing, or one
-   * line after a pause. A project with no other work (only its `.ai`) gets nothing at an ask: the
-   * start named its entries, and an entry that governs a file says so when the file is changed.
+   * New work and changed versions, at a prompt or tool boundary. No semantic ranking: the agent
+   * chooses using its normal inference. Already-read contexts have their own exact-version
+   * notices. Silent steps add nothing; a human prompt after a pause may get a one-line reminder.
    */
-  private askIndexFor(session: LocalSession, prompt: string): string | null {
-    if (!askedByPerson(prompt)) return null;
-    const works = this.indexWorks(session, INDEX_ALL);
+  private discoveryFor(session: LocalSession, remind = false): string | null {
+    const works = this.indexWorks(session, Number.POSITIVE_INFINITY);
     if (works.length === 0) return null;
-    // What the agent read, or asked the agents of, it knows more of than a gist says.
+    // Asking alone is not a read and does not unsubscribe the agent from changes.
     const fresh = works.filter(
-      (entry) =>
-        entry.read === undefined &&
-        entry.asked !== true &&
-        session.told.get(entry.scope) !== gistKey(entry),
+      (entry) => entry.read === undefined && session.told.get(entry.scope) !== discoveryKey(entry),
     );
     const now = Date.now();
     if (fresh.length === 0) {
-      if (now - session.askIndexAt < ASK_REMIND_MS) return null;
+      if (!remind || now - session.askIndexAt < ASK_REMIND_MS) return null;
       session.askIndexAt = now;
       this.log("index.asked", { session: session.id, kind: "reminder", works: [] });
       return askReminderText(this.cli);
@@ -3495,13 +3475,15 @@ export class CoordinationBroker {
     if (text === null) return null;
     // Only the works the block gave the gist of are told: the rest come with the next ask.
     const gisted = fresh.slice(0, ASK_GIST_SHOWN);
-    for (const entry of gisted) session.told.set(entry.scope, gistKey(entry));
+    for (const entry of gisted) session.told.set(entry.scope, discoveryKey(entry));
     session.askIndexAt = now;
     this.log("index.asked", {
       session: session.id,
+      boundary: remind ? "prompt" : "step",
       kind: changed ? "changed" : "first",
       works: fresh.slice(0, ASK_INDEX_SHOWN).map((entry) => entry.scope),
       told: gisted.map((entry) => entry.scope),
+      versions: gisted.map((entry) => ({ scope: entry.scope, version: entry.version ?? 0 })),
       knowledge,
     });
     return text;
@@ -4136,8 +4118,6 @@ export class CoordinationBroker {
           cli: this.cli,
         });
         this.markSeen(session);
-        for (const entry of board)
-          if ((entry.version ?? 0) > 0) session.boardHeard.add(entry.scope);
         return out;
       }
       case "note": {
@@ -4336,22 +4316,29 @@ export class CoordinationBroker {
         // The project's other work and its `.ai`, as at a start but all of it.
         await this.syncNow(session.workspace, 3000);
         await this.ensureKnowledge(session);
-        const works = this.indexWorks(session, INDEX_ALL);
-        for (const entry of works)
-          if ((entry.version ?? 0) > 0) session.boardHeard.add(entry.scope);
-        return (
+        const all = this.indexWorks(session, Number.POSITIVE_INFINITY);
+        const pages = Math.max(1, Math.ceil(all.length / INDEX_ALL));
+        const page = Number(plain[0] ?? 1);
+        if (!Number.isInteger(page) || page < 1 || page > pages)
+          return `peer: choose an index page from 1 to ${pages}: ${this.cli} index <page>.`;
+        const works = all.slice((page - 1) * INDEX_ALL, page * INDEX_ALL);
+        for (const entry of works) session.told.set(entry.scope, discoveryKey(entry));
+        const result =
           indexText({
             works,
-            knowledge: knowledgeIndexText(this.knowledgeBook(session), {
-              cli: this.cli,
-              shown: 40,
-            }),
+            knowledge:
+              page === 1
+                ? knowledgeIndexText(this.knowledgeBook(session), {
+                    cli: this.cli,
+                    shown: 40,
+                  })
+                : null,
             now: Date.now(),
             cli: this.cli,
             shown: INDEX_ALL,
             full: true,
-          }) ?? "peer: no other work on this project now, and no `.ai` knowledge in this checkout."
-        );
+          }) ?? "peer: no other work on this project now, and no `.ai` knowledge in this checkout.";
+        return `${result}${pages > 1 ? `\nPage ${page}/${pages}.${page < pages ? ` Next: ${this.cli} index ${page + 1}` : ""}` : ""}`;
       }
       case "knowledge":
         return this.knowledgeCli(session, text);
