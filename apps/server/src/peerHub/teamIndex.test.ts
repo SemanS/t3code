@@ -312,8 +312,8 @@ describe("what changed in a context the agent read", () => {
     );
   });
 
-  it("says nothing when no line differs and counts a full rewrite without listing it", () => {
-    assert.isNull(followedChange(input(`${before}\n\n`)));
+  it("announces a format-only version and counts a full rewrite without listing it", () => {
+    assert.include(followedChange(input(`${before}\n\n`)), "0 lines added, 0 dropped");
     const rewritten =
       followedChange(
         input(Array.from({ length: 60 }, (_, i) => `a new line number ${i}`).join("\n")),

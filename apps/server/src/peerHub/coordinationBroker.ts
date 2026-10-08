@@ -507,8 +507,10 @@ interface SharedMirror {
 
 /** A work's context as an agent read it, to tell it what changed there since. */
 interface ReadWork {
-  version: number;
-  text: string;
+  readonly version: number;
+  readonly text: string;
+  /** A change notice is not a read receipt: retain the exact input above until an explicit read. */
+  notifiedVersion: number;
   /** When it was last told of a change, or read it. */
   toldAt: number;
 }
@@ -3418,7 +3420,12 @@ export class CoordinationBroker {
    */
   private markRead(session: LocalSession, scope: string, version: number, text: string) {
     session.read.delete(scope);
-    session.read.set(scope, { version, text: text.slice(0, SHARED_MAX_BYTES), toldAt: Date.now() });
+    session.read.set(scope, {
+      version,
+      text: text.slice(0, SHARED_MAX_BYTES),
+      notifiedVersion: version,
+      toldAt: Date.now(),
+    });
     if (session.read.size > READ_KEPT) {
       const oldest = session.read.keys().next().value;
       if (oldest !== undefined) session.read.delete(oldest);
@@ -3511,7 +3518,7 @@ export class CoordinationBroker {
       if (told.length >= 2) break;
       if (now - read.toldAt < FOLLOW_GAP_MS) continue;
       const mirror = this.shared.get(this.sharedKey(session.workspace, session.project, scope));
-      if (mirror === undefined || mirror.version <= read.version || !contextWritten(mirror.text)) {
+      if (mirror === undefined || mirror.version <= read.notifiedVersion) {
         continue;
       }
       const text = followedChange({
@@ -3526,11 +3533,8 @@ export class CoordinationBroker {
             : this.deps.nameOf(mirror.workspace, mirror.updatedBy),
         cli: this.cli,
       });
-      // Whatever it said, this is the version the agent has now.
-      read.version = mirror.version;
-      read.text = mirror.text.slice(0, SHARED_MAX_BYTES);
+      read.notifiedVersion = mirror.version;
       read.toldAt = now;
-      if (text === null) continue;
       told.push(text);
       this.log("follow.told", { session: session.id, scope, version: mirror.version, text });
     }

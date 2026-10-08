@@ -302,7 +302,12 @@ describe("peer find reservations", () => {
       const session = fixture.broker["sessions"].get("claude:one")!;
       session.task = "prices";
       session.claims = ["area:pricing"];
-      session.read.set("task:other", { version: 4, text: "An interface", toldAt: Date.now() });
+      session.read.set("task:other", {
+        version: 4,
+        text: "An interface",
+        notifiedVersion: 4,
+        toldAt: Date.now(),
+      });
       const original = fixture.broker["answerHook"];
       fixture.broker["answerHook"] = async () => ({
         hookSpecificOutput: {
@@ -1381,6 +1386,50 @@ describe("the hub decides an edit", () => {
 });
 
 describe("exact shared-context reads", () => {
+  it("notifies about new versions without advancing the version actually read", async () => {
+    const initial = {
+      project: "app",
+      scope: "task:other",
+      version: 1,
+      text: "# Contract\nOpen includes blocked.",
+      updatedAt: new Date().toISOString(),
+    };
+    let current = initial;
+    const receipts: number[] = [];
+    const fixture = await brokerFixture(() => ({
+      readContext: async () => current,
+      contextRead: async (_workspace, project, scope, session, version) => {
+        receipts.push(version);
+        return { project, scope, session, version, environment: "test", at: initial.updatedAt };
+      },
+    }));
+    try {
+      await fixture.register("reader");
+      fixture.broker["syncNow"] = async () => {};
+      const session = fixture.broker["sessions"].get("claude:reader")!;
+      await fixture.broker["contextCli"](session, initial.scope, undefined);
+      current = { ...initial, version: 2, text: "# Contract\nOpen excludes blocked." };
+      await fixture.broker["mirror"]("acme", current);
+      session.read.get(initial.scope)!.toldAt = 0;
+      expect(fixture.broker["followedNews"](session)).toContain("version 2");
+      expect(session.read.get(initial.scope)).toMatchObject({ version: 1, text: initial.text });
+      expect(receipts).toEqual([1]);
+      session.read.get(initial.scope)!.toldAt = 0;
+      expect(fixture.broker["followedNews"](session)).toBeNull();
+
+      await fixture.broker["contextCli"](session, initial.scope, undefined);
+      expect(session.read.get(initial.scope)).toMatchObject({ version: 2, text: current.text });
+      expect(receipts).toEqual([1, 2]);
+      // Even a format-only new version needs a new exact receipt before handoff.
+      await fixture.broker["mirror"]("acme", { ...current, version: 3, text: `${current.text}\n` });
+      session.read.get(initial.scope)!.toldAt = 0;
+      expect(fixture.broker["followedNews"](session)).toContain("version 3");
+      expect(session.read.get(initial.scope)?.version).toBe(2);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
   it("returns the exact recorded text while a newer mirror arrives", async () => {
     const recording = Promise.withResolvers<void>();
     const confirm = Promise.withResolvers<void>();
