@@ -682,7 +682,7 @@ describe("the project's other work", () => {
       nameOf,
       cliPath: "/c/bin/peer",
     });
-    assert.include(codex, "(/c/bin/peer). Run it as a command of its own, not chained with others");
+    assert.include(codex, "(/c/bin/peer) as a standalone command");
   });
 
   it("shows peer status by work: the caller's own, then the rest of the project", () => {

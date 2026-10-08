@@ -3422,6 +3422,7 @@ export class CoordinationBroker {
       if (oldest !== undefined) session.read.delete(oldest);
     }
     const row = this.works(session).find((work) => work.entry.scope === scope);
+    if (row !== undefined) session.told.set(scope, discoveryKey({ ...row.entry, read: version }));
     this.noteAdvice(session, {
       about: "work",
       scope,
@@ -3454,9 +3455,7 @@ export class CoordinationBroker {
     const works = this.indexWorks(session, Number.POSITIVE_INFINITY);
     if (works.length === 0) return null;
     // Asking alone is not a read and does not unsubscribe the agent from changes.
-    const fresh = works.filter(
-      (entry) => entry.read === undefined && session.told.get(entry.scope) !== discoveryKey(entry),
-    );
+    const fresh = works.filter((entry) => session.told.get(entry.scope) !== discoveryKey(entry));
     const now = Date.now();
     if (fresh.length === 0) {
       if (!remind || now - session.askIndexAt < ASK_REMIND_MS) return null;
@@ -3500,25 +3499,27 @@ export class CoordinationBroker {
       if (told.length >= 2) break;
       if (now - read.toldAt < FOLLOW_GAP_MS) continue;
       const mirror = this.shared.get(this.sharedKey(session.workspace, session.project, scope));
-      if (mirror === undefined || mirror.version <= read.notifiedVersion) {
+      const metadata = this.views
+        .get(session.workspace)
+        ?.contexts?.find((entry) => entry.project === session.project && entry.scope === scope);
+      const version = Math.max(metadata?.version ?? 0, mirror?.version ?? 0);
+      if (version <= read.notifiedVersion) {
         continue;
       }
+      const author = metadata?.updatedBy ?? mirror?.updatedBy;
       const text = followedChange({
         handle: this.handleOf(session.workspace, session.project, scope),
         name: this.subjectOf(session.workspace, session.project, scope),
-        version: mirror.version,
+        version,
         before: read.text,
-        after: mirror.text,
-        by:
-          mirror.updatedBy === undefined
-            ? undefined
-            : this.deps.nameOf(mirror.workspace, mirror.updatedBy),
+        ...(mirror?.version === version && !mirror.unsent ? { after: mirror.text } : {}),
+        by: author === undefined ? undefined : this.deps.nameOf(session.workspace, author),
         cli: this.cli,
       });
-      read.notifiedVersion = mirror.version;
+      read.notifiedVersion = version;
       read.toldAt = now;
       told.push(text);
-      this.log("follow.told", { session: session.id, scope, version: mirror.version, text });
+      this.log("follow.told", { session: session.id, scope, version, text });
     }
     return told.length === 0 ? null : told.join("\n\n");
   }
@@ -4065,7 +4066,13 @@ export class CoordinationBroker {
     args: ReadonlyArray<string>,
     headers: NodeHttp.IncomingHttpHeaders,
   ): Promise<string> {
-    if (command === "help") return this.help();
+    if (
+      command === "help" ||
+      command === "--help" ||
+      command === "-h" ||
+      (args.length === 1 && (args[0] === "--help" || args[0] === "-h"))
+    )
+      return this.help();
     const session = await this.callerOf(headers);
     if (session === null) {
       throw new CliError(
@@ -4229,6 +4236,7 @@ export class CoordinationBroker {
       }
       case "review":
       case "done": {
+        if (args.length > 0) throw new CliError(400, `peer: ${command} takes no arguments.`);
         if (session.task === undefined || this.deps.finishTask === undefined)
           return "peer: this session must be on a task to hand it off.";
         const refusal = await this.handoffRefusal(session);
@@ -4501,9 +4509,11 @@ export class CoordinationBroker {
       `  ${cli} resolve "<agreement>"      close your open overlaps with what was agreed`,
       `  ${cli} claim <path>... [--intent "<why>"]   files or directories/ you are about to change`,
       `  ${cli} release [<path>...]        drop claims`,
-      `  ${cli} index                      the project's other work and its .ai, to choose what you need from`,
+      `  ${cli} index [<page>]             the project's work and its .ai, to choose what you need from`,
       `  ${cli} context [<task>] [history|<version>]  a work's shared context (yours by default), its versions, or one`,
       `  ${cli} ack <task>                 explicitly accept a changed shared context version`,
+      `  ${cli} review                     hand your assigned task over for review after publishing context and checking inputs`,
+      `  ${cli} done                       finish your assigned task only after all linked PRs have merged`,
       `  ${cli} log [--task <key>] [--path <path>] committed coordination history`,
       `  ${cli} knowledge [<id or words>]  the project's decisions, conventions, learnings and incidents: list, search or read one`,
       `  ${cli} find "<what you will do>"   a model looks for what bears on it, when you cannot tell`,

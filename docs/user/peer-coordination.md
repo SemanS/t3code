@@ -42,5 +42,15 @@ in herdr is not evidence that the agent read or used the update.
 Agents use `peer context` to read shared work with an exact version, and `peer log` to inspect its
 coordination history. If an input changed, read its current context before accepting it with
 `peer ack <task>`. A declared task cannot enter review or finish while its shared inputs are stale.
+Describe the work normally: you do not need to name the other agents or put Peer commands in your
+prompt. Peer supplies a short index of team activity and announces new work and context versions
+during the run. Agents choose relevant inputs, read their exact versions, and check changes before
+handing a task over for review. Two threads without task assignments still see each other through
+the project's shared context. Task-specific handoff requires a task assignment in Work.
+
+A change notice does not count as reading the new version. When an agent publishes its own updated
+context, its existing receipt advances with that publication; colleagues still need to read the
+update themselves.
+
 The task's history lets team members check these changes without opening another agent's private
 conversation. Saved context survives its author's session; a new keeper can continue the work.

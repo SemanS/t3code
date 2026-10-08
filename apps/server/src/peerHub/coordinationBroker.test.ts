@@ -92,6 +92,37 @@ async function brokerFixture(overrides?: (deps: BrokerDeps) => Partial<BrokerDep
 }
 
 describe("peer find reservations", () => {
+  it("shows command help without changing task state and rejects handoff arguments", async () => {
+    const finishTask = vi.fn(async () => undefined);
+    const staleReads = vi.fn(async () => ({ fresh: true, reads: [], stale: [] }));
+    const fixture = await brokerFixture(() => ({
+      taskOf: () => "work",
+      finishTask,
+      staleReads,
+    }));
+    try {
+      await fixture.register("help");
+      const headers = { "x-peer-session": "claude:help" };
+      for (const command of ["review", "done", "release"]) {
+        for (const arg of ["--help", "-h"]) {
+          expect(await fixture.broker["runCli"](command, [arg], headers)).toContain("peer review");
+        }
+      }
+      expect(await fixture.broker["runCli"]("--help", [], {})).toContain("peer review");
+      for (const command of ["review", "done"]) {
+        await expect(fixture.broker["runCli"](command, ["unexpected"], headers)).rejects.toThrow(
+          "takes no arguments",
+        );
+      }
+      expect(staleReads).not.toHaveBeenCalled();
+      expect(finishTask).not.toHaveBeenCalled();
+      expect(await fixture.broker["runCli"]("review", [], headers)).toContain("moved to review");
+      expect(finishTask).toHaveBeenCalledOnce();
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
   it("returns a failure status when a CLI caller has no registered session", async () => {
     const fixture = await brokerFixture();
     try {
@@ -1533,6 +1564,63 @@ describe("automatic team discovery", () => {
       await fixture.dispose();
     }
   });
+
+  it.each([false, true])(
+    "notifies a read dependency without an exact committed mirror (pending edit: %s) and still discovers activity",
+    async (pendingEdit) => {
+      const initial = {
+        project: "app",
+        scope: "task:counts",
+        version: 1,
+        text: "Contract v1",
+        updatedAt: new Date().toISOString(),
+        gist: "Counts",
+      };
+      const fixture = await brokerFixture(() => ({ readContext: async () => initial }));
+      try {
+        await fixture.register("reader");
+        fixture.broker["syncNow"] = async () => {};
+        const view: HubCoordView = {
+          sessions: [other("codex:counts")],
+          contexts: [initial],
+          overlaps: [],
+          at: initial.updatedAt,
+        };
+        fixture.broker["views"].set("acme", view);
+        const session = fixture.broker["sessions"].get("claude:reader")!;
+        await fixture.broker["contextCli"](session, initial.scope, undefined);
+        const current = { ...initial, version: 2, gist: "Corrected counts" };
+        fixture.broker["views"].set("acme", { ...view, contexts: [current] });
+        if (pendingEdit) {
+          const mirror = await fixture.broker["mirror"]("acme", {
+            ...current,
+            text: "Not committed\nWrong\nDiff",
+          });
+          mirror.unsent = true;
+        }
+        const notice = fixture.broker["news"](session)!;
+        expect(notice).toContain("version 2");
+        expect(notice).not.toContain("lines added");
+        expect(notice).not.toContain("Corrected counts");
+        expect(session.read.get(initial.scope)?.version).toBe(1);
+        expect(fixture.broker["news"](session)).toBeNull();
+
+        // v3's dedicated notice is throttled, but an agent joining must not disappear with it.
+        fixture.broker["views"].set("acme", {
+          ...view,
+          contexts: [{ ...current, version: 3 }],
+          sessions: [...view.sessions, other("claude:joined", { label: "Audit blockers" })],
+        });
+        const activity = fixture.broker["news"](session)!;
+        expect(activity).toContain("Audit blockers");
+        expect(activity).toContain("[v3]");
+        expect(session.read.get(initial.scope)?.version).toBe(1);
+        expect(fixture.broker["news"](session)).toBeNull();
+      } finally {
+        await fixture.dispose();
+      }
+    },
+  );
 });
 
 describe("exact shared-context reads", () => {
